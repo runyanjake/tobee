@@ -1,10 +1,10 @@
-package integration
+package agent
 
 import "context"
 
 // Integration is implemented by any external adapter (Discord, Slack, webhooks, etc.).
 // Each integration is responsible for connecting to its service, routing inbound
-// messages to the core, and sending outbound responses.
+// messages to the agent, and sending outbound responses.
 type Integration interface {
 	// Name returns a human-readable identifier used in logs.
 	Name() string

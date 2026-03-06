@@ -6,14 +6,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"tobee/integrations"
 	"tobee/integrations/discord"
 	"tobee/integrations/memory"
-	"tobee/internal/actions"
+	"tobee/internal/agent"
 	"tobee/internal/ai"
-	"tobee/internal/core"
-	"tobee/internal/state"
-	"tobee/internal/triggers"
 
 	chromem "github.com/philippgille/chromem-go"
 	"github.com/joho/godotenv"
@@ -32,16 +28,14 @@ func main() {
 		aiModel = "local-model"
 	}
 
-	// --- Core ---
-	s := state.New()
+	// --- Agent ---
+	s := agent.New()
 	if err := s.LoadContextDir("context"); err != nil {
 		log.Fatalf("loading context dir: %v", err)
 	}
 
-	actions.Register(s)
-
 	aiClient := ai.NewClient(aiURL, aiModel)
-	engine := triggers.NewEngine(s)
+	observations := agent.NewObservationEngine(s)
 
 	chatTmpl, err := ai.LoadTemplate("prompts/chat.md")
 	if err != nil {
@@ -62,8 +56,8 @@ func main() {
 	}
 	memory.Register(s, memStore)
 
-	queue := core.NewQueue(64)
-	loop := core.NewLoop(queue, s, aiClient, chatTmpl, memStore)
+	queue := agent.NewQueue(64)
+	loop := agent.NewLoop(queue, s, aiClient, chatTmpl, memStore)
 
 	// --- Integrations ---
 	discordBot, err := discord.New(discordToken, s, queue, os.Getenv("DISCORD_CHANNEL_ID"))
@@ -71,7 +65,7 @@ func main() {
 		log.Fatalf("creating discord integration: %v", err)
 	}
 
-	integrations := []integration.Integration{
+	integrations := []agent.Integration{
 		discordBot,
 	}
 
@@ -85,7 +79,7 @@ func main() {
 	}
 
 	loop.Start(ctx)
-	engine.Start(ctx)
+	observations.Start(ctx)
 
 	log.Println("tobee is running — press Ctrl+C to exit")
 

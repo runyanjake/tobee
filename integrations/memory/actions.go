@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"tobee/internal/agent"
 	"tobee/internal/msg"
-	"tobee/internal/state"
 )
 
 // Register wires memory actions onto s using the given Store.
-func Register(s *state.State, store *Store) {
+func Register(s *agent.State, store *Store) {
 	s.RegisterAction("memory.store", storeAction(store))
 	s.RegisterAction("memory.recall", recallAction(store))
 	s.RegisterAction("memory.forget", forgetAction(store))
@@ -20,8 +20,8 @@ func Register(s *state.State, store *Store) {
 // storeAction saves a new memory.
 // Required args: content
 // Optional args: importance (0.0–1.0, default 0.5), tags (comma-separated), id
-func storeAction(store *Store) state.ActionFunc {
-	return func(ctx context.Context, _ *state.State, args map[string]string) (string, error) {
+func storeAction(store *Store) agent.ActionFunc {
+	return func(ctx context.Context, _ *agent.State, args map[string]string) (string, error) {
 		content := args["content"]
 		if content == "" {
 			return "", fmt.Errorf("memory.store requires 'content' arg")
@@ -71,8 +71,8 @@ func storeAction(store *Store) state.ActionFunc {
 // recallAction performs a semantic search across memories.
 // Required args: query
 // Optional args: limit (default 5)
-func recallAction(store *Store) state.ActionFunc {
-	return func(ctx context.Context, _ *state.State, args map[string]string) (string, error) {
+func recallAction(store *Store) agent.ActionFunc {
+	return func(ctx context.Context, _ *agent.State, args map[string]string) (string, error) {
 		query := args["query"]
 		if query == "" {
 			return "", fmt.Errorf("memory.recall requires 'query' arg")
@@ -101,8 +101,8 @@ func recallAction(store *Store) state.ActionFunc {
 
 // forgetAction archives a memory by ID.
 // Required args: id
-func forgetAction(store *Store) state.ActionFunc {
-	return func(_ context.Context, _ *state.State, args map[string]string) (string, error) {
+func forgetAction(store *Store) agent.ActionFunc {
+	return func(_ context.Context, _ *agent.State, args map[string]string) (string, error) {
 		id := args["id"]
 		if id == "" {
 			return "", fmt.Errorf("memory.forget requires 'id' arg")
@@ -116,8 +116,8 @@ func forgetAction(store *Store) state.ActionFunc {
 
 // listAction returns all active memories, optionally filtered by tag.
 // Optional args: tag (filter by tag), limit (default 0 = all)
-func listAction(store *Store) state.ActionFunc {
-	return func(_ context.Context, _ *state.State, args map[string]string) (string, error) {
+func listAction(store *Store) agent.ActionFunc {
+	return func(_ context.Context, _ *agent.State, args map[string]string) (string, error) {
 		tag := args["tag"]
 		memories := store.List(tag)
 		if len(memories) == 0 {

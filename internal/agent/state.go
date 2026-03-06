@@ -1,4 +1,4 @@
-package state
+package agent
 
 import (
 	"context"
@@ -129,4 +129,3 @@ func (s *State) BuildSystemPrompt() string {
 
 	return strings.TrimSpace(sb.String())
 }
-

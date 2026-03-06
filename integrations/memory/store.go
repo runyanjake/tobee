@@ -167,6 +167,20 @@ func (s *Store) List(tag string) []*Memory {
 	return out
 }
 
+// SearchStrings returns up to limit active memories relevant to query as
+// formatted "[id] content" strings. Satisfies the agent.MemorySearcher interface.
+func (s *Store) SearchStrings(ctx context.Context, query string, limit int) ([]string, error) {
+	results, err := s.Search(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(results))
+	for i, m := range results {
+		out[i] = fmt.Sprintf("[%s] %s", m.ID, m.Content)
+	}
+	return out, nil
+}
+
 // Archive marks a memory as archived (soft delete).
 func (s *Store) Archive(id string) bool {
 	s.mu.Lock()

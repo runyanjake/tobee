@@ -1,4 +1,4 @@
-package core
+package agent
 
 // Queue is a buffered channel of inbound Messages from any integration.
 type Queue struct {
@@ -15,7 +15,7 @@ func (q *Queue) Push(msg Message) {
 	q.ch <- msg
 }
 
-// C returns the receive-only channel, used by the core loop to drain messages.
+// C returns the receive-only channel, used by the agent loop to drain messages.
 func (q *Queue) C() <-chan Message {
 	return q.ch
 }

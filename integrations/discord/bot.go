@@ -5,8 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"tobee/internal/core"
-	"tobee/internal/state"
+	"tobee/internal/agent"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -14,14 +13,14 @@ import (
 // Bot is a Discord integration. It implements integration.Integration.
 type Bot struct {
 	session   *discordgo.Session
-	state     *state.State
-	queue     *core.Queue
+	state     *agent.State
+	queue     *agent.Queue
 	channelID string // if set, only messages in this channel are handled
 }
 
 // New creates a Bot but does not connect yet. Call Start to open the connection.
 // channelID is optional: pass an empty string to handle messages from all channels.
-func New(token string, s *state.State, q *core.Queue, channelID string) (*Bot, error) {
+func New(token string, s *agent.State, q *agent.Queue, channelID string) (*Bot, error) {
 	session, err := discordgo.New("Bot " + token)
 	if err != nil {
 		return nil, fmt.Errorf("creating discord session: %w", err)
@@ -115,7 +114,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	}
 
 	// All other messages are queued for the core loop to process.
-	b.queue.Push(core.Message{
+	b.queue.Push(agent.Message{
 		Integration: "discord",
 		SessionID:   m.ChannelID,
 		Content:     content,
@@ -124,8 +123,8 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 
 // replyAction is registered as "reply:discord" and called by the core loop to
 // deliver a response back to the originating Discord channel.
-func (b *Bot) replyAction(ctx context.Context, _ *state.State, args map[string]string) (string, error) {
-	msg, ok := core.MessageFrom(ctx)
+func (b *Bot) replyAction(ctx context.Context, _ *agent.State, args map[string]string) (string, error) {
+	msg, ok := agent.MessageFrom(ctx)
 	if !ok {
 		return "", fmt.Errorf("reply:discord called without message context")
 	}

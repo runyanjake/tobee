@@ -1,11 +1,11 @@
-package core
+package agent
 
 import (
 	"context"
 	"tobee/internal/msg"
 )
 
-// Message is an alias for msg.Message so callers only need to import core.
+// Message is an alias for msg.Message so callers only need to import agent.
 type Message = msg.Message
 
 // WithMessage attaches m to ctx so downstream handlers can retrieve it.
