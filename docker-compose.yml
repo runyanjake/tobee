@@ -1,0 +1,11 @@
+services:
+  tobee:
+    build: .
+    env_file: .env
+    volumes:
+      # Mount the local context/ directory so you can update files without rebuilding.
+      - ./context:/app/context
+    extra_hosts:
+      # Allows the container to reach LM Studio on the host machine.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
