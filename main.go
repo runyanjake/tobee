@@ -8,12 +8,14 @@ import (
 	"syscall"
 	"tobee/integrations"
 	"tobee/integrations/discord"
+	"tobee/integrations/memory"
 	"tobee/internal/actions"
 	"tobee/internal/ai"
 	"tobee/internal/core"
 	"tobee/internal/state"
 	"tobee/internal/triggers"
 
+	chromem "github.com/philippgille/chromem-go"
 	"github.com/joho/godotenv"
 )
 
@@ -46,8 +48,22 @@ func main() {
 		log.Fatalf("loading chat template: %v", err)
 	}
 
+	// --- Memory ---
+	// If AI_EMBED_MODEL is set, vector search is enabled via the embedding endpoint.
+	// Otherwise the store falls back to keyword search.
+	var embeddingFunc chromem.EmbeddingFunc
+	if embedModel := os.Getenv("AI_EMBED_MODEL"); embedModel != "" {
+		embeddingFunc = chromem.NewEmbeddingFuncOpenAICompat(aiURL, "", embedModel, nil)
+		log.Printf("memory: using embedding model %q", embedModel)
+	}
+	memStore, err := memory.NewStore(context.Background(), embeddingFunc)
+	if err != nil {
+		log.Fatalf("creating memory store: %v", err)
+	}
+	memory.Register(s, memStore)
+
 	queue := core.NewQueue(64)
-	loop := core.NewLoop(queue, s, aiClient, chatTmpl)
+	loop := core.NewLoop(queue, s, aiClient, chatTmpl, memStore)
 
 	// --- Integrations ---
 	discordBot, err := discord.New(discordToken, s, queue, os.Getenv("DISCORD_CHANNEL_ID"))

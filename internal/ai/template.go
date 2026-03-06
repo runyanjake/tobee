@@ -47,6 +47,7 @@ func (t *ChatTemplate) Render(data any) (string, error) {
 type ChatData struct {
 	UserRequest string
 	Tools       []ToolDef
+	Memories    []string // relevant memories recalled for this request
 }
 
 // ToolDef describes an action exposed to the AI in the chat template.

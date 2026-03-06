@@ -1,57 +1,77 @@
 # Tool Reference
 
-Tobee can invoke tools by including them in the `tool_calls` array of the response JSON.
-Both `response` and `tool_calls` are optional — use whichever is appropriate.
-
 ## Response Format
 
+Every response MUST be a JSON object with both fields present:
+
 ```json
-{
-  "response": "Conversational reply to the user (omit if using tool_calls only)",
-  "tool_calls": [
-    { "name": "tool_name", "args": { "param": "value" } }
-  ]
-}
+{"response": "reply text or empty string", "tool_calls": []}
 ```
 
-`response` is sent back to the user automatically. `tool_calls` are executed in order after the response is delivered.
+- `response`: your reply to the user. Set to `""` if you are only making tool calls.
+- `tool_calls`: array of tool invocations. Set to `[]` if none are needed.
+
+Tool calls are executed after the response is delivered to the user.
 
 ---
 
 ## Available Tools
 
-### set_context
-Store a named value in runtime memory. Useful for tracking user preferences, ongoing tasks, or any state that should persist across messages.
+## Memory Tools
 
-| Parameter | Type   | Required | Description          |
-|-----------|--------|----------|----------------------|
-| key       | string | yes      | Name of the variable |
-| value     | string | yes      | Value to store       |
+Use memory tools proactively. When the user mentions a preference, fact, name, or goal — store it immediately. When answering a question where prior context might exist — recall first. You do not need to ask permission to store or recall memories; it is expected behaviour.
 
-```json
-{ "name": "set_context", "args": { "key": "user_name", "value": "Alice" } }
-```
+### memory.store
+Persist a piece of information to long-term memory. Use whenever the user shares something worth keeping: preferences, facts, goals, names, corrections.
 
-### get_context
-Retrieve a previously stored value from runtime memory.
-
-| Parameter | Type   | Required | Description          |
-|-----------|--------|----------|----------------------|
-| key       | string | yes      | Name of the variable |
+| Parameter  | Type   | Required | Description                                      |
+|------------|--------|----------|--------------------------------------------------|
+| content    | string | yes      | The fact or information to remember              |
+| importance | float  | no       | Salience score 0.0–1.0 (default 0.5)            |
+| tags       | string | no       | Comma-separated thematic labels, e.g. `preference,discord` |
+| id         | string | no       | Stable identifier; auto-generated if omitted     |
 
 ```json
-{ "name": "get_context", "args": { "key": "user_name" } }
+{ "name": "memory.store", "args": { "content": "User prefers responses in bullet points", "importance": "0.8", "tags": "preference,format" } }
 ```
 
-### clear_context
-Remove a stored value from runtime memory.
+### memory.recall
+Search long-term memory for entries semantically related to a query. Use this when you need to remember something but it was not included in the current context.
+
+| Parameter | Type   | Required | Description                              |
+|-----------|--------|----------|------------------------------------------|
+| query     | string | yes      | Natural-language search query            |
+| limit     | int    | no       | Max results to return (default 5)        |
+
+```json
+{ "name": "memory.recall", "args": { "query": "user display preferences" } }
+```
+
+### memory.list
+List all active memory IDs and their content. Use this to discover what has been stored before deciding what to recall or forget.
+
+| Parameter | Type   | Required | Description                                      |
+|-----------|--------|----------|--------------------------------------------------|
+| tag       | string | no       | Filter to memories with this tag                 |
+| limit     | int    | no       | Max results to return (default: all)             |
+
+```json
+{ "name": "memory.list", "args": {} }
+```
+
+```json
+{ "name": "memory.list", "args": { "tag": "preference", "limit": "10" } }
+```
+
+### memory.forget
+Archive a memory so it is no longer surfaced in future recall. Use when a stored fact is outdated or explicitly retracted by the user.
 
 | Parameter | Type   | Required | Description              |
 |-----------|--------|----------|--------------------------|
-| key       | string | yes      | Name of the variable to remove |
+| id        | string | yes      | ID of the memory to archive |
 
 ```json
-{ "name": "clear_context", "args": { "key": "user_name" } }
+{ "name": "memory.forget", "args": { "id": "mem_42" } }
 ```
 
 ### echo
@@ -73,4 +93,4 @@ Messages received from Discord include context about the originating channel and
 Replies are delivered back to the same channel automatically via the `response` field.
 
 No explicit tool call is needed to reply — use `response` for that.
-Tool calls from this integration are for side-effects: storing context, triggering actions, etc.
+Relevant memories are automatically injected into each message under **Recalled Memories** when available.

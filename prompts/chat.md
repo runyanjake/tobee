@@ -1,3 +1,10 @@
+{{if .Memories}}
+## Recalled Memories
+
+The following memories were retrieved as relevant context for this request:
+
+{{range .Memories}}- {{.}}
+{{end}}{{end}}
 ## User Request
 
 {{.UserRequest}}
@@ -12,16 +19,21 @@ Each tool call must include a "name" matching one of the above and an "args" map
 {{end}}
 ## Response Format
 
-You must respond with a single valid JSON object. No markdown fences. No text outside the JSON.
+Your entire output MUST be a single JSON object. No prose, no markdown fences, no text before or after it.
 
-Schema:
-- "response": string — your reply to the user
-- "tool_calls": array — tools to invoke (use empty array if none needed)
+Both fields are REQUIRED in every response:
+- `"response"`: string — your reply to the user. Use `""` if you have nothing to say (e.g. you are only making tool calls).
+- `"tool_calls"`: array — tools to invoke. Use `[]` if none are needed.
 
-Tool call shape: {"name": "<action_name>", "args": {"<key>": "<value>"}}
+Tool call shape: `{"name": "<tool_name>", "args": {"<key>": "<value>"}}`
 
-Example (no tools):
+Correct (reply only):
 {"response": "Here is your answer 🐾", "tool_calls": []}
 
-Example (with tool):
-{"response": "Done 😺", "tool_calls": [{"name": "set_context", "args": {"key": "mood", "value": "happy"}}]}
+Correct (tool call only):
+{"response": "", "tool_calls": [{"name": "memory.store", "args": {"content": "User prefers dark mode", "importance": "0.7", "tags": "preference"}}]}
+
+Correct (both):
+{"response": "Done 😺", "tool_calls": [{"name": "memory.store", "args": {"content": "User prefers dark mode", "importance": "0.7", "tags": "preference"}}]}
+
+WRONG — missing fields, extra text, or markdown fences will cause an error.
