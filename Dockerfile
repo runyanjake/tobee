@@ -16,8 +16,10 @@ RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 
 COPY --from=builder /app/tobee .
+COPY prompts ./prompts
 
-# Mount context at runtime.
-RUN mkdir -p context
+# Create mountpoints; data/ is expected to be a bind-mount so the agent's
+# memory survives container restarts.
+RUN mkdir -p data/memory data/sessions
 
 CMD ["./tobee"]

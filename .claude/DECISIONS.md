@@ -1,0 +1,187 @@
+# Decisions
+
+Lightweight ADR log. Each entry states **what was decided, why, and what
+it costs** — so future-us can tell the difference between a load-bearing
+choice and a coin flip.
+
+When a decision changes, add a new entry. Don't silently rewrite the old one.
+
+---
+
+## D-001 — Native tool-use over JSON-in-string
+
+**Status:** Accepted · **Date:** 2026-04 · Supersedes: earlier homegrown
+`{"response":..., "tool_calls":[]}` protocol.
+
+**Decision.** The LLM is called with the OpenAI `tools` / `tool_calls`
+protocol. Assistant responses are parsed as structured `tool_calls`, never
+as JSON embedded in the text body.
+
+**Why.** The homegrown protocol needed a retry loop for models that
+wrapped JSON in markdown fences, leaked `<think>` blocks, or just drifted.
+Native tool-use pushes that burden onto the provider.
+
+**Cost.** Ties us to providers that support function calling. LM Studio
+does, when the loaded model does. A model that can't do tool-use cannot be
+used with tobee as-shipped.
+
+**Don't revert** without replacing with something more structured — the
+JSON-in-string parser with retry is a local optimum we climbed out of.
+
+---
+
+## D-002 — `internal/` package prefix
+
+**Status:** Accepted · **Date:** 2026-04
+
+**Decision.** All project packages live under `internal/`. Top-level Go
+files are limited to `main.go`.
+
+**Why.** Idiomatic Go; prevents accidental imports from outside the module
+if we ever publish a library; keeps the module self-contained.
+
+**Cost.** None appreciable for a single-module app.
+
+---
+
+## D-003 — Memory sandboxed to `data/memory/`
+
+**Status:** Accepted · **Date:** 2026-04
+
+**Decision.** The `memory.*` tools can only read/write files below
+`data/memory/`. Attempts to escape via `..`, absolute paths, or Windows
+volume prefixes are rejected at the FS layer.
+
+**Why.** The agent writes what it judges useful, without human approval.
+Sandboxing limits blast radius.
+
+**Cost.** OS-level file tools (read arbitrary file, list project tree) are
+explicitly not a thing today. When they become useful they'll live in a
+separate pack with their own scoping.
+
+**Invariant.** All FS access goes through `memory.FS.resolve()`. Don't
+reach around it.
+
+---
+
+## D-004 — No vector search, no reflection cron, no MCP in phase 1
+
+**Status:** Accepted · **Date:** 2026-04
+
+**Decision.** Ship with grep-based memory search, no background
+consolidation passes, no MCP client or server.
+
+**Why.** Each has non-trivial cost to implement and maintain, and the
+benefit depends on conditions we haven't hit yet:
+
+- Vector search pays off at 100+ files or when users ask semantically
+  fuzzy questions. Our corpus is smaller.
+- Reflection passes need enough signal to merit the token spend. Day-one
+  memory is too sparse.
+- MCP pays off when consuming or exposing tools to other hosts. Today
+  tobee is both client and host.
+
+**Cost.** Each is a "when needed" backlog item. The registry, memory
+layout, and scheduler hook are shaped so adding any of them is additive.
+
+---
+
+## D-005 — Serial agent worker
+
+**Status:** Accepted · **Date:** 2026-04
+
+**Decision.** A single goroutine consumes the event bus and runs one
+envelope to completion before picking up the next.
+
+**Why.** Makes memory-file writes race-free without locks. Keeps replies
+deterministic. Avoids "two replies in parallel on the same channel" bugs.
+
+**Cost.** A message from channel A blocks a message from channel B for
+the duration of one turn (up to the `TurnBudget`). Acceptable for a
+personal agent. Not acceptable at scale — if we ever go multi-user, this
+gets revisited.
+
+---
+
+## D-006 — Single persona prompt, not multi-file
+
+**Status:** Accepted · **Date:** 2026-04 · Supersedes: prior
+`context/PROMPT.md` + `SOUL.md` + `TOOLS.md` split.
+
+**Decision.** `prompts/persona.md` is the system prompt. Tool guidance
+lives in tool `Description` fields, not a separate prompt file.
+
+**Why.** The old split made the prompt hard to reason about as one thing.
+Tool guidance belonged next to the tools anyway — the model sees it in
+every tool schema.
+
+**Cost.** Larger single file. Worth it.
+
+---
+
+## D-007 — No Discord `!command` escape hatch
+
+**Status:** Accepted · **Date:** 2026-04
+
+**Decision.** We did not port the old `!memory.list` style direct-action
+invocation from the previous implementation.
+
+**Why.** It was useful as a debugging aid during bring-up but ossified
+into a second control plane. Add it back as a proper dev surface (a
+`/debug` slash command? a CLI?) if it's needed again, not as a prefix
+hack.
+
+**Cost.** Slightly harder to poke tools without a live LLM. The tool pack
+is unit-testable directly in Go if that becomes painful.
+
+---
+
+## D-008 — `data/` is gitignored entirely
+
+**Status:** Accepted · **Date:** 2026-04
+
+**Decision.** All of `data/` is in `.gitignore`. No seed files, no
+`.gitkeep` markers.
+
+**Why.** Memory is private to each developer's install. Fresh clones
+should start empty.
+
+**Cost.** New clones have no INDEX / user profile / preferences. The code
+handles missing files gracefully — absent sections are simply skipped in
+the context builder.
+
+---
+
+## D-009 — Reply sender registry, not a `send.*` tool
+
+**Status:** Accepted · **Date:** 2026-04 · Supersedes an earlier sketch
+where integrations registered `send.discord` as a regular tool.
+
+**Decision.** Final assistant text is delivered via `agent.Replies`, a
+small integration-keyed lookup table of `ReplySender` functions. It's not
+modelled as a tool the LLM calls.
+
+**Why.** Replying is the default end-state of a turn, not a thing the
+model chooses. Making it a tool invites confusion ("when should I call
+`send.discord`?") and loses the guaranteed delivery semantic.
+
+**Cost.** Sending to a *different* channel than the originator would need
+a real tool. Not built; straightforward to add when needed.
+
+---
+
+## Open questions
+
+Not yet decided. Flag if you have an opinion.
+
+- **Streaming replies.** Progressive Discord edits with a typing indicator
+  vs. single-shot reply when done. Currently single-shot. Streaming would
+  need chunk-aware edit logic in the Discord sender.
+- **Provider abstraction.** Only target is LM Studio today; adding an
+  Anthropic backend would mean splitting the LLM client behind an
+  interface. Defer until there's a real second provider in flight.
+- **INDEX.md curation policy.** Currently "append-only by default, humans
+  do wholesale rewrites." Could let the agent own it. Risk: drift. Benefit:
+  less manual upkeep. No change until there's signal.
+- **Archive rotation.** When `current.md` exceeds a threshold, rotate to
+  `archive/<date>.md`. Simple to build, not yet built.

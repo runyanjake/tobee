@@ -3,8 +3,7 @@
     "allow": [
       "Bash(go mod tidy)",
       "Bash(go build ./...)",
-      "Bash(go vet ./...)",
-      "Bash(go get github.com/philippgille/chromem-go)"
+      "Bash(go vet ./...)"
     ]
   }
 }

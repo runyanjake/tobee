@@ -2,103 +2,152 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
-	"tobee/integrations/discord"
-	"tobee/integrations/memory"
-	"tobee/internal/agent"
-	"tobee/internal/ai"
+	"time"
 
-	chromem "github.com/philippgille/chromem-go"
 	"github.com/joho/godotenv"
+
+	"tobee/internal/agent"
+	"tobee/internal/integrations"
+	"tobee/internal/integrations/discord"
+	"tobee/internal/llm"
+	"tobee/internal/memory"
+	"tobee/internal/scheduler"
+	"tobee/internal/tools"
+	memtools "tobee/internal/tools/memory"
 )
 
 func main() {
 	if err := godotenv.Load(); err != nil {
-		log.Println("no .env file found, using environment variables")
+		os.Stderr.WriteString("no .env file found, using environment variables\n")
 	}
+
+	setupLogging()
 
 	aiURL := mustEnv("AI_PROVIDER_URL")
 	discordToken := mustEnv("DISCORD_TOKEN")
+	aiModel := envOr("AI_MODEL", "local-model")
+	discordChannelID := os.Getenv("DISCORD_CHANNEL_ID")
+	dataDir := envOr("DATA_DIR", "data")
+	promptsDir := envOr("PROMPTS_DIR", "prompts")
 
-	aiModel := os.Getenv("AI_MODEL")
-	if aiModel == "" {
-		aiModel = "local-model"
-	}
+	// --- LLM client -------------------------------------------------------
+	client := llm.NewClient(aiURL, aiModel, llm.Options{
+		Temperature: 0.7,
+		MaxTokens:   2048,
+		Timeout:     10 * time.Minute,
+	})
 
-	// --- Agent ---
-	s := agent.New()
-	if err := s.LoadContextDir("context"); err != nil {
-		log.Fatalf("loading context dir: %v", err)
-	}
-
-	aiClient := ai.NewClient(aiURL, aiModel)
-	observations := agent.NewObservationEngine(s)
-
-	chatTmpl, err := ai.LoadTemplate("prompts/chat.md")
+	// --- Memory filesystem ------------------------------------------------
+	memFS, err := memory.NewFS(dataDir + "/memory")
 	if err != nil {
-		log.Fatalf("loading chat template: %v", err)
+		slog.Error("memory: init failed", "err", err)
+		os.Exit(1)
 	}
 
-	// --- Memory ---
-	// If AI_EMBED_MODEL is set, vector search is enabled via the embedding endpoint.
-	// Otherwise the store falls back to keyword search.
-	var embeddingFunc chromem.EmbeddingFunc
-	if embedModel := os.Getenv("AI_EMBED_MODEL"); embedModel != "" {
-		embeddingFunc = chromem.NewEmbeddingFuncOpenAICompat(aiURL, "", embedModel, nil)
-		log.Printf("memory: using embedding model %q", embedModel)
-	}
-	memStore, err := memory.NewStore(context.Background(), embeddingFunc)
+	// --- Tool registry ----------------------------------------------------
+	registry := tools.NewRegistry()
+	memtools.Register(registry, memFS)
+
+	// --- Sessions + summarizer -------------------------------------------
+	sessions, err := agent.NewSessionStore(dataDir+"/sessions", 10)
 	if err != nil {
-		log.Fatalf("creating memory store: %v", err)
+		slog.Error("sessions: init failed", "err", err)
+		os.Exit(1)
 	}
-	memory.Register(s, memStore)
+	persona := readFile(promptsDir+"/persona.md", "")
+	summPrompt := readFile(promptsDir+"/summarizer.md", "")
+	summarizer := agent.NewSummarizer(client, summPrompt, sessions)
 
-	queue := agent.NewQueue(64)
-	loop := agent.NewLoop(queue, s, aiClient, chatTmpl, memStore)
+	// --- Context builder + reply table ------------------------------------
+	ctxb := &agent.ContextBuilder{
+		Persona:  persona,
+		Memory:   memFS,
+		Sessions: sessions,
+	}
+	replies := agent.NewReplies()
 
-	// --- Integrations ---
-	discordBot, err := discord.New(discordToken, s, queue, os.Getenv("DISCORD_CHANNEL_ID"))
+	// --- Event bus + agent loop ------------------------------------------
+	bus := integrations.NewBus(64)
+	loop := agent.New(bus, client, registry, sessions, ctxb, replies, summarizer, agent.Config{
+		MaxSteps:   8,
+		TurnBudget: 2 * time.Minute,
+	})
+
+	// --- Integrations -----------------------------------------------------
+	dbot, err := discord.New(discord.Config{
+		Token:     discordToken,
+		ChannelID: discordChannelID,
+	}, bus, replies)
 	if err != nil {
-		log.Fatalf("creating discord integration: %v", err)
+		slog.Error("discord: init failed", "err", err)
+		os.Exit(1)
 	}
+	active := []integrations.Integration{dbot}
 
-	integrations := []agent.Integration{
-		discordBot,
-	}
+	// --- Scheduler (no ticks registered day one) --------------------------
+	sched := scheduler.New(bus)
 
+	// --- Lifecycle --------------------------------------------------------
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	for _, ig := range integrations {
+	for _, ig := range active {
 		if err := ig.Start(ctx); err != nil {
-			log.Fatalf("starting integration %q: %v", ig.Name(), err)
+			slog.Error("integration: start failed", "name", ig.Name(), "err", err)
+			os.Exit(1)
 		}
 	}
-
 	loop.Start(ctx)
-	observations.Start(ctx)
+	sched.Start(ctx)
 
-	log.Println("tobee is running — press Ctrl+C to exit")
+	slog.Info("tobee is running — press Ctrl+C to exit")
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM)
 	<-sc
 
-	log.Println("shutting down...")
-	for _, ig := range integrations {
+	slog.Info("shutting down...")
+	cancel()
+	for _, ig := range active {
 		if err := ig.Stop(); err != nil {
-			log.Printf("stopping integration %q: %v", ig.Name(), err)
+			slog.Error("integration: stop failed", "name", ig.Name(), "err", err)
 		}
 	}
+}
+
+func setupLogging() {
+	level := slog.LevelInfo
+	if v := os.Getenv("DEBUG"); v == "1" || v == "true" {
+		level = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
-		log.Fatalf("required environment variable %s is not set", key)
+		slog.Error("required environment variable is not set", "key", key)
+		os.Exit(1)
 	}
 	return v
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func readFile(path, fallback string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("prompt: read failed; falling back", "path", path, "err", err)
+		return fallback
+	}
+	return string(data)
 }
