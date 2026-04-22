@@ -34,6 +34,12 @@ func main() {
 	dataDir := envOr("DATA_DIR", "data")
 	promptsDir := envOr("PROMPTS_DIR", "prompts")
 
+	sessionTTL, err := time.ParseDuration(envOr("SESSION_TTL", "168h"))
+	if err != nil {
+		slog.Error("SESSION_TTL: invalid duration", "err", err)
+		os.Exit(1)
+	}
+
 	// --- LLM client -------------------------------------------------------
 	client := llm.NewClient(aiURL, aiModel, llm.Options{
 		Temperature: 0.7,
@@ -91,6 +97,11 @@ func main() {
 	// --- Scheduler (no ticks registered day one) --------------------------
 	sched := scheduler.New(bus)
 
+	// --- Janitor: prune stale session summaries --------------------------
+	// LLM-free periodic sweep. Only touches data/sessions — long-term memory
+	// under data/memory is never deleted.
+	janitor := scheduler.NewJanitor(dataDir+"/sessions", sessionTTL, time.Hour)
+
 	// --- Lifecycle --------------------------------------------------------
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -103,6 +114,7 @@ func main() {
 	}
 	loop.Start(ctx)
 	sched.Start(ctx)
+	janitor.Start(ctx)
 
 	slog.Info("tobee is running — press Ctrl+C to exit")
 

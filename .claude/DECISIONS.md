@@ -170,6 +170,35 @@ a real tool. Not built; straightforward to add when needed.
 
 ---
 
+## D-010 — In-process janitor for session TTL
+
+**Status:** Accepted · **Date:** 2026-04-22
+
+**Decision.** Session summaries under `data/sessions/` are pruned by an
+in-process goroutine ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go))
+that wakes on a fixed interval (1h) and deletes files whose mtime is older
+than `SESSION_TTL` (default 7 days), then removes any directories that
+become empty. Long-term memory under `data/memory/` is never touched.
+
+**Why.** A sidecar container was considered and rejected as overkill for
+~50 lines of deterministic "rm old files" work. In-process:
+- Shares the deployment surface, logs, and signal handling.
+- Runs deterministically without the LLM — no envelope, no agent spend.
+- Idempotent and crash-safe: the next startup sweeps what a downtime missed.
+
+Separate from `scheduler.Scheduler`, which exists for envelope-producing
+ticks the agent should see. Cleanup is janitorial, not agent-visible.
+
+**Cost.** If tobee is down, no cleanup runs — but the next startup catches
+up. No runtime lock between janitor and summarizer; at the 7-day cutoff a
+race is near-impossible in practice, and if it happens the next summarizer
+write recreates the file.
+
+**Knob.** `SESSION_TTL` (Go duration syntax, e.g. `168h`). Non-positive
+disables the janitor entirely.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

@@ -35,6 +35,15 @@ context builder simply omits absent sections).
 Session summaries live in a parallel tree under `data/sessions/` — see
 [AGENT.md](AGENT.md#sessions).
 
+## Retention
+
+- `data/memory/` — **persists forever.** Long-term memory is never auto-deleted.
+- `data/sessions/` — pruned by the in-process janitor
+  ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go)).
+  Files whose mtime is older than `SESSION_TTL` (default 7 days) are
+  removed; directories that become empty are removed with them. See
+  [DECISIONS.md](DECISIONS.md) D-010 for the rationale.
+
 ## Tools
 
 Exposed via the tool registry (see [INTEGRATIONS.md](INTEGRATIONS.md)):
