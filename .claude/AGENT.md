@@ -98,6 +98,13 @@ Two tiers:
 The mapping from session key to filesystem path lives in
 `SessionStore.SummaryPath` — it just replaces `:` with `/`.
 
+**Idle rotation.** When a session has been idle for `SESSION_IDLE_TIMEOUT`
+(default 4h), `SessionStore.Get` (lazy) and the janitor's periodic sweep
+both rotate it: `current.md` moves to `archive/<UTC-timestamp>.md` and the
+in-memory entry is dropped, so the next message on that channel starts
+from a blank slate. Archive files live until the janitor prunes them at
+`SESSION_TTL`. See [DECISIONS.md](DECISIONS.md) D-011.
+
 ## Summarizer
 
 [internal/agent/summarizer.go](../internal/agent/summarizer.go) runs a
@@ -110,10 +117,6 @@ separate LLM call after each turn:
 
 The summarizer extracts *facts, decisions, unresolved threads* — not prose
 recap. If it fails, the reply has already been delivered; we log and move on.
-
-**Not yet built:** archive rotation. When `current.md` grows too large or a
-day boundary passes, we'll rotate it to `archive/{YYYY-MM-DD}.md` and start
-fresh. See [DECISIONS.md](DECISIONS.md) for status.
 
 ## Scheduler
 

@@ -199,6 +199,38 @@ disables the janitor entirely.
 
 ---
 
+## D-011 — Idle-based session rotation; rotate-then-prune
+
+**Status:** Accepted · **Date:** 2026-05-12 · Amends D-010.
+
+**Decision.** A session is rotated (not deleted) once it has been idle for
+`SESSION_IDLE_TIMEOUT` (default 4h). Rotation moves
+`data/sessions/<int>/<chan>/current.md` to
+`data/sessions/<int>/<chan>/archive/<UTC-timestamp>.md` and drops the
+in-memory `Session` entry. The next message on that channel therefore
+starts from an empty `Recent()` buffer with no Session Summary section in
+the system prompt.
+
+The janitor ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go))
+runs both the rotation sweep (via `SessionStore.SweepIdle`) and the
+archive cleanup. `SESSION_TTL` no longer governs `current.md` directly —
+it now controls how long files under `archive/` are retained before the
+janitor removes them.
+
+**Why.** Sessions are bursty; a quiet channel shouldn't resurrect a stale
+rolling summary on the next message a month later. Rotating preserves
+forensic history without polluting the active prompt. Two knobs let the
+"reset to fresh" window be short (hours) while the "destroy the evidence"
+window stays long (days).
+
+**Cost.** Slightly more disk usage than the original delete-on-stale
+design — bounded by `SESSION_TTL`. One extra env var to document.
+
+**Invariant.** `data/memory/` is still never touched. The archive tree
+only ever holds rotated summaries that the agent does not read.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.
@@ -212,5 +244,3 @@ Not yet decided. Flag if you have an opinion.
 - **INDEX.md curation policy.** Currently "append-only by default, humans
   do wholesale rewrites." Could let the agent own it. Risk: drift. Benefit:
   less manual upkeep. No change until there's signal.
-- **Archive rotation.** When `current.md` exceeds a threshold, rotate to
-  `archive/<date>.md`. Simple to build, not yet built.

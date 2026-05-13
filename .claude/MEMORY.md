@@ -38,11 +38,13 @@ Session summaries live in a parallel tree under `data/sessions/` — see
 ## Retention
 
 - `data/memory/` — **persists forever.** Long-term memory is never auto-deleted.
-- `data/sessions/` — pruned by the in-process janitor
-  ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go)).
-  Files whose mtime is older than `SESSION_TTL` (default 7 days) are
-  removed; directories that become empty are removed with them. See
-  [DECISIONS.md](DECISIONS.md) D-010 for the rationale.
+- `data/sessions/` — managed by the in-process janitor
+  ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go)). When
+  a channel has been idle for `SESSION_IDLE_TIMEOUT` (default 4h),
+  `current.md` is rotated to `archive/<timestamp>.md` and the in-memory
+  session is reset. Archive files are deleted once their mtime exceeds
+  `SESSION_TTL` (default 7 days); empty directories are removed with them.
+  See [DECISIONS.md](DECISIONS.md) D-010 / D-011 for the rationale.
 
 ## Tools
 
@@ -129,8 +131,5 @@ tradeoff is logged in [DECISIONS.md](DECISIONS.md).
 - **No auto-promotion from episodic → semantic.** The agent writes to
   `facts/` explicitly when it judges a fact is stable. No background job
   mines sessions for them.
-- **No archive rotation.** `current.md` grows without bound. Rotate to
-  `archive/<date>.md` when it crosses a threshold — straightforward, just
-  not done yet.
 
 See [DECISIONS.md](DECISIONS.md) for the rationale on each.
