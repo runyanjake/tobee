@@ -63,7 +63,25 @@ memory content is framed as data, not instructions, in the prompt. See
 
 ## Run
 
+### Dev (Windows desktop, LM Studio on the host)
+
 ```bash
 cp .env.example .env   # fill in DISCORD_TOKEN, point AI_PROVIDER_URL at LM Studio
 docker compose up --build
 ```
+
+### Production (Linux server with an Nvidia GPU)
+
+Bundles a GPU-backed [Ollama](https://ollama.com/) container as the LLM
+backend instead of reaching out to a host LM Studio. Requires the Nvidia
+driver and the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host.
+
+```bash
+cp .env.prod.example .env.prod   # fill in DISCORD_TOKEN, pick a tool-capable AI_MODEL
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+On first start the `ollama-pull` service downloads `AI_MODEL` into a named
+volume; tobee waits for that to finish before taking traffic. `AI_MODEL`
+must support native tool-use (e.g. `qwen2.5:7b`, `llama3.1:8b`).

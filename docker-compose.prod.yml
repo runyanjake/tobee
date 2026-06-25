@@ -1,0 +1,66 @@
+# Production deployment for the Linux server with an Nvidia GPU.
+#
+#   cp .env.prod.example .env.prod   # fill in DISCORD_TOKEN, pick AI_MODEL
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Requires the host to have the Nvidia driver + nvidia-container-toolkit
+# installed and the Docker runtime configured for GPUs:
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+#
+# Unlike docker-compose.yml (dev: points at LM Studio on the host), this
+# bundles Ollama as a GPU-backed sidecar and routes tobee's LLM calls to it.
+services:
+  # GPU-backed LLM server. Speaks the OpenAI-compatible API tobee's client
+  # expects at /v1/chat/completions on port 11434.
+  ollama:
+    image: ollama/ollama:latest
+    # Sourced for OLLAMA_KEEP_ALIVE; unrelated tobee vars here are harmless.
+    env_file: .env.prod
+    volumes:
+      # Persist pulled models so a restart doesn't re-download gigabytes.
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot: pull the configured model into Ollama, then exit. tobee waits
+  # on this completing so the first turn doesn't 404 on a missing model.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    env_file: .env.prod
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/sh", "-c", "ollama pull \"$${AI_MODEL}\""]
+    restart: "no"
+
+  tobee:
+    build: .
+    env_file: .env.prod
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    volumes:
+      # Live-reloadable prompts (edit on host, restart the process to apply).
+      - ./prompts:/app/prompts
+      # Persist the agent's memory + session summaries across restarts.
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
