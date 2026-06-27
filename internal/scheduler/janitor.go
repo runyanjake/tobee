@@ -7,10 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"tobee/internal/agent"
 )
+
+const janitorRingSize = 8
 
 // Janitor periodically rotates idle session summaries and prunes old
 // archive files under data/sessions/. It never touches data/memory/.
@@ -21,6 +24,18 @@ type Janitor struct {
 	idleTimeout time.Duration
 	archiveTTL  time.Duration
 	sweepEvery  time.Duration
+
+	mu      sync.RWMutex
+	recent  []sweepEvent // ring; head is next write
+	head    int
+	filled  bool
+	lastEnd time.Time
+}
+
+type sweepEvent struct {
+	At      time.Time
+	Rotated int
+	Pruned  int
 }
 
 // NewJanitor builds a janitor. Non-positive timeouts disable that step:
@@ -36,6 +51,7 @@ func NewJanitor(sessions *agent.SessionStore, rootDir string,
 		idleTimeout: idleTimeout,
 		archiveTTL:  archiveTTL,
 		sweepEvery:  sweepEvery,
+		recent:      make([]sweepEvent, janitorRingSize),
 	}
 }
 
@@ -76,11 +92,43 @@ func (j *Janitor) sweep() {
 		pruned = j.pruneArchives()
 	}
 	j.pruneEmptyDirs()
+	j.recordSweep(rotated, pruned)
 	if rotated > 0 || pruned > 0 {
 		slog.Info("janitor: sweep done", "rotated", rotated, "archivedPruned", pruned)
 	} else {
 		slog.Debug("janitor: sweep done (no-op)")
 	}
+}
+
+func (j *Janitor) recordSweep(rotated, pruned int) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	now := time.Now()
+	j.recent[j.head] = sweepEvent{At: now, Rotated: rotated, Pruned: pruned}
+	j.head = (j.head + 1) % len(j.recent)
+	if j.head == 0 {
+		j.filled = true
+	}
+	j.lastEnd = now
+}
+
+// snapshotSweeps returns recent sweeps in chronological order, oldest first.
+func (j *Janitor) snapshotSweeps() ([]sweepEvent, time.Time) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	n := j.head
+	if j.filled {
+		n = len(j.recent)
+	}
+	out := make([]sweepEvent, 0, n)
+	if j.filled {
+		for i := 0; i < len(j.recent); i++ {
+			out = append(out, j.recent[(j.head+i)%len(j.recent)])
+		}
+	} else {
+		out = append(out, j.recent[:j.head]...)
+	}
+	return out, j.lastEnd
 }
 
 // pruneArchives walks data/sessions/**/archive/*.md and deletes anything

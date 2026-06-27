@@ -17,23 +17,40 @@ Modelled loosely on CoALA (working / episodic / semantic / procedural):
 
 ## File layout
 
+Memory is split into two top-level slices: **shared** (cross-user knowledge)
+and **users** (one tree per individual). See [DECISIONS.md](DECISIONS.md)
+D-013 for the rationale.
+
 ```
 data/memory/
-├─ INDEX.md               # always-injected table of contents (human-maintained)
-├─ user.md                # stable user profile
-├─ preferences.md         # how tobee should behave
-├─ facts/
-│  └─ <topic>.md          # one topic per file
-└─ feedback/
-   └─ <YYYY-MM-DD>-<slug>.md   # dated corrections
+├─ shared/                          # cross-user knowledge
+│  ├─ INDEX.md                      # always-injected (shared)
+│  └─ facts/
+│     └─ <topic>.md
+└─ users/
+   └─ <integration>/                # e.g. discord
+      └─ <user-id>/                 # sanitized, e.g. "12345"
+         ├─ INDEX.md                # always-injected (this user)
+         ├─ user.md                 # stable profile for this user
+         ├─ preferences.md          # how tobee should behave with this user
+         ├─ facts/
+         │  └─ <topic>.md
+         └─ feedback/
+            └─ <YYYY-MM-DD>-<slug>.md
 ```
+
+The user key derives from the inbound `Envelope` (`Integration` + `User`),
+sanitized to filesystem-safe characters by `internal/scope`. A scheduler
+tick (no user attached) can read/write `shared/` but writes to `user`
+scope return a clear error.
 
 **`data/` is gitignored entirely.** Each developer's memory is private.
 Fresh clones start empty; the code handles missing files gracefully (the
 context builder simply omits absent sections).
 
 Session summaries live in a parallel tree under `data/sessions/` — see
-[AGENT.md](AGENT.md#sessions).
+[AGENT.md](AGENT.md#sessions). Sessions are scoped by channel, not user,
+because group channels mix users.
 
 ## Retention
 
@@ -50,16 +67,22 @@ Session summaries live in a parallel tree under `data/sessions/` — see
 
 Exposed via the tool registry (see [INTEGRATIONS.md](INTEGRATIONS.md)):
 
-| Tool             | What it does                                                 |
-|------------------|--------------------------------------------------------------|
-| `memory.read`    | Read a file under `data/memory/`.                            |
-| `memory.write`   | Create or overwrite a file.                                  |
-| `memory.append`  | Append to a file, creating it if needed.                     |
-| `memory.search`  | Case-insensitive substring walk across all memory files.     |
-| `memory.list`    | List files under an optional subdirectory.                   |
+| Tool             | What it does                                                 | Default scope |
+|------------------|--------------------------------------------------------------|---------------|
+| `memory.read`    | Read a file under the selected scope.                        | `user`        |
+| `memory.write`   | Create or overwrite a file.                                  | `user`        |
+| `memory.append`  | Append to a file, creating it if needed.                     | `user`        |
+| `memory.search`  | Case-insensitive substring walk; hits are scope-labelled.    | `both`        |
+| `memory.list`    | List files under the selected scope(s).                      | `both`        |
+
+Every tool takes an optional `scope` arg: `"user"`, `"shared"`, or (for
+search/list only) `"both"`. The active user identity is read from the
+per-turn `context.Context` via `internal/scope`; the `memory.FS` itself
+stays user-agnostic and only sees relative paths inside `data/memory/`.
 
 Implementations: [internal/tools/memory/tools.go](../internal/tools/memory/tools.go).
 The underlying typed FS: [internal/memory/fs.go](../internal/memory/fs.go).
+Scope plumbing: [internal/scope/scope.go](../internal/scope/scope.go).
 
 ## Safety
 

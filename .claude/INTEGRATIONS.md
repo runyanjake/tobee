@@ -114,6 +114,39 @@ type Handler func(ctx, args json.RawMessage) (string, error)
    existing memory tools are good templates).
 4. In [main.go](../main.go), call your pack's `Register`.
 
+## Abilities — Reporter contract
+
+The agent's introspection layer (status.report and future siblings) is built
+on a small `Reporter` interface in [internal/abilities/](../internal/abilities/):
+
+```go
+type ReportData struct {
+    Doing   json.RawMessage `json:"doing,omitempty"`   // active right now
+    Done    json.RawMessage `json:"done,omitempty"`    // since `since`
+    Waiting json.RawMessage `json:"waiting,omitempty"` // scheduled / pending
+}
+
+type Reporter interface {
+    Name() string
+    Report(ctx context.Context, since time.Time) (ReportData, error)
+}
+```
+
+Anything (subsystem, integration, future ability) can implement it and
+register on the shared `abilities.Registry` in `main.go`. The
+`status.report` tool snapshots the registry and returns one composed JSON
+blob to the model.
+
+Two conventions:
+
+- **Reporters filter, the ability composes.** Each Reporter knows its own
+  staleness rules and surfaces only relevant items. The status tool stays a
+  dumb composer.
+- **User-aware reporters read scope from ctx** via `scope.From(ctx)`. Day-one
+  reporters (scheduler, janitor, discord) are system-wide and ignore scope.
+
+See [DECISIONS.md](DECISIONS.md) D-014 for the rationale.
+
 ## MCP — not yet
 
 The registry shape was chosen so that a future `internal/tools/mcp/`

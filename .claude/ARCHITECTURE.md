@@ -69,29 +69,38 @@ tobee/
 │  │  └─ 04-safety.md
 │  └─ summarizer.md                     # prompt for the rolling summarizer
 ├─ internal/
+│  ├─ abilities/
+│  │  └─ reporter.go                    # Reporter contract + Registry (cross-subsystem introspection)
 │  ├─ agent/
-│  │  ├─ loop.go                        # serial worker; drives a turn
-│  │  ├─ context.go                     # ContextBuilder
+│  │  ├─ loop.go                        # serial worker; drives a turn, attaches scope to ctx
+│  │  ├─ context.go                     # ContextBuilder (shared + per-user memory)
 │  │  ├─ session.go                     # short-term history ring buffer + SummaryStore
 │  │  ├─ summarizer.go                  # post-turn rolling summary job
 │  │  └─ reply.go                       # integration-name → ReplySender table
+│  ├─ scope/
+│  │  └─ scope.go                       # UserScope, ctx With/From, sanitized Key/Dir
 │  ├─ llm/
 │  │  ├─ client.go                      # OpenAI-compatible, native tool-use
 │  │  └─ types.go                       # Message, ToolSpec, ToolCall
 │  ├─ tools/
 │  │  ├─ registry.go                    # JSON-Schema registry, timeouts, panic recovery
-│  │  └─ memory/                        # memory.{read,write,append,search,list}
+│  │  ├─ memory/                        # memory.{read,write,append,search,list} (scoped)
+│  │  └─ status/                        # status.report — aggregates abilities.Reporter snapshots
 │  ├─ integrations/
 │  │  ├─ integration.go                 # interface + Envelope
 │  │  ├─ bus.go                         # buffered channel event bus
-│  │  └─ discord/                       # Discord gateway + reply sender
+│  │  └─ discord/                       # Discord gateway + reply sender + Reporter
 │  ├─ memory/
-│  │  ├─ fs.go                          # sandboxed FS rooted at data/memory
-│  │  └─ index.go                       # INDEX.md helper
+│  │  └─ fs.go                          # sandboxed FS rooted at data/memory
 │  └─ scheduler/
-│     └─ tick.go                        # cron-like synthetic Envelopes (idle day one)
+│     ├─ tick.go                        # cron-like synthetic Envelopes + Reporter
+│     ├─ janitor.go                     # in-process session cleanup
+│     ├─ reporter.go                    # scheduler Reporter
+│     └─ janitor_reporter.go            # janitor Reporter
 ├─ data/                                # gitignored; runtime state
-│  ├─ memory/                           # persistent memory
+│  ├─ memory/
+│  │  ├─ shared/                        # cross-user knowledge
+│  │  └─ users/<integration>/<userId>/  # per-user trees
 │  └─ sessions/                         # rolling per-channel summaries
 └─ CLAUDE.md, .claude/                  # this documentation
 ```

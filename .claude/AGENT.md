@@ -58,16 +58,21 @@ See [internal/agent/loop.go](../internal/agent/loop.go) for the real code.
 [internal/agent/context.go](../internal/agent/context.go) composes the
 initial message list for a turn. Sections, in fixed order:
 
-| # | Section           | Source                                      | Always shown?      |
-|---|-------------------|---------------------------------------------|--------------------|
-| 1 | Persona           | `prompts/personality/*.md` (concatenated)   | Yes                |
-| 2 | Current Context   | integration / channel / thread / user tags  | Yes                |
-| 3 | Memory Index      | `data/memory/INDEX.md`                      | If present         |
-| 4 | User Profile      | `data/memory/user.md`                       | If present         |
-| 5 | Preferences       | `data/memory/preferences.md`                | If present         |
-| 6 | Session Summary   | `data/sessions/.../current.md`              | If present         |
-| 7 | Recent Turns      | in-memory ring buffer (user/assistant/tool) | Yes (if any)       |
-| 8 | Current Input     | the incoming Envelope                       | Yes                |
+| # | Section           | Source                                                  | Always shown?      |
+|---|-------------------|---------------------------------------------------------|--------------------|
+| 1 | Persona           | `prompts/personality/*.md` (concatenated)               | Yes                |
+| 2 | Current Context   | integration / channel / thread / user tags              | Yes                |
+| 3 | Shared Memory Index | `data/memory/shared/INDEX.md`                         | If present         |
+| 4 | User Memory Index | `data/memory/users/<int>/<user>/INDEX.md`               | If present         |
+| 5 | User Profile      | `data/memory/users/<int>/<user>/user.md`                | If present         |
+| 6 | Preferences       | `data/memory/users/<int>/<user>/preferences.md`         | If present         |
+| 7 | Session Summary   | `data/sessions/.../current.md`                          | If present         |
+| 8 | Recent Turns      | in-memory ring buffer (user/assistant/tool)             | Yes (if any)       |
+| 9 | Current Input     | the incoming Envelope                                   | Yes                |
+
+The user-scoped sections derive their path from `scope.FromEnvelope(env)`
+(see [DECISIONS.md](DECISIONS.md) D-013). If the envelope has no user
+attached (scheduler tick), only the shared INDEX appears.
 
 The model accesses **everything else** — deeper memory, specific fact
 files, session archives — through tools. It searches with `memory.search`,

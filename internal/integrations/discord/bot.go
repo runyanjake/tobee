@@ -34,7 +34,21 @@ type Bot struct {
 
 	namesMu sync.RWMutex
 	names   map[string]string // user ID → display name
+
+	statsMu sync.RWMutex
+	rxLog   []rxEvent
+	rxHead  int
+	rxFill  bool
+	lastRx  time.Time
+	connect time.Time // set in onReady
 }
+
+type rxEvent struct {
+	At time.Time
+	Ch string
+}
+
+const rxRingSize = 32
 
 // New creates a Bot and registers its reply sender. The websocket connection
 // is not opened until Start is called.
@@ -53,6 +67,7 @@ func New(cfg Config, bus *integrations.Bus, replies *agent.Replies) (*Bot, error
 		bus:       bus,
 		channelID: cfg.ChannelID,
 		names:     make(map[string]string),
+		rxLog:     make([]rxEvent, rxRingSize),
 	}
 	session.AddHandler(b.onReady)
 	session.AddHandler(b.onMessageCreate)
@@ -76,6 +91,9 @@ func (b *Bot) Start(_ context.Context) error {
 func (b *Bot) Stop() error { return b.session.Close() }
 
 func (b *Bot) onReady(_ *discordgo.Session, r *discordgo.Ready) {
+	b.statsMu.Lock()
+	b.connect = time.Now()
+	b.statsMu.Unlock()
 	slog.Info("discord: ready", "user", r.User.Username, "guilds", len(r.Guilds))
 	if b.channelID != "" {
 		slog.Info("discord: listening on channel", "id", b.channelID)
@@ -103,6 +121,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	}
 
 	authorName := displayName(m.Author)
+	b.recordRx(m.ChannelID)
 	slog.Debug("discord: recv",
 		"channel", m.ChannelID, "author", authorName, "content", content)
 
@@ -127,6 +146,18 @@ func (b *Bot) sendReply(_ context.Context, channel, _, text string) error {
 		}
 	}
 	return nil
+}
+
+func (b *Bot) recordRx(ch string) {
+	now := time.Now()
+	b.statsMu.Lock()
+	defer b.statsMu.Unlock()
+	b.rxLog[b.rxHead] = rxEvent{At: now, Ch: ch}
+	b.rxHead = (b.rxHead + 1) % len(b.rxLog)
+	if b.rxHead == 0 {
+		b.rxFill = true
+	}
+	b.lastRx = now
 }
 
 // remember records a user ID → display-name mapping for later rewrites.

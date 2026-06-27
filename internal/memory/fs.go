@@ -170,6 +170,12 @@ type SearchHit struct {
 // Search walks the memory root, returning substring matches (case-insensitive)
 // across all regular files. Up to `limit` hits are returned.
 func (m *FS) Search(query string, limit int) ([]SearchHit, error) {
+	return m.SearchUnder(query, limit, "")
+}
+
+// SearchUnder walks a subdirectory of the memory root. relDir="" matches
+// Search. Used to scope a search to one user's tree or to shared/.
+func (m *FS) SearchUnder(query string, limit int, relDir string) ([]SearchHit, error) {
 	if query == "" {
 		return nil, errors.New("empty query")
 	}
@@ -178,8 +184,17 @@ func (m *FS) Search(query string, limit int) ([]SearchHit, error) {
 	}
 	needle := strings.ToLower(query)
 
+	start := m.Root
+	if relDir != "" {
+		abs, err := m.resolve(relDir)
+		if err != nil {
+			return nil, err
+		}
+		start = abs
+	}
+
 	var hits []SearchHit
-	err := filepath.WalkDir(m.Root, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(start, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries
 		}

@@ -274,6 +274,82 @@ whole split is causing drift, log a new decision.
 
 ---
 
+## D-013 — Multi-user memory layout
+
+**Status:** Accepted · **Date:** 2026-06-26 · Supersedes the single-user
+flat layout under `data/memory/`.
+
+**Decision.** Memory is split into two top-level slices: `data/memory/shared/`
+(cross-user knowledge) and `data/memory/users/<integration>/<userId>/`
+(one tree per individual). The user key derives from the inbound `Envelope`
+and is sanitized to filesystem-safe characters by `internal/scope`.
+
+The active scope rides on the per-turn `context.Context`. The agent loop
+calls `scope.With(ctx, scope.FromEnvelope(env))` once before invoking the
+LLM; tool handlers and reporters read it back via `scope.From(ctx)`. The
+`memory.FS` itself stays user-agnostic — only the tool layer knows about
+scope routing.
+
+Every `memory.*` tool accepts an optional `scope` argument:
+
+- `user` — writes/reads under the active user's tree. Errors clearly if
+  no user is attached (e.g. on a scheduler tick).
+- `shared` — writes/reads under `shared/`.
+- `both` — read-only scopes (`memory.search`, `memory.list`) walk both.
+
+**Why.** tobee is moving from "one user, many integrations" to "many
+users, many integrations". Per-user trees give clean isolation without
+inventing a user table; shared/ holds cross-cutting facts that don't
+belong to anyone.
+
+**Cost.** A breaking change to anyone's existing local `data/memory/`.
+`data/` is gitignored (D-008) so this only bites individual developers
+on upgrade — files must be moved manually into the new layout.
+
+**Invariant.** `memory.search` and `memory.list` must never leak files
+from one user's tree into another's. Enforced at the FS layer via
+`SearchUnder(query, limit, relDir)` and the existing `List(relDir)`.
+Never call them with the root dir from a user-scoped path.
+
+---
+
+## D-014 — Reporter registry for cross-subsystem introspection
+
+**Status:** Accepted · **Date:** 2026-06-26
+
+**Decision.** Subsystems that hold state worth surfacing (scheduler,
+janitor, integrations) implement an `abilities.Reporter` and register on
+a single `abilities.Registry`. The model-callable `status.report` tool
+snapshots the registry and returns one composed JSON object keyed by
+reporter name; each value has optional `doing` / `done` / `waiting`
+buckets.
+
+Reporters do their own relevance filtering — they know their staleness
+rules better than the ability layer does. The status tool stays a dumb
+composer.
+
+**Why.** A "what are you up to?" question naturally cuts across
+subsystems. Without a contract, the status tool would have to reach into
+each subsystem directly, growing more coupling with every new feature.
+The Reporter pattern is the smallest abstraction that lets new
+subsystems (and future abilities) plug in additively.
+
+CONVENTIONS.md normally warns against abstracting before the second
+implementation. We took the hit here because we're explicitly designing
+for N reporters from day one (scheduler + janitor + discord, with more to
+come). The alternative — direct reach-in — couples worse and scales
+worse.
+
+**Cost.** A new abstraction surface. Small in-memory ring buffers in
+scheduler and janitor (≤32 entries each) exist purely for reportability —
+that state lives in-process and does not survive restarts.
+
+**Don't revert** without first asking what specifically broke. If a
+reporter is noisy, fix the reporter; if the contract is wrong, log a new
+decision.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

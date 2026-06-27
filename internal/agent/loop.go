@@ -9,6 +9,7 @@ import (
 
 	"tobee/internal/integrations"
 	"tobee/internal/llm"
+	"tobee/internal/scope"
 	"tobee/internal/tools"
 )
 
@@ -76,6 +77,11 @@ func (a *Agent) Start(ctx context.Context) {
 func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	ctx, cancel := context.WithTimeout(parent, a.cfg.TurnBudget)
 	defer cancel()
+
+	// Attach the originating user identity so memory tools and reporters
+	// can route to the right slice of state. Scheduler ticks carry an empty
+	// User and tools that require user scope will surface a clear error.
+	ctx = scope.With(ctx, scope.FromEnvelope(env))
 
 	slog.Info("agent: turn begin",
 		"integration", env.Integration, "channel", env.Channel, "user", env.User)

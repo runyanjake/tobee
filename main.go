@@ -13,6 +13,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"tobee/internal/abilities"
 	"tobee/internal/agent"
 	"tobee/internal/integrations"
 	"tobee/internal/integrations/discord"
@@ -21,6 +22,7 @@ import (
 	"tobee/internal/scheduler"
 	"tobee/internal/tools"
 	memtools "tobee/internal/tools/memory"
+	statustools "tobee/internal/tools/status"
 )
 
 func main() {
@@ -62,9 +64,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --- Abilities registry (cross-subsystem introspection) --------------
+	abilityReg := abilities.NewRegistry()
+
 	// --- Tool registry ----------------------------------------------------
 	registry := tools.NewRegistry()
 	memtools.Register(registry, memFS)
+	statustools.Register(registry, abilityReg)
 
 	// --- Sessions + summarizer -------------------------------------------
 	sessions, err := agent.NewSessionStore(dataDir+"/sessions", 10, sessionIdleTimeout)
@@ -101,15 +107,18 @@ func main() {
 		os.Exit(1)
 	}
 	active := []integrations.Integration{dbot}
+	abilityReg.Register(dbot.Reporter())
 
 	// --- Scheduler (no ticks registered day one) --------------------------
 	sched := scheduler.New(bus)
+	abilityReg.Register(sched.Reporter())
 
 	// --- Janitor: prune stale session summaries --------------------------
 	// LLM-free periodic sweep. Only touches data/sessions — long-term memory
 	// under data/memory is never deleted.
 	janitor := scheduler.NewJanitor(sessions, dataDir+"/sessions",
 		sessionIdleTimeout, sessionTTL, time.Hour)
+	abilityReg.Register(janitor.Reporter())
 
 	// --- Lifecycle --------------------------------------------------------
 	ctx, cancel := context.WithCancel(context.Background())
