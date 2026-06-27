@@ -105,7 +105,7 @@ gets revisited.
 
 ## D-006 — Single persona prompt, not multi-file
 
-**Status:** Accepted · **Date:** 2026-04 · Supersedes: prior
+**Status:** Superseded by D-012 · **Date:** 2026-04 · Supersedes: prior
 `context/PROMPT.md` + `SOUL.md` + `TOOLS.md` split.
 
 **Decision.** `prompts/persona.md` is the system prompt. Tool guidance
@@ -228,6 +228,49 @@ design — bounded by `SESSION_TTL`. One extra env var to document.
 
 **Invariant.** `data/memory/` is still never touched. The archive tree
 only ever holds rotated summaries that the agent does not read.
+
+---
+
+## D-012 — Personality as a folder of numbered fragments
+
+**Status:** Accepted · **Date:** 2026-06-26 · Supersedes: D-006.
+
+**Decision.** The system prompt is assembled at startup from every `*.md`
+file under `prompts/personality/`, sorted lexicographically and joined
+with blank lines. Day-one fragments:
+
+- `00-identity.md` — who tobee is.
+- `01-tone.md` — how it speaks. Matter-of-fact; no pleasantries.
+- `02-behaviour.md` — what it does (actions, memory consultation).
+- `03-output.md` — format constraints.
+- `04-safety.md` — boundaries, memory-as-data framing.
+
+`main.go::readPersonality` does the glob + sort + read. Tool guidance
+still lives in tool `Description` fields, per D-006's tool half.
+
+**Why.** Two reasons D-006 didn't anticipate:
+
+1. *Editability.* Tightening tone shouldn't require scanning a 30-line
+   blob to find the right paragraph. Fragments are addressable: open
+   `01-tone.md`, change tone.
+2. *Tone hygiene.* When tone instructions sit next to identity and
+   tool-use guidance, they get diluted. Isolating them in one file makes
+   it visible when the model's behaviour drifts from what we asked for.
+
+D-006's worry was "hard to reason about as one thing." That risk is real
+but mitigated here: the fragments are short, the numeric prefix is the
+load-order contract, and the assembled prompt is still one continuous
+string at runtime — no per-fragment context injection or templating.
+
+**Cost.** A second source of truth for "where does tobee's tone live?"
+— the answer is `prompts/personality/`, full stop. Anyone editing the
+persona must remember to drop new fragments in this folder rather than
+hard-coding strings in Go. CONVENTIONS.md's "prompts live in files"
+rule already covers this.
+
+**Don't revert** without first identifying which file in the folder was
+the actual problem. If a fragment is causing drift, edit it. If the
+whole split is causing drift, log a new decision.
 
 ---
 

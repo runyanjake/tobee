@@ -26,5 +26,7 @@ Aim for under 1500 characters. If the running summary would exceed that,
 compress older lines more aggressively and keep recent context intact.
 
 ## Style
-Use short bullet points or terse prose. Refer to the user as "user" and the
-assistant as "tobee". Do not speak in first person.
+Matter-of-fact. Short bullets or terse prose. No openers, no closers, no
+meta commentary, no apologies. Refer to the user as "user" and the
+assistant as "tobee". Do not speak in first person. State facts directly;
+do not hedge or soften.

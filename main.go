@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,7 +72,7 @@ func main() {
 		slog.Error("sessions: init failed", "err", err)
 		os.Exit(1)
 	}
-	persona := readFile(promptsDir+"/persona.md", "")
+	persona := readPersonality(promptsDir + "/personality")
 	summPrompt := readFile(promptsDir+"/summarizer.md", "")
 	summarizer := agent.NewSummarizer(client, summPrompt, sessions)
 
@@ -168,4 +171,26 @@ func readFile(path, fallback string) string {
 		return fallback
 	}
 	return string(data)
+}
+
+// readPersonality loads every *.md file in dir, sorted lexicographically,
+// and joins their contents with blank lines. The numeric prefix on each
+// filename (00-, 01-, …) is the load-order contract — see DECISIONS.md D-012.
+func readPersonality(dir string) string {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil || len(matches) == 0 {
+		slog.Warn("prompt: personality load failed; using empty persona", "dir", dir, "err", err)
+		return ""
+	}
+	sort.Strings(matches)
+	var parts []string
+	for _, p := range matches {
+		body, err := os.ReadFile(p)
+		if err != nil {
+			slog.Warn("prompt: personality fragment unreadable; skipping", "path", p, "err", err)
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(string(body)))
+	}
+	return strings.Join(parts, "\n\n")
 }

@@ -61,7 +61,12 @@ subsystem.
 tobee/
 ├─ main.go                              # wiring only
 ├─ prompts/
-│  ├─ persona.md                        # system prompt
+│  ├─ personality/                      # system prompt fragments, concatenated in order
+│  │  ├─ 00-identity.md
+│  │  ├─ 01-tone.md
+│  │  ├─ 02-behaviour.md
+│  │  ├─ 03-output.md
+│  │  └─ 04-safety.md
 │  └─ summarizer.md                     # prompt for the rolling summarizer
 ├─ internal/
 │  ├─ agent/
