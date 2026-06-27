@@ -527,6 +527,92 @@ load-bearing in themselves; the alignment with the wider ecosystem is.
 
 ---
 
+## D-019 — Workspace areas: configured host-file roots with sandboxed access
+
+**Status:** Accepted · **Date:** 2026-06-27 · Amends D-003 (which deferred
+OS-level file tools to a future "separate pack with their own scoping").
+
+**Decision.** The agent gets a `workspace.*` tool pack
+([internal/tools/workspace/](../internal/tools/workspace/)) backed by N
+operator-configured "areas." Each area is a directory the model can list,
+read, search, and (unless flagged read-only) write under. Areas are
+defined entirely in `.env`:
+
+    WORKSPACE_AREA_<NAME>          = /abs/path
+    WORKSPACE_AREA_<NAME>_DESC     = human-readable purpose  (optional)
+    WORKSPACE_AREA_<NAME>_READONLY = true                    (optional)
+
+The `<NAME>` suffix is lowercased to form the area's identifier (what the
+model passes as `area`). Each area is a `sandboxfs.FS` rooted at the
+configured path — escape attempts (`..`, absolute paths, volume
+prefixes) are rejected by the same `resolve()` guard that protects
+`data/memory/`. A separate env var, `WORKSPACE_MAX_FILE_SIZE` (default
+256 KiB), caps per-file I/O.
+
+The pack ships five tools: `workspace.areas` (discovery),
+`workspace.list`, `workspace.read`, `workspace.write`, and
+`workspace.search` (defaults to `area="all"`, walking every configured
+area in one call). The areas list is always injected into the system
+prompt right after the persona — it is the most stable section
+(config-time only) and so sits at the front per D-017's prefix-cache
+contract. The discovery tool exists too so the model can re-fetch the
+list explicitly, but in steady state it never needs to.
+
+We also took the opportunity to extract `internal/memory/fs.go` into
+`internal/sandboxfs/` (type stays `FS`, `MaxFileSize` becomes a
+per-instance field passed at construction). Both memory and workspace
+now share one well-tested sandbox implementation. This is the right time
+for the extraction per CONVENTIONS.md — we have the second real caller.
+
+**Why.** D-003 already anticipated this: it deferred OS-level file tools
+on the explicit promise that, when needed, they would live in a separate
+pack with their own scoping. The "scoping" word is doing the work — the
+agent writes what it judges useful without human approval, so blast
+radius must be bounded at the FS layer, not the prompt. Areas give the
+operator one knob ("here are the directories I'm willing for tobee to
+touch") and the sandbox guarantees the model can't reach past them. The
+multi-area shape (rather than a single `WORKSPACE_ROOT`) reflects how
+real workflows actually look: notes here, projects there, scratch
+somewhere else, often with different write permissions.
+
+Prompt-inject vs tool-call for discovery: prompt-inject won because the
+data is tiny, stable across consecutive turns (cache-friendly), and the
+alternative wastes a tool call every turn the model is unsure which
+areas exist.
+
+**Cost.**
+
+- A new env-var surface (`WORKSPACE_AREA_*`, `WORKSPACE_MAX_FILE_SIZE`)
+  documented in `.env.example`. Optional — zero areas = pack not
+  registered = no behaviour change.
+- One package extraction (`internal/memory` → `internal/sandboxfs`),
+  mechanical, single signature change (`NewFS` now takes `maxFileSize`).
+  `memory.MaxFileSize` constant is gone; callers pass 64 KiB explicitly.
+- System prompt grows by a small `<workspace_areas>` block when at least
+  one area is configured. Inserted at the cache-friendly front so it
+  doesn't break prefix reuse.
+- Discovery is fully visible to the model: every configured area's name
+  and description sits in the persona slot. Don't name an area something
+  you don't want the model to know exists.
+
+**Explicitly not built.**
+
+- `workspace.delete` / `workspace.move` — destructive ops with no
+  human-in-the-loop. Log a new decision before adding either.
+- `workspace.exec` — running arbitrary commands is a much bigger
+  blast-radius jump and warrants its own ADR (D-020+) when proposed.
+- Glob / regex in `list` — start with directory + plain-substring search.
+- Per-user workspace trees mirroring memory's `users/<int>/<userId>/`
+  layout (D-013). Could layer on later if a multi-user use case appears;
+  not needed for the single-user case today.
+
+**Don't revert** without proposing a replacement for: (a) the sandbox
+guarantee, or (b) the discovery story. Both are load-bearing — the
+former for safety, the latter for the model's ability to use the pack at
+all without prompt acrobatics.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

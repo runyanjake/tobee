@@ -1,8 +1,12 @@
-// Package memory is a typed filesystem over data/memory — the agent's
-// long-term file-based store. Every path handed to an FS method is
-// validated and resolved inside Root; attempts to escape via .. or
-// absolute paths are rejected.
-package memory
+// Package sandboxfs is a typed filesystem rooted at a single directory.
+// Every path handed to an FS method is validated and resolved inside Root;
+// attempts to escape via .., absolute paths, or volume prefixes are rejected.
+//
+// It backs two distinct callers today: long-term agent memory under
+// data/memory (see internal/tools/memory) and configurable host-file areas
+// (see internal/workspace). The implementation is agnostic to what the root
+// contains.
+package sandboxfs
 
 import (
 	"bufio"
@@ -15,17 +19,18 @@ import (
 	"strings"
 )
 
-// MaxFileSize caps writes and reads to keep memory human-manageable.
-const MaxFileSize = 64 * 1024
-
 // FS is a sandboxed filesystem rooted at a single directory. All paths
-// passed to its methods are interpreted relative to Root.
+// passed to its methods are interpreted relative to Root. MaxFileSize caps
+// both Write and Append on this instance.
 type FS struct {
-	Root string
+	Root        string
+	MaxFileSize int64
 }
 
-// NewFS resolves root to an absolute path and ensures it exists.
-func NewFS(root string) (*FS, error) {
+// NewFS resolves root to an absolute path, ensures it exists, and pairs it
+// with the per-instance maxFileSize. A non-positive maxFileSize disables
+// the cap (use only when the caller has its own bounds).
+func NewFS(root string, maxFileSize int64) (*FS, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root: %w", err)
@@ -33,7 +38,7 @@ func NewFS(root string) (*FS, error) {
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir root: %w", err)
 	}
-	return &FS{Root: abs}, nil
+	return &FS{Root: abs, MaxFileSize: maxFileSize}, nil
 }
 
 // resolve converts a caller-supplied relative path into an absolute
@@ -77,8 +82,8 @@ func (m *FS) Read(rel string) (string, error) {
 // Write replaces the contents of a file relative to Root. Rejects writes
 // exceeding MaxFileSize. Intermediate directories are created.
 func (m *FS) Write(rel, content string) error {
-	if len(content) > MaxFileSize {
-		return fmt.Errorf("content exceeds %d bytes", MaxFileSize)
+	if m.MaxFileSize > 0 && int64(len(content)) > m.MaxFileSize {
+		return fmt.Errorf("content exceeds %d bytes", m.MaxFileSize)
 	}
 	abs, err := m.resolve(rel)
 	if err != nil {
@@ -105,8 +110,8 @@ func (m *FS) Append(rel, content string) error {
 	if statErr == nil {
 		existing = info.Size()
 	}
-	if existing+int64(len(content)) > MaxFileSize {
-		return fmt.Errorf("append would exceed %d bytes", MaxFileSize)
+	if m.MaxFileSize > 0 && existing+int64(len(content)) > m.MaxFileSize {
+		return fmt.Errorf("append would exceed %d bytes", m.MaxFileSize)
 	}
 	f, err := os.OpenFile(abs, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -167,14 +172,14 @@ type SearchHit struct {
 	Snippet string
 }
 
-// Search walks the memory root, returning substring matches (case-insensitive)
+// Search walks the root, returning substring matches (case-insensitive)
 // across all regular files. Up to `limit` hits are returned.
 func (m *FS) Search(query string, limit int) ([]SearchHit, error) {
 	return m.SearchUnder(query, limit, "")
 }
 
-// SearchUnder walks a subdirectory of the memory root. relDir="" matches
-// Search. Used to scope a search to one user's tree or to shared/.
+// SearchUnder walks a subdirectory of the root. relDir="" matches Search.
+// Used to scope a search to a subtree.
 func (m *FS) SearchUnder(query string, limit int, relDir string) ([]SearchHit, error) {
 	if query == "" {
 		return nil, errors.New("empty query")

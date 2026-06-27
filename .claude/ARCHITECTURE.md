@@ -87,14 +87,17 @@ tobee/
 │  ├─ tools/
 │  │  ├─ registry.go                    # JSON-Schema registry, timeouts, panic recovery
 │  │  ├─ memory/                        # memory.{read,write,append,search,list} (scoped)
+│  │  ├─ workspace/                     # workspace.{areas,list,read,write,search} over configured roots
 │  │  ├─ schedule/                      # schedule.{create,cancel,list} — model-authored timers
 │  │  └─ status/                        # status.report — aggregates abilities.Reporter snapshots
 │  ├─ integrations/
 │  │  ├─ integration.go                 # interface + Envelope
 │  │  ├─ bus.go                         # buffered channel event bus
 │  │  └─ discord/                       # Discord gateway + reply sender + Reporter
-│  ├─ memory/
-│  │  └─ fs.go                          # sandboxed FS rooted at data/memory
+│  ├─ sandboxfs/
+│  │  └─ fs.go                          # typed sandboxed FS (backs memory + workspace)
+│  ├─ workspace/
+│  │  └─ areas.go                       # WORKSPACE_AREA_* env-driven area registry
 │  └─ scheduler/
 │     ├─ tick.go                        # static synthetic Envelopes + Reporter
 │     ├─ jobs.go                        # dynamic, model-authored jobs (cron + one-shot)
@@ -132,6 +135,7 @@ What's built (in order it was added):
 7. Discord integration (gateway + message split + reply sender).
 8. Scheduler skeleton (no static ticks registered).
 9. Dynamic scheduled jobs: `schedule.*` tools + persistent JobManager.
+10. `workspace.*` tool pack over configured host-file areas (D-019).
 
 What's not built, and why — see [DECISIONS.md](DECISIONS.md):
 

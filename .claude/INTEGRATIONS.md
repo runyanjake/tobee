@@ -121,6 +121,22 @@ type Handler func(ctx, args json.RawMessage) (string, error)
    existing memory tools are good templates).
 4. In [cmd/tobee/main.go](../cmd/tobee/main.go), call your pack's `Register`.
 
+## Workspace tool pack
+
+The `workspace.*` pack ([internal/tools/workspace/](../internal/tools/workspace/))
+gives the model read / search / write access to one or more configured
+host-filesystem areas. Each area is a `sandboxfs.FS` rooted at a directory
+the operator picks via `WORKSPACE_AREA_<NAME>` env vars. Path escapes
+(`..`, absolute, volume-qualified) are rejected at the FS layer — same
+sandbox machinery as long-term memory.
+
+Tools: `workspace.areas`, `workspace.list`, `workspace.read`,
+`workspace.write` (read-only areas reject it), `workspace.search`
+(defaults to walking every area). The list of configured areas is always
+injected at the front of the system prompt so the model can pick the
+right area without spending a tool call on discovery. See
+[DECISIONS.md](DECISIONS.md) D-019.
+
 ## Abilities — Reporter contract
 
 The agent's introspection layer (status.report and future siblings) is built

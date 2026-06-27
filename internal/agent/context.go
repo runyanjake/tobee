@@ -6,17 +6,19 @@ import (
 
 	"github.com/runyanjake/tobee/internal/integrations"
 	"github.com/runyanjake/tobee/internal/llm"
-	"github.com/runyanjake/tobee/internal/memory"
+	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scope"
+	"github.com/runyanjake/tobee/internal/workspace"
 )
 
 // ContextBuilder assembles the message list passed to the LLM on the first
 // step of a turn. Sections are composed in a fixed order; the model then
 // reaches for anything deeper via tools.
 type ContextBuilder struct {
-	Persona  string     // system prompt / persona file contents
-	Memory   *memory.FS // typed filesystem for always-injected files
-	Sessions *SessionStore
+	Persona   string           // system prompt / persona file contents
+	Memory    *sandboxfs.FS    // typed filesystem for always-injected files
+	Workspace *workspace.Areas // configured host-file areas (nil = none)
+	Sessions  *SessionStore
 }
 
 // Build constructs the initial messages for an incoming envelope.
@@ -51,6 +53,24 @@ func (b *ContextBuilder) renderSystem(env integrations.Envelope) string {
 	if b.Persona != "" {
 		sb.WriteString(b.Persona)
 		sb.WriteString("\n\n")
+	}
+
+	// Workspace-areas list sits right after persona: it's the most stable
+	// section of the prompt across turns (config-time only) and so belongs
+	// at the front per D-017's prefix-cache contract.
+	if b.Workspace != nil && b.Workspace.Len() > 0 {
+		sb.WriteString("<workspace_areas>\n")
+		for _, ar := range b.Workspace.List() {
+			fmt.Fprintf(&sb, "- %s", ar.Name)
+			if ar.ReadOnly {
+				sb.WriteString(" (read-only)")
+			}
+			if ar.Description != "" {
+				fmt.Fprintf(&sb, ": %s", ar.Description)
+			}
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("</workspace_areas>\n\n")
 	}
 
 	fmt.Fprintf(&sb, "<context>integration=%s channel=%s", env.Integration, env.Channel)

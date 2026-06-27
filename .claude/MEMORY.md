@@ -85,20 +85,21 @@ per-turn `context.Context` via `internal/scope`; the `memory.FS` itself
 stays user-agnostic and only sees relative paths inside `data/memory/`.
 
 Implementations: [internal/tools/memory/tools.go](../internal/tools/memory/tools.go).
-The underlying typed FS: [internal/memory/fs.go](../internal/memory/fs.go).
+The underlying typed FS: [internal/sandboxfs/fs.go](../internal/sandboxfs/fs.go)
+(shared with `internal/workspace` — see [DECISIONS.md](DECISIONS.md) D-019).
 Scope plumbing: [internal/scope/scope.go](../internal/scope/scope.go).
 
 ## Safety
 
-- **Path sandbox.** Every path passed to `memory.FS` methods is validated:
+- **Path sandbox.** Every path passed to `sandboxfs.FS` methods is validated:
   relative paths only, no `..`, no absolute paths, no Windows volume
   prefixes. Resolved paths are re-checked with `filepath.Rel` to catch
   symlink-style escapes. Non-obvious and easy to break — don't skip the
   `resolve()` helper when adding new FS ops.
 
-- **Size caps.** `memory.MaxFileSize` (currently 64 KB) caps writes and
-  appends. Oversized content is rejected at the FS layer; the tool
-  surfaces the error back to the model.
+- **Size caps.** Per-FS `MaxFileSize` (currently 64 KB for memory; 256 KB
+  default for workspace areas) caps writes and appends. Oversized content is
+  rejected at the FS layer; the tool surfaces the error back to the model.
 
 - **Data, not instructions.** Memory content injected into the prompt is
   wrapped in `<memory path="...">...</memory>` fences, and the persona

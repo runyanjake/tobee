@@ -1,5 +1,5 @@
 .env
 .env.prod
-tobee
-tobee.exe
+/tobee
+/tobee.exe
 /data/

@@ -1,5 +1,5 @@
-// Package memory wires the memory.FS into the agent's tool registry as a
-// pack of read/write/search/list/append tools.
+// Package memory wires the long-term memory sandbox into the agent's tool
+// registry as a pack of read/write/search/list/append tools.
 //
 // Every tool takes an optional `scope` argument that selects which slice of
 // the memory tree it operates on:
@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/runyanjake/tobee/internal/memory"
+	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scope"
 	"github.com/runyanjake/tobee/internal/tools"
 )
@@ -29,7 +29,7 @@ import (
 const sharedRoot = "shared"
 
 // Register adds memory.* tools to reg, backed by fs.
-func Register(reg *tools.Registry, fs *memory.FS) {
+func Register(reg *tools.Registry, fs *sandboxfs.FS) {
 	reg.MustRegister(tools.Spec{
 		Name:        "memory.read",
 		Description: `Read a memory file. Pass scope="user" (default) for files specific to the current user, or scope="shared" for cross-user knowledge.`,
@@ -155,7 +155,7 @@ func joinScope(root, path string) string {
 	return root + "/" + path
 }
 
-func readHandler(fs *memory.FS) tools.Handler {
+func readHandler(fs *sandboxfs.FS) tools.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
 			Path  string `json:"path"`
@@ -172,7 +172,7 @@ func readHandler(fs *memory.FS) tools.Handler {
 	}
 }
 
-func writeHandler(fs *memory.FS) tools.Handler {
+func writeHandler(fs *sandboxfs.FS) tools.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
 			Path    string `json:"path"`
@@ -194,7 +194,7 @@ func writeHandler(fs *memory.FS) tools.Handler {
 	}
 }
 
-func appendHandler(fs *memory.FS) tools.Handler {
+func appendHandler(fs *sandboxfs.FS) tools.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
 			Path    string `json:"path"`
@@ -216,7 +216,7 @@ func appendHandler(fs *memory.FS) tools.Handler {
 	}
 }
 
-func searchHandler(fs *memory.FS) tools.Handler {
+func searchHandler(fs *sandboxfs.FS) tools.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
 			Query string `json:"query"`
@@ -261,7 +261,7 @@ func searchHandler(fs *memory.FS) tools.Handler {
 	}
 }
 
-func listHandler(fs *memory.FS) tools.Handler {
+func listHandler(fs *sandboxfs.FS) tools.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
 			Dir   string `json:"dir"`
