@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +119,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 // sendReply is registered on the agent's Replies table. channel is the
 // Discord channel ID; thread is unused for now (future: forum/thread support).
 func (b *Bot) sendReply(_ context.Context, channel, _, text string) error {
+	text = b.rewriteOutboundMentions(text)
 	for _, chunk := range splitMessage(text) {
 		slog.Debug("discord: send", "channel", channel, "chars", len(chunk))
 		if _, err := b.session.ChannelMessageSend(channel, chunk); err != nil {
@@ -165,6 +167,39 @@ func (b *Bot) rewriteMentions(s string) string {
 		}
 		return "@" + name
 	})
+}
+
+// rewriteOutboundMentions is the mirror of rewriteMentions: it turns
+// `@displayname` tokens emitted by the model back into `<@id>` so Discord
+// renders them as real pings. Longer names are matched first so a name that
+// is a prefix of another can't steal the shorter match.
+func (b *Bot) rewriteOutboundMentions(s string) string {
+	if s == "" || !strings.Contains(s, "@") {
+		return s
+	}
+	type entry struct{ id, name string }
+	b.namesMu.RLock()
+	entries := make([]entry, 0, len(b.names))
+	for id, name := range b.names {
+		if name != "" {
+			entries = append(entries, entry{id, name})
+		}
+	}
+	b.namesMu.RUnlock()
+	if len(entries) == 0 {
+		return s
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return len(entries[i].name) > len(entries[j].name)
+	})
+	for _, e := range entries {
+		re, err := regexp.Compile(`@` + regexp.QuoteMeta(e.name) + `\b`)
+		if err != nil {
+			continue
+		}
+		s = re.ReplaceAllString(s, "<@"+e.id+">")
+	}
+	return s
 }
 
 // displayName prefers GlobalName (the new Discord display name) and falls
