@@ -59,7 +59,14 @@ func (b *ContextBuilder) renderSystem(env integrations.Envelope) string {
 		fmt.Fprintf(&sb, "- thread: %s\n", env.Thread)
 	}
 	if env.User != "" {
-		fmt.Fprintf(&sb, "- user: %s\n", env.User)
+		if env.UserName != "" {
+			fmt.Fprintf(&sb, "- user: %s (id: %s)\n", env.UserName, env.User)
+		} else {
+			fmt.Fprintf(&sb, "- user: %s\n", env.User)
+		}
+	}
+	if env.Integration == "discord" {
+		sb.WriteString("- mention syntax: to ping a user, emit `<@id>` (with angle brackets); bare `@id` will not render as a mention.\n")
 	}
 	sb.WriteString("\n")
 

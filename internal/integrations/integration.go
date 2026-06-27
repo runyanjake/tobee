@@ -24,6 +24,7 @@ type Integration interface {
 type Envelope struct {
 	Integration string // "discord", "slack", "scheduler", ...
 	User        string // stable per-integration user id, "" for system events
+	UserName    string // human-readable display name for User, "" if unknown
 	Channel     string // opaque routing id used when replying
 	Thread      string // optional thread id within a channel
 	Content     string // user-facing text body

@@ -8,7 +8,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -28,6 +30,9 @@ type Bot struct {
 	session   *discordgo.Session
 	bus       *integrations.Bus
 	channelID string
+
+	namesMu sync.RWMutex
+	names   map[string]string // user ID → display name
 }
 
 // New creates a Bot and registers its reply sender. The websocket connection
@@ -46,6 +51,7 @@ func New(cfg Config, bus *integrations.Bus, replies *agent.Replies) (*Bot, error
 		session:   session,
 		bus:       bus,
 		channelID: cfg.ChannelID,
+		names:     make(map[string]string),
 	}
 	session.AddHandler(b.onReady)
 	session.AddHandler(b.onMessageCreate)
@@ -84,17 +90,25 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	if b.channelID != "" && m.ChannelID != b.channelID {
 		return
 	}
-	content := strings.TrimSpace(m.Content)
+
+	b.remember(m.Author)
+	for _, u := range m.Mentions {
+		b.remember(u)
+	}
+
+	content := strings.TrimSpace(b.rewriteMentions(m.Content))
 	if content == "" {
 		return
 	}
 
+	authorName := displayName(m.Author)
 	slog.Debug("discord: recv",
-		"channel", m.ChannelID, "author", m.Author.Username, "content", content)
+		"channel", m.ChannelID, "author", authorName, "content", content)
 
 	b.bus.Publish(integrations.Envelope{
 		Integration: "discord",
 		User:        m.Author.ID,
+		UserName:    authorName,
 		Channel:     m.ChannelID,
 		Content:     content,
 		Received:    time.Now(),
@@ -111,4 +125,56 @@ func (b *Bot) sendReply(_ context.Context, channel, _, text string) error {
 		}
 	}
 	return nil
+}
+
+// remember records a user ID → display-name mapping for later rewrites.
+func (b *Bot) remember(u *discordgo.User) {
+	if u == nil || u.ID == "" {
+		return
+	}
+	name := displayName(u)
+	if name == "" {
+		return
+	}
+	b.namesMu.Lock()
+	b.names[u.ID] = name
+	b.namesMu.Unlock()
+}
+
+// mentionRe matches Discord's user-mention tokens. The optional `!` is the
+// legacy nickname form; modern clients emit the plain form for both. Role
+// (`<@&id>`) and channel (`<#id>`) tokens deliberately don't match.
+var mentionRe = regexp.MustCompile(`<@!?(\d+)>`)
+
+// rewriteMentions turns each `<@id>` in s into `@displayname` if the ID is
+// in the cache; otherwise the token is left untouched so the raw ID survives.
+func (b *Bot) rewriteMentions(s string) string {
+	if s == "" || !strings.Contains(s, "<@") {
+		return s
+	}
+	return mentionRe.ReplaceAllStringFunc(s, func(tok string) string {
+		m := mentionRe.FindStringSubmatch(tok)
+		if len(m) != 2 {
+			return tok
+		}
+		b.namesMu.RLock()
+		name, ok := b.names[m[1]]
+		b.namesMu.RUnlock()
+		if !ok {
+			return tok
+		}
+		return "@" + name
+	})
+}
+
+// displayName prefers GlobalName (the new Discord display name) and falls
+// back to the legacy Username. Returns "" if the user has neither.
+func displayName(u *discordgo.User) string {
+	if u == nil {
+		return ""
+	}
+	if u.GlobalName != "" {
+		return u.GlobalName
+	}
+	return u.Username
 }
