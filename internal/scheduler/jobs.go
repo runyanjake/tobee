@@ -28,8 +28,8 @@ type JobManager struct {
 	cron  *cron.Cron
 
 	mu      sync.Mutex
-	entries map[string]canceler  // job id → handle for cancelling its next fire
-	jobs    map[string]Job       // job id → snapshot (for List / reporter)
+	entries map[string]canceler // job id → handle for cancelling its next fire
+	jobs    map[string]Job      // job id → snapshot (for List / reporter)
 	recent  []firedJobEvent
 	head    int
 	filled  bool
@@ -37,9 +37,9 @@ type JobManager struct {
 }
 
 type firedJobEvent struct {
-	ID    string
-	Name  string
-	At    time.Time
+	ID      string
+	Name    string
+	At      time.Time
 	OneShot bool
 }
 
