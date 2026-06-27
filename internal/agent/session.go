@@ -85,12 +85,12 @@ func (s *Session) LastActivity() time.Time { return s.lastActivity }
 
 // SessionStore is an in-memory registry of Sessions, keyed by Envelope.Key().
 type SessionStore struct {
-	mu              sync.Mutex
-	sessions        map[string]*Session
-	maxTurns        int
-	rootDir         string // data/sessions
-	idleTimeoutCh   time.Duration
-	idleTimeoutDM   time.Duration
+	mu            sync.Mutex
+	sessions      map[string]*Session
+	maxTurns      int
+	rootDir       string // data/sessions
+	idleTimeoutCh time.Duration
+	idleTimeoutDM time.Duration
 }
 
 // NewSessionStore builds a store rooted at rootDir. idleTimeoutCh applies to
