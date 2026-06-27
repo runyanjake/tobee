@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/llm"
 )
 
 // Summarizer keeps a rolling compressed summary of each session's older

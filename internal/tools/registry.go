@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/llm"
 )
 
 // Handler executes a tool call. Arguments arrive as a JSON object matching

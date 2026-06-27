@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"tobee/internal/agent"
+	"github.com/runyanjake/tobee/internal/agent"
 )
 
 const janitorRingSize = 8

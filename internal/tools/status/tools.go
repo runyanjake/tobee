@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"time"
 
-	"tobee/internal/abilities"
-	"tobee/internal/tools"
+	"github.com/runyanjake/tobee/internal/abilities"
+	"github.com/runyanjake/tobee/internal/tools"
 )
 
 // defaultWindow is used when the caller omits `since`. One hour is short

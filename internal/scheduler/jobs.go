@@ -9,7 +9,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/integrations"
 )
 
 const firedJobRingSize = 32

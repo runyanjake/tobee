@@ -59,9 +59,11 @@ subsystem.
 
 ```
 tobee/
-├─ main.go                              # wiring only
+├─ cmd/
+│  └─ tobee/
+│     └─ main.go                        # wiring only
 ├─ prompts/
-│  ├─ personality/                      # system prompt fragments, concatenated in order
+│  ├─ persona/                          # system prompt fragments, concatenated in order
 │  │  ├─ 00-identity.md
 │  │  ├─ 01-tone.md
 │  │  ├─ 02-behaviour.md

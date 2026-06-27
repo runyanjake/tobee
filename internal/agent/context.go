@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"tobee/internal/integrations"
-	"tobee/internal/llm"
-	"tobee/internal/memory"
-	"tobee/internal/scope"
+	"github.com/runyanjake/tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/memory"
+	"github.com/runyanjake/tobee/internal/scope"
 )
 
 // ContextBuilder assembles the message list passed to the LLM on the first

@@ -13,7 +13,7 @@ import (
 	"context"
 	"strings"
 
-	"tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/integrations"
 )
 
 // UserScope identifies the originating turn: the user, the integration that

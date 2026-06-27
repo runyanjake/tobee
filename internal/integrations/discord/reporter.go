@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"tobee/internal/abilities"
+	"github.com/runyanjake/tobee/internal/abilities"
 )
 
 // Reporter exposes Discord state via the abilities.Reporter contract.

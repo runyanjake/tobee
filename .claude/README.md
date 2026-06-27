@@ -4,7 +4,7 @@ Long-lived context that outlives any one session. These files describe **what
 tobee is, why it is shaped this way, and how to work in the codebase**.
 
 They do *not* describe the code in detail — that's what the code is for.
-Read a file, open `main.go`, follow the imports.
+Read a file, open `cmd/tobee/main.go`, follow the imports.
 
 ## Files
 

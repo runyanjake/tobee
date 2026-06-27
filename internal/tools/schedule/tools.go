@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"tobee/internal/scheduler"
-	"tobee/internal/scope"
-	"tobee/internal/tools"
+	"github.com/runyanjake/tobee/internal/scheduler"
+	"github.com/runyanjake/tobee/internal/scope"
+	"github.com/runyanjake/tobee/internal/tools"
 )
 
 // Register adds schedule.* tools backed by m.

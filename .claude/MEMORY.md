@@ -129,7 +129,7 @@ producing interpretable recall.
 ## Write paths
 
 Memory changes only through the `memory.*` tools. The agent is instructed
-(via `prompts/personality/02-behaviour.md`) to save meaningful facts proactively — the
+(via `prompts/persona/02-behaviour.md`) to save meaningful facts proactively — the
 bias is toward `memory.append` for journals and lists, `memory.write` for
 small canonical files.
 

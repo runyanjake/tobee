@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/integrations"
 )
 
 // recentRingSize bounds the in-memory log of recent fires used by the

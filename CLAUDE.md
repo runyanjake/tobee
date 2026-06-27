@@ -4,7 +4,7 @@ A personal AI assistant (Go service) that talks to users via Discord, thinks
 with a local LLM served by LM Studio, and keeps its memory in plain text
 files under `data/`.
 
-**Entry points:** [main.go](main.go) wires everything. [internal/agent/loop.go](internal/agent/loop.go) is the serial worker that drives a turn.
+**Entry points:** [cmd/tobee/main.go](cmd/tobee/main.go) wires everything. [internal/agent/loop.go](internal/agent/loop.go) is the serial worker that drives a turn.
 
 ## Project docs
 

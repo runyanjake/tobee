@@ -16,8 +16,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
-	"tobee/internal/agent"
-	"tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/agent"
+	"github.com/runyanjake/tobee/internal/integrations"
 )
 
 // Config configures a Bot.

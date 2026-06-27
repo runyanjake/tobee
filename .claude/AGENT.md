@@ -60,7 +60,7 @@ initial message list for a turn. Sections, in fixed order:
 
 | # | Section           | Source                                                  | Always shown?      |
 |---|-------------------|---------------------------------------------------------|--------------------|
-| 1 | Persona           | `prompts/personality/*.md` (concatenated)               | Yes                |
+| 1 | Persona           | `prompts/persona/*.md` (concatenated)                   | Yes                |
 | 2 | Current Context   | integration / channel / thread / user tags              | Yes                |
 | 3 | Shared Memory Index | `data/memory/shared/INDEX.md`                         | If present         |
 | 4 | User Memory Index | `data/memory/users/<int>/<user>/INDEX.md`               | If present         |

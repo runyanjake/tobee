@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/llm"
 )
 
 func TestSessionStoreGet_LazyRotatesIdleSession(t *testing.T) {

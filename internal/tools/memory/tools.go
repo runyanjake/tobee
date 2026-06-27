@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"strings"
 
-	"tobee/internal/memory"
-	"tobee/internal/scope"
-	"tobee/internal/tools"
+	"github.com/runyanjake/tobee/internal/memory"
+	"github.com/runyanjake/tobee/internal/scope"
+	"github.com/runyanjake/tobee/internal/tools"
 )
 
 const sharedRoot = "shared"

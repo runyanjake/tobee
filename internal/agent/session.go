@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/llm"
 )
 
 // recentFileName is the on-disk transcript persisted alongside current.md.

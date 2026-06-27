@@ -236,7 +236,7 @@ only ever holds rotated summaries that the agent does not read.
 **Status:** Accepted · **Date:** 2026-06-26 · Supersedes: D-006.
 
 **Decision.** The system prompt is assembled at startup from every `*.md`
-file under `prompts/personality/`, sorted lexicographically and joined
+file under `prompts/persona/`, sorted lexicographically and joined
 with blank lines. Day-one fragments:
 
 - `00-identity.md` — who tobee is.
@@ -245,8 +245,8 @@ with blank lines. Day-one fragments:
 - `03-output.md` — format constraints.
 - `04-safety.md` — boundaries, memory-as-data framing.
 
-`main.go::readPersonality` does the glob + sort + read. Tool guidance
-still lives in tool `Description` fields, per D-006's tool half.
+`cmd/tobee/main.go::readPersona` does the glob + sort + read. Tool
+guidance still lives in tool `Description` fields, per D-006's tool half.
 
 **Why.** Two reasons D-006 didn't anticipate:
 
@@ -263,7 +263,7 @@ load-order contract, and the assembled prompt is still one continuous
 string at runtime — no per-fragment context injection or templating.
 
 **Cost.** A second source of truth for "where does tobee's tone live?"
-— the answer is `prompts/personality/`, full stop. Anyone editing the
+— the answer is `prompts/persona/`, full stop. Anyone editing the
 persona must remember to drop new fragments in this folder rather than
 hard-coding strings in Go. CONVENTIONS.md's "prompts live in files"
 rule already covers this.
@@ -492,6 +492,38 @@ decision if pursuing.
 **Don't revert** without first checking whether prefill latency on long
 DM sessions has actually regressed. The ordering's only job is cache
 reuse; if a measurement disagrees, the measurement wins.
+
+---
+
+## D-018 — Repo layout aligned with Go + AI-agent conventions
+
+**Status:** Accepted · **Date:** 2026-06-27 · Amends D-002.
+
+**Decision.** Three layout changes were applied together so the repo
+matches the conventions an outside reader (Go or AI) would expect:
+
+1. The binary entry point moves to `cmd/tobee/main.go`. No Go files at
+   the repo root. D-002's spirit is preserved — packages still live under
+   `internal/`; the rule is now "Go files live under `cmd/<binary>/` or
+   `internal/<pkg>/`."
+2. The module path becomes `github.com/runyanjake/tobee` (canonical
+   import URL), not the bare `tobee`. Imports across the tree updated to
+   match.
+3. The persona folder is `prompts/persona/`, not `prompts/personality/`.
+   "Persona" is the term the AI community settled on (Anthropic Skills
+   docs, system-prompt literature). The load contract is unchanged
+   (numeric prefixes, lexicographic sort, concat with blank lines).
+
+**Why.** All three were idiosyncratic relative to the de-facto standard.
+The cost of staying off-convention grows: every new contributor (human
+or agent) has to learn the local naming before they can navigate. Going
+along with the convention is free and removes a class of surprise.
+
+**Cost.** A one-time mechanical churn across imports and docs. No
+runtime behaviour change.
+
+**Don't revert** without a specific reason. The conventions are not
+load-bearing in themselves; the alignment with the wider ecosystem is.
 
 ---
 

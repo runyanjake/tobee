@@ -85,7 +85,7 @@ The steps, roughly:
 2. Implement the `Integration` interface (`Name`, `Start`, `Stop`).
 3. On inbound events, construct an `Envelope` and call `bus.Publish`.
 4. Register a `ReplySender` on `*agent.Replies` during construction.
-5. Wire it in [main.go](../main.go) alongside Discord.
+5. Wire it in [cmd/tobee/main.go](../cmd/tobee/main.go) alongside Discord.
 
 Don't introduce a new event type. Everything is an Envelope.
 
@@ -119,7 +119,7 @@ type Handler func(ctx, args json.RawMessage) (string, error)
    `reg.MustRegister` for each tool.
 3. Declare an `InputSchema` as a JSON-Schema object (raw JSON is fine; the
    existing memory tools are good templates).
-4. In [main.go](../main.go), call your pack's `Register`.
+4. In [cmd/tobee/main.go](../cmd/tobee/main.go), call your pack's `Register`.
 
 ## Abilities — Reporter contract
 
@@ -140,7 +140,7 @@ type Reporter interface {
 ```
 
 Anything (subsystem, integration, future ability) can implement it and
-register on the shared `abilities.Registry` in `main.go`. The
+register on the shared `abilities.Registry` in `cmd/tobee/main.go`. The
 `status.report` tool snapshots the registry and returns one composed JSON
 blob to the model.
 

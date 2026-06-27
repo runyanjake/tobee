@@ -125,7 +125,7 @@ EOF
           tcid="$(docker compose -f "$COMPOSE_FILE" ps -q tobee)"
           [ -n "$tcid" ] || { echo "tobee container not found" >&2; exit 1; }
 
-          # main.go logs this line only after memory, the LLM client, and the
+          # cmd/tobee/main.go logs this line only after memory, the LLM client, and the
           # Discord gateway have all initialised — a real end-to-end boot signal.
           deadline=$(( $(date +%s) + 60 ))
           while :; do

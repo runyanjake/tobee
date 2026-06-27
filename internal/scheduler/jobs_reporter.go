@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"tobee/internal/abilities"
+	"github.com/runyanjake/tobee/internal/abilities"
 )
 
 // Reporter exposes scheduled-job state via abilities.Reporter.

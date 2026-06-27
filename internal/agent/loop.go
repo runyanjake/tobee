@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"time"
 
-	"tobee/internal/integrations"
-	"tobee/internal/llm"
-	"tobee/internal/scope"
-	"tobee/internal/tools"
+	"github.com/runyanjake/tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/scope"
+	"github.com/runyanjake/tobee/internal/tools"
 )
 
 // Config controls the agent's execution limits.
