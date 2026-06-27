@@ -11,13 +11,13 @@ import (
 
 func TestSessionStoreGet_LazyRotatesIdleSession(t *testing.T) {
 	root := t.TempDir()
-	store, err := NewSessionStore(root, 4, 100*time.Millisecond)
+	store, err := NewSessionStore(root, 4, 100*time.Millisecond, 100*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewSessionStore: %v", err)
 	}
 
 	key := "discord:chan-A"
-	sess := store.Get(key)
+	sess := store.Get(key, false)
 	sess.Append(llm.Message{Role: llm.RoleUser, Content: "hello"})
 
 	if err := store.WriteSummary(key, "rolling summary"); err != nil {
@@ -30,8 +30,11 @@ func TestSessionStoreGet_LazyRotatesIdleSession(t *testing.T) {
 	if err := os.Chtimes(store.SummaryPath(key), stale, stale); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
+	if err := os.Chtimes(store.recentPath(key), stale, stale); err != nil {
+		t.Fatalf("chtimes recent: %v", err)
+	}
 
-	fresh := store.Get(key)
+	fresh := store.Get(key, false)
 	if fresh == sess {
 		t.Fatalf("expected a brand-new Session instance after rotation")
 	}
@@ -54,7 +57,7 @@ func TestSessionStoreGet_LazyRotatesIdleSession(t *testing.T) {
 
 func TestSessionStoreGet_RotatesStaleFileWithoutInMemory(t *testing.T) {
 	root := t.TempDir()
-	store, err := NewSessionStore(root, 4, 100*time.Millisecond)
+	store, err := NewSessionStore(root, 4, 100*time.Millisecond, 100*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewSessionStore: %v", err)
 	}
@@ -68,7 +71,7 @@ func TestSessionStoreGet_RotatesStaleFileWithoutInMemory(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 
-	fresh := store.Get(key)
+	fresh := store.Get(key, false)
 	if len(fresh.Recent()) != 0 {
 		t.Fatalf("expected empty Recent() for fresh session")
 	}
@@ -86,7 +89,7 @@ func TestSessionStoreGet_RotatesStaleFileWithoutInMemory(t *testing.T) {
 
 func TestSessionStoreSweepIdle_RotatesFromDisk(t *testing.T) {
 	root := t.TempDir()
-	store, err := NewSessionStore(root, 4, 50*time.Millisecond)
+	store, err := NewSessionStore(root, 4, 50*time.Millisecond, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewSessionStore: %v", err)
 	}
@@ -110,16 +113,16 @@ func TestSessionStoreSweepIdle_RotatesFromDisk(t *testing.T) {
 
 func TestSessionStoreGet_DoesNotRotateActiveSession(t *testing.T) {
 	root := t.TempDir()
-	store, err := NewSessionStore(root, 4, time.Hour)
+	store, err := NewSessionStore(root, 4, time.Hour, time.Hour)
 	if err != nil {
 		t.Fatalf("NewSessionStore: %v", err)
 	}
 
 	key := "discord:chan-D"
-	first := store.Get(key)
+	first := store.Get(key, false)
 	first.Append(llm.Message{Role: llm.RoleUser, Content: "hi"})
 
-	second := store.Get(key)
+	second := store.Get(key, false)
 	if second != first {
 		t.Fatalf("expected same Session instance for non-idle channel")
 	}
@@ -128,9 +131,60 @@ func TestSessionStoreGet_DoesNotRotateActiveSession(t *testing.T) {
 	}
 }
 
+func TestSessionStoreGet_RestoresRecentFromDisk(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewSessionStore(root, 4, time.Hour, time.Hour)
+	if err != nil {
+		t.Fatalf("NewSessionStore: %v", err)
+	}
+
+	key := "discord:chan-restore"
+	sess := store.Get(key, false)
+	sess.Append(llm.Message{Role: llm.RoleUser, Content: "first"})
+	sess.Append(llm.Message{Role: llm.RoleAssistant, Content: "reply"})
+
+	// Simulate a process restart by building a new store over the same dir.
+	store2, err := NewSessionStore(root, 4, time.Hour, time.Hour)
+	if err != nil {
+		t.Fatalf("NewSessionStore restart: %v", err)
+	}
+	resumed := store2.Get(key, false)
+	got := resumed.Recent()
+	if len(got) != 2 || got[0].Content != "first" || got[1].Content != "reply" {
+		t.Fatalf("expected ring restored from recent.json, got %+v", got)
+	}
+}
+
+func TestSessionStoreGet_DMUsesDMIdleTimeout(t *testing.T) {
+	root := t.TempDir()
+	// Channel idle = 50ms (very short), DM idle = 1h. A DM that's been
+	// idle 1s must survive; a channel idle 1s must rotate.
+	store, err := NewSessionStore(root, 4, 50*time.Millisecond, time.Hour)
+	if err != nil {
+		t.Fatalf("NewSessionStore: %v", err)
+	}
+
+	dmKey := "discord:dm-x"
+	dm := store.Get(dmKey, true)
+	dm.Append(llm.Message{Role: llm.RoleUser, Content: "alive"})
+	dm.lastActivity = time.Now().Add(-1 * time.Second)
+
+	chKey := "discord:chan-x"
+	ch := store.Get(chKey, false)
+	ch.Append(llm.Message{Role: llm.RoleUser, Content: "doomed"})
+	ch.lastActivity = time.Now().Add(-1 * time.Second)
+
+	if dmAgain := store.Get(dmKey, true); dmAgain != dm {
+		t.Fatalf("DM should not have rotated under DM idle timeout")
+	}
+	if chAgain := store.Get(chKey, false); chAgain == ch {
+		t.Fatalf("channel should have rotated under channel idle timeout")
+	}
+}
+
 func TestSessionStore_IdleDisabledWhenTimeoutZero(t *testing.T) {
 	root := t.TempDir()
-	store, err := NewSessionStore(root, 4, 0)
+	store, err := NewSessionStore(root, 4, 0, 0)
 	if err != nil {
 		t.Fatalf("NewSessionStore: %v", err)
 	}

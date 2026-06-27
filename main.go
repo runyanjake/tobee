@@ -50,6 +50,11 @@ func main() {
 		slog.Error("SESSION_IDLE_TIMEOUT: invalid duration", "err", err)
 		os.Exit(1)
 	}
+	sessionIdleTimeoutDM, err := time.ParseDuration(envOr("SESSION_IDLE_TIMEOUT_DM", "168h"))
+	if err != nil {
+		slog.Error("SESSION_IDLE_TIMEOUT_DM: invalid duration", "err", err)
+		os.Exit(1)
+	}
 
 	// --- LLM client -------------------------------------------------------
 	client := llm.NewClient(aiURL, aiModel, llm.Options{
@@ -75,7 +80,7 @@ func main() {
 	// schedule.* tools are registered after the JobManager is built below.
 
 	// --- Sessions + summarizer -------------------------------------------
-	sessions, err := agent.NewSessionStore(dataDir+"/sessions", 10, sessionIdleTimeout)
+	sessions, err := agent.NewSessionStore(dataDir+"/sessions", 10, sessionIdleTimeout, sessionIdleTimeoutDM)
 	if err != nil {
 		slog.Error("sessions: init failed", "err", err)
 		os.Exit(1)

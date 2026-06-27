@@ -28,15 +28,22 @@ Inbound events flow through an `Envelope`:
 type Envelope struct {
     Integration string    // "discord", "slack", "scheduler"
     User        string    // stable per-integration user id
+    UserName    string    // human-readable display name
     Channel     string    // opaque routing id used when replying
     Thread      string    // optional thread id
     Content     string    // text body
     Received    time.Time
+    IsDirect    bool      // one-on-one channel (DM)? selects idle timeout
 }
 ```
 
 `Envelope.Key()` derives the session key — `integration:channel[:thread]`.
 This is the unit of scope for short-term history and rolling summaries.
+
+Set `IsDirect = true` for one-on-one transports (Discord DMs, future
+SMS/iMessage, etc.). The session store uses it to pick `SESSION_IDLE_TIMEOUT_DM`
+over `SESSION_IDLE_TIMEOUT`, since DM conversations are bursty across days
+and should not get a 4h reset. See [DECISIONS.md](DECISIONS.md) D-016.
 
 ## Bus
 

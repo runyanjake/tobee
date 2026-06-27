@@ -407,6 +407,94 @@ the routing-back-to-channel requirement; both are load-bearing.
 
 ---
 
+## D-016 — Session state persists across restart; idle timeout is kind-aware
+
+**Status:** Accepted · **Date:** 2026-06-27 · Amends D-011.
+
+**Decision.** Two changes to how session state survives.
+
+1. The short-term ring buffer is mirrored to disk on every `Session.Append`.
+   The file is `data/sessions/<int>/<chan>/recent.json` and contains the
+   exact `[]llm.Message` plus a `kind` hint. Writes are atomic (tmp +
+   rename). On `SessionStore.Get`, a missing in-memory entry loads
+   `recent.json` before serving the session, so a restart resumes the
+   conversation mid-stream with the same tool calls / tool results / user
+   turns the model already saw.
+
+2. `SessionStore` now carries **two** idle timeouts:
+   `SESSION_IDLE_TIMEOUT` (default 4h) for channels and
+   `SESSION_IDLE_TIMEOUT_DM` (default 168h) for one-on-one sessions. The
+   active timeout is chosen from `Envelope.IsDirect`, which integrations
+   set on the inbound envelope (Discord uses `m.GuildID == ""`). The kind
+   is persisted in `recent.json` so a post-restart sweep applies the
+   right timeout to disk-discovered state.
+
+**Why.** D-011's "start fresh after 4h idle" assumed all sessions look the
+same. They don't: a busy channel goes quiet for an afternoon and the next
+message should reasonably start clean; a DM goes quiet for two days and
+the next message is almost always the continuation of a thread. Worse,
+*all* sessions lost their ring buffer on every restart — only the lossy
+rolling summary survived. The combined effect was that "context isn't
+lost" was only true when the bot had been running continuously.
+
+**Cost.**
+- One JSON write per LLM message (capped to ~20 entries), atomic. At
+  personal-bot scale this is noise.
+- Disk format becomes load-bearing — a future change to `llm.Message`
+  must remain JSON-round-trippable or the file silently dies (warned, not
+  errored — we degrade to "no prior state"). Acceptable.
+- `Envelope` grows a field (`IsDirect`). Cheap, backwards-default-safe
+  (zero value = "treat as channel" = old behaviour). Integrations that
+  don't set it get the old 4h timeout, which is correct for non-DM
+  transports.
+- Rotation now also removes `recent.json` (not archived — exact
+  transcript has no forensic value once the summary is archived).
+
+**Invariant.** `data/memory/` is still never touched. The new file lives
+only under `data/sessions/`.
+
+**Don't revert** without proposing how to keep mid-conversation context
+across a restart. The "rolling summary only" baseline was measurably
+worse.
+
+---
+
+## D-017 — System-prompt layout is prefix-cache-friendly by design
+
+**Status:** Accepted · **Date:** 2026-06-27
+
+**Decision.** The order in which `ContextBuilder.renderSystem` composes the
+system prompt — persona → `<context>` tag → shared INDEX → user INDEX →
+user profile → preferences → session summary — is treated as a contract.
+The prefix that varies least across consecutive turns sits at the front.
+The recent-ring messages follow the system message; the new user content
+is appended last. This is the cache-friendly shape: LM Studio (and other
+OpenAI-compatible servers) reuse the KV prefix when the token sequence
+matches a prior call, and our serial worker means consecutive turns on
+the same session share that prefix as long as memory hasn't changed.
+
+**Why.** This was implicit, then load-bearing once we made sessions
+persist (D-016). A longer ring buffer means a longer prompt; if the
+prefix isn't cached, prefill cost grows turn-over-turn. Documenting the
+ordering as a contract stops a future refactor from helpfully "tidying
+up" the section order and silently destroying cache reuse.
+
+**Cost.** Slight rigidity: anyone reorganising `renderSystem` must
+preserve the front-loaded stable sections. Tradeoff worth it.
+
+**Limit.** In a multi-user channel the per-user memory sections
+(`users/.../INDEX.md`, `user.md`, `preferences.md`) change between turns
+from different users — the prefix breaks at the shared-INDEX → user-INDEX
+boundary. Mitigation would require lazy memory loading via tools instead
+of always-inject. Not built; would be a real design change, log a new
+decision if pursuing.
+
+**Don't revert** without first checking whether prefill latency on long
+DM sessions has actually regressed. The ordering's only job is cache
+reuse; if a measurement disagrees, the measurement wins.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

@@ -29,6 +29,11 @@ type Envelope struct {
 	Thread      string // optional thread id within a channel
 	Content     string // user-facing text body
 	Received    time.Time
+
+	// IsDirect is true when the envelope originated in a one-on-one channel
+	// (e.g. a Discord DM). Used by the session store to apply a longer idle
+	// timeout — DMs are bursty across days, busy channels are not.
+	IsDirect bool
 }
 
 // Key returns a stable string that identifies the session scope for history

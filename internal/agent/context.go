@@ -30,7 +30,7 @@ func (b *ContextBuilder) Build(env integrations.Envelope) []llm.Message {
 		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: sys})
 	}
 
-	session := b.Sessions.Get(env.Key())
+	session := b.Sessions.Get(env.Key(), env.IsDirect)
 	msgs = append(msgs, session.Recent()...)
 
 	msgs = append(msgs, llm.Message{

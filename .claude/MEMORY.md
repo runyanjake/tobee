@@ -56,12 +56,16 @@ because group channels mix users.
 
 - `data/memory/` — **persists forever.** Long-term memory is never auto-deleted.
 - `data/sessions/` — managed by the in-process janitor
-  ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go)). When
-  a channel has been idle for `SESSION_IDLE_TIMEOUT` (default 4h),
-  `current.md` is rotated to `archive/<timestamp>.md` and the in-memory
-  session is reset. Archive files are deleted once their mtime exceeds
-  `SESSION_TTL` (default 7 days); empty directories are removed with them.
-  See [DECISIONS.md](DECISIONS.md) D-010 / D-011 for the rationale.
+  ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go)). Per
+  channel: `current.md` is the rolling summary, `recent.json` is the exact
+  ring buffer mirrored on every turn so warm context survives restart.
+  When a session has been idle past its threshold —
+  `SESSION_IDLE_TIMEOUT` (default 4h) for channels,
+  `SESSION_IDLE_TIMEOUT_DM` (default 168h) for DMs — `current.md` is
+  rotated to `archive/<timestamp>.md`, `recent.json` is removed, and the
+  in-memory session is reset. Archive files are deleted once their mtime
+  exceeds `SESSION_TTL` (default 7 days); empty directories are removed
+  with them. See [DECISIONS.md](DECISIONS.md) D-010 / D-011 / D-016.
 
 ## Tools
 

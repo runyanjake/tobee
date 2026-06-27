@@ -139,6 +139,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		Channel:     m.ChannelID,
 		Content:     content,
 		Received:    time.Now(),
+		IsDirect:    m.GuildID == "",
 	})
 }
 

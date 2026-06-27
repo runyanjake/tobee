@@ -107,7 +107,10 @@ tobee/
 │  │  └─ users/<integration>/<userId>/  # per-user trees
 │  ├─ scheduler/
 │  │  └─ jobs/<id>.json                 # one persisted job per file
-│  └─ sessions/                         # rolling per-channel summaries
+│  └─ sessions/<integration>/<channel>/ # per-channel short-term state
+│     ├─ current.md                     # rolling lossy summary
+│     ├─ recent.json                    # exact ring buffer (survives restart)
+│     └─ archive/<timestamp>.md         # rotated summaries (TTL'd)
 └─ CLAUDE.md, .claude/                  # this documentation
 ```
 

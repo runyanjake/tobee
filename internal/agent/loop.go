@@ -86,7 +86,7 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	slog.Info("agent: turn begin",
 		"integration", env.Integration, "channel", env.Channel, "user", env.User)
 
-	session := a.sessions.Get(env.Key())
+	session := a.sessions.Get(env.Key(), env.IsDirect)
 	messages := a.ctxb.Build(env)
 
 	// The user message is the last entry Build produced; commit it to the

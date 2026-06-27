@@ -84,31 +84,51 @@ Memory content is always framed inside `<memory path="...">...</memory>`
 fences with a system-level reminder that memory is data, not instructions.
 See [MEMORY.md](MEMORY.md) on safety.
 
+**Prefix-cache contract.** The section order above is deliberate. Stable
+content (persona, shared memory, user memory, summary) sits at the front
+of the system message; the recent-ring messages follow it; the new user
+content is appended last. LM Studio and most OpenAI-compatible servers
+reuse the KV prefix when the token sequence matches a prior call, so a
+busy session pays prefill cost only on the new tail. Don't reorder these
+sections without re-reading [DECISIONS.md](DECISIONS.md) D-017.
+
 ## Sessions
 
 A session is scoped by `(integration, channel, thread)` — see
 `Envelope.Key()` in [internal/integrations/integration.go](../internal/integrations/integration.go).
 
-Two tiers:
+Three on-disk / in-memory tiers:
 
 - **Short-term (in-memory)**: a ring buffer of the last N messages
   (`Session.recent`, cap = `maxTurns * 2`). Includes user, assistant, and
-  tool messages — everything the model saw during that turn. Rebuilt from
-  scratch at process start.
+  tool messages — everything the model saw during that turn.
+
+- **Short-term (mirrored to disk)**: `recent.json` next to the summary,
+  rewritten atomically on every `Session.Append`. Carries the exact
+  `[]llm.Message` plus a `kind` hint (`channel` / `dm`). On
+  `SessionStore.Get`, a missing in-memory entry loads `recent.json` first
+  so a restart resumes the conversation with the same tool calls / tool
+  results / user turns the model already saw. See
+  [DECISIONS.md](DECISIONS.md) D-016.
 
 - **Long-term (file)**: a rolling compressed summary in
   `data/sessions/<integration>/<channel>/current.md`. Rewritten after each
   turn by the summarizer (see below).
 
 The mapping from session key to filesystem path lives in
-`SessionStore.SummaryPath` — it just replaces `:` with `/`.
+`SessionStore.SummaryPath` / `recentPath` — both just replace `:` with `/`.
 
-**Idle rotation.** When a session has been idle for `SESSION_IDLE_TIMEOUT`
-(default 4h), `SessionStore.Get` (lazy) and the janitor's periodic sweep
-both rotate it: `current.md` moves to `archive/<UTC-timestamp>.md` and the
-in-memory entry is dropped, so the next message on that channel starts
-from a blank slate. Archive files live until the janitor prunes them at
-`SESSION_TTL`. See [DECISIONS.md](DECISIONS.md) D-011.
+**Idle rotation.** Idleness is kind-aware: `SESSION_IDLE_TIMEOUT`
+(default 4h) governs channels, `SESSION_IDLE_TIMEOUT_DM` (default 168h)
+governs one-on-one sessions. The active timeout comes from
+`Envelope.IsDirect` (Discord sets it from `m.GuildID == ""`); the kind is
+persisted in `recent.json` so a post-restart sweep applies the right
+timeout to disk-discovered state. When a session is idle past its
+threshold, `SessionStore.Get` (lazy) and the janitor's periodic sweep
+both rotate it: `current.md` moves to `archive/<UTC-timestamp>.md`,
+`recent.json` is removed, and the in-memory entry is dropped. Archive
+files live until the janitor prunes them at `SESSION_TTL`. See
+[DECISIONS.md](DECISIONS.md) D-011 and D-016.
 
 ## Summarizer
 
