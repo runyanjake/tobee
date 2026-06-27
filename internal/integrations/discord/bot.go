@@ -94,6 +94,7 @@ func (b *Bot) onReady(_ *discordgo.Session, r *discordgo.Ready) {
 	b.statsMu.Lock()
 	b.connect = time.Now()
 	b.statsMu.Unlock()
+	b.remember(r.User) // cache self so <@selfID> rewrites without waiting for a third party to mention us first.
 	slog.Info("discord: ready", "user", r.User.Username, "guilds", len(r.Guilds))
 	if b.channelID != "" {
 		slog.Info("discord: listening on channel", "id", b.channelID)
@@ -115,6 +116,12 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		b.remember(u)
 	}
 
+	if !b.isAddressed(s, m) {
+		slog.Debug("discord: ambient (not addressed); dropping",
+			"channel", m.ChannelID, "author", displayName(m.Author))
+		return
+	}
+
 	content := strings.TrimSpace(b.rewriteMentions(m.Content))
 	if content == "" {
 		return
@@ -133,6 +140,29 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		Content:     content,
 		Received:    time.Now(),
 	})
+}
+
+// nameRe matches the bot's name as a whole word, case-insensitive. Used to
+// detect bare-name addressing ("tobee, are you there?") alongside the @-mention
+// and reply-to-bot paths in isAddressed.
+var nameRe = regexp.MustCompile(`(?i)\btobee\b`)
+
+// isAddressed reports whether m is for the bot. We forward to the agent loop
+// when any of: the bot is in the mentions list, the message is a reply to one
+// of the bot's own messages, or the bot's name appears as a whole word in the
+// body. Everything else is ambient channel chatter and gets dropped here so we
+// don't burn an LLM call on it.
+func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) bool {
+	selfID := s.State.User.ID
+	for _, u := range m.Mentions {
+		if u != nil && u.ID == selfID {
+			return true
+		}
+	}
+	if ref := m.ReferencedMessage; ref != nil && ref.Author != nil && ref.Author.ID == selfID {
+		return true
+	}
+	return nameRe.MatchString(m.Content)
 }
 
 // sendReply is registered on the agent's Replies table. channel is the
