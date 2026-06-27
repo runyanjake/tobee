@@ -8,6 +8,12 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o tobee .
 
+# --- lint (CI-only; not in the runtime build path, so `compose up --build`
+# never pays for it). Invoke explicitly: docker build --target lint . ---
+FROM builder AS lint
+RUN test -z "$(gofmt -l .)" || { echo "gofmt needed:" >&2; gofmt -l . >&2; exit 1; }
+RUN go vet ./...
+
 # --- runtime image ---
 FROM alpine:3.20
 

@@ -22,11 +22,11 @@ type Integration interface {
 // Envelope is a normalized inbound event delivered from any integration to
 // the agent. Integrations own how these fields map to their transport.
 type Envelope struct {
-	Integration string    // "discord", "slack", "scheduler", ...
-	User        string    // stable per-integration user id, "" for system events
-	Channel     string    // opaque routing id used when replying
-	Thread      string    // optional thread id within a channel
-	Content     string    // user-facing text body
+	Integration string // "discord", "slack", "scheduler", ...
+	User        string // stable per-integration user id, "" for system events
+	Channel     string // opaque routing id used when replying
+	Thread      string // optional thread id within a channel
+	Content     string // user-facing text body
 	Received    time.Time
 }
 

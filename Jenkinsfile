@@ -29,16 +29,11 @@ pipeline {
 
     stage('Lint') {
       steps {
-        // Go toolchain stays in a container so the agent only needs Docker —
-        // matches the Dockerfile's builder image so we lint what we ship.
-        sh '''
-          set -eu
-          docker run --rm -v "$PWD":/src -w /src golang:1.23-alpine sh -eu -c '
-            unformatted="$(gofmt -l .)"
-            [ -z "$unformatted" ] || { echo "gofmt needed:" >&2; echo "$unformatted" >&2; exit 1; }
-            go vet ./...
-          '
-        '''
+        // gofmt + go vet run inside the Dockerfile's `lint` target. Using the
+        // build context (not a bind mount) keeps this working when Jenkins is
+        // containerized and talks to the host Docker daemon — a bind-mounted
+        // workspace would resolve against the host and come up empty.
+        sh 'docker build --target lint -t tobee-lint .'
       }
     }
 
@@ -151,12 +146,14 @@ EOF
   }
 
   post {
-    always {
-      sh 'rm -f .env.prod'
-    }
     failure {
       sh 'docker compose -f "$COMPOSE_FILE" ps || true'
       sh 'docker compose -f "$COMPOSE_FILE" logs --tail=200 || true'
+    }
+    cleanup {
+      // Runs last, after the failure diagnostics above, so .env.prod is still
+      // present when they execute. The secret never outlives the build.
+      sh 'rm -f .env.prod'
     }
   }
 }

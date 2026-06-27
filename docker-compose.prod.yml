@@ -15,7 +15,11 @@ services:
   ollama:
     image: ollama/ollama:latest
     # Sourced for OLLAMA_KEEP_ALIVE; unrelated tobee vars here are harmless.
-    env_file: .env.prod
+    # required:false so read-only commands (ps/logs/down) still work after the
+    # CI job has removed .env.prod; `up`/`config` validate values separately.
+    env_file:
+      - path: .env.prod
+        required: false
     volumes:
       # Persist pulled models so a restart doesn't re-download gigabytes.
       - ollama-models:/root/.ollama
@@ -41,7 +45,9 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
-    env_file: .env.prod
+    env_file:
+      - path: .env.prod
+        required: false
     environment:
       - OLLAMA_HOST=ollama:11434
     entrypoint: ["/bin/sh", "-c", "ollama pull \"$${AI_MODEL}\""]
@@ -49,7 +55,9 @@ services:
 
   tobee:
     build: .
-    env_file: .env.prod
+    env_file:
+      - path: .env.prod
+        required: false
     depends_on:
       ollama:
         condition: service_healthy

@@ -14,8 +14,8 @@ type ReplySender func(ctx context.Context, channel, thread, text string) error
 
 // Replies is a lookup table of integration name → ReplySender.
 type Replies struct {
-	mu       sync.RWMutex
-	senders  map[string]ReplySender
+	mu      sync.RWMutex
+	senders map[string]ReplySender
 }
 
 func NewReplies() *Replies {
