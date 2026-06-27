@@ -22,6 +22,7 @@ import (
 	"tobee/internal/scheduler"
 	"tobee/internal/tools"
 	memtools "tobee/internal/tools/memory"
+	scheduletools "tobee/internal/tools/schedule"
 	statustools "tobee/internal/tools/status"
 )
 
@@ -71,6 +72,7 @@ func main() {
 	registry := tools.NewRegistry()
 	memtools.Register(registry, memFS)
 	statustools.Register(registry, abilityReg)
+	// schedule.* tools are registered after the JobManager is built below.
 
 	// --- Sessions + summarizer -------------------------------------------
 	sessions, err := agent.NewSessionStore(dataDir+"/sessions", 10, sessionIdleTimeout)
@@ -113,6 +115,16 @@ func main() {
 	sched := scheduler.New(bus)
 	abilityReg.Register(sched.Reporter())
 
+	// --- JobManager: dynamic, model-scheduled jobs -----------------------
+	jobStore, err := scheduler.NewJobStore(dataDir + "/scheduler/jobs")
+	if err != nil {
+		slog.Error("jobs: store init failed", "err", err)
+		os.Exit(1)
+	}
+	jobs := scheduler.NewJobManager(bus, jobStore)
+	scheduletools.Register(registry, jobs)
+	abilityReg.Register(jobs.Reporter())
+
 	// --- Janitor: prune stale session summaries --------------------------
 	// LLM-free periodic sweep. Only touches data/sessions — long-term memory
 	// under data/memory is never deleted.
@@ -132,6 +144,10 @@ func main() {
 	}
 	loop.Start(ctx)
 	sched.Start(ctx)
+	if err := jobs.Start(ctx); err != nil {
+		slog.Error("jobs: start failed", "err", err)
+		os.Exit(1)
+	}
 	janitor.Start(ctx)
 
 	slog.Info("tobee is running — press Ctrl+C to exit")

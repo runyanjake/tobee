@@ -85,6 +85,7 @@ tobee/
 │  ├─ tools/
 │  │  ├─ registry.go                    # JSON-Schema registry, timeouts, panic recovery
 │  │  ├─ memory/                        # memory.{read,write,append,search,list} (scoped)
+│  │  ├─ schedule/                      # schedule.{create,cancel,list} — model-authored timers
 │  │  └─ status/                        # status.report — aggregates abilities.Reporter snapshots
 │  ├─ integrations/
 │  │  ├─ integration.go                 # interface + Envelope
@@ -93,14 +94,19 @@ tobee/
 │  ├─ memory/
 │  │  └─ fs.go                          # sandboxed FS rooted at data/memory
 │  └─ scheduler/
-│     ├─ tick.go                        # cron-like synthetic Envelopes + Reporter
+│     ├─ tick.go                        # static synthetic Envelopes + Reporter
+│     ├─ jobs.go                        # dynamic, model-authored jobs (cron + one-shot)
+│     ├─ jobstore.go                    # one JSON file per job under data/scheduler/jobs/
+│     ├─ jobs_reporter.go               # schedules Reporter
 │     ├─ janitor.go                     # in-process session cleanup
-│     ├─ reporter.go                    # scheduler Reporter
+│     ├─ reporter.go                    # scheduler Reporter (static ticks)
 │     └─ janitor_reporter.go            # janitor Reporter
 ├─ data/                                # gitignored; runtime state
 │  ├─ memory/
 │  │  ├─ shared/                        # cross-user knowledge
 │  │  └─ users/<integration>/<userId>/  # per-user trees
+│  ├─ scheduler/
+│  │  └─ jobs/<id>.json                 # one persisted job per file
 │  └─ sessions/                         # rolling per-channel summaries
 └─ CLAUDE.md, .claude/                  # this documentation
 ```
@@ -119,7 +125,8 @@ What's built (in order it was added):
 5. ContextBuilder, SessionStore, agent loop (serial worker).
 6. Post-turn rolling summarizer.
 7. Discord integration (gateway + message split + reply sender).
-8. Scheduler skeleton (no ticks registered).
+8. Scheduler skeleton (no static ticks registered).
+9. Dynamic scheduled jobs: `schedule.*` tools + persistent JobManager.
 
 What's not built, and why — see [DECISIONS.md](DECISIONS.md):
 

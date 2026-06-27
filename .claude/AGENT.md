@@ -125,13 +125,23 @@ recap. If it fails, the reply has already been delivered; we log and move on.
 
 ## Scheduler
 
-[internal/scheduler/tick.go](../internal/scheduler/tick.go) publishes
-synthetic Envelopes onto the same bus that integrations use. Day one
-nothing is registered. The hook is in place for when we want:
+Two flavours of scheduled work share the same bus-injection trick:
 
-- Reflection / consolidation passes (nightly).
-- Proactive pings.
-- Idle checks ("anything worth reacting to in the last hour?").
+- **Static ticks** ([internal/scheduler/tick.go](../internal/scheduler/tick.go))
+  publish a fixed Envelope on a fixed interval. Day one nothing is
+  registered. Hook is in place for reflection passes, idle checks,
+  proactive pings.
 
-The agent loop cannot tell a scheduled tick from a Discord message — which
-is the point.
+- **Dynamic jobs** ([internal/scheduler/jobs.go](../internal/scheduler/jobs.go))
+  are model-authored timers. The `schedule.create` / `schedule.cancel` /
+  `schedule.list` tools talk to a `JobManager` that owns a single robfig
+  cron and a set of `time.AfterFunc` timers for one-shots. Each job is
+  persisted as one JSON file under `data/scheduler/jobs/` so timers
+  survive restart (one-shots whose `at` already passed are dropped on
+  boot — misfire policy: skip; see [DECISIONS.md](DECISIONS.md) D-015).
+  When a job fires, the synthetic Envelope inherits Integration / Channel
+  / Thread / User from the originating turn, so the reply lands in the
+  channel that asked for the reminder and memory routing still works.
+
+The agent loop cannot tell either kind of scheduled fire from a Discord
+message — which is the point.

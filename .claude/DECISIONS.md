@@ -350,6 +350,63 @@ decision.
 
 ---
 
+## D-015 — Dynamic scheduled jobs persisted as one JSON file per job
+
+**Status:** Accepted · **Date:** 2026-06-26
+
+**Decision.** The model schedules its own future prompts via a
+`schedule.*` tool pack backed by `internal/scheduler.JobManager`. Jobs are
+persisted as one JSON file per job under `data/scheduler/jobs/<id>.json`
+(atomic tmp + rename writes; delete on cancel or one-shot fire). At startup
+the manager replays every file, drops one-shots whose `at` is in the past,
+and registers the rest.
+
+Recurring jobs go through a single `github.com/robfig/cron/v3` instance
+(one internal goroutine, min-heap of next-fire times). One-shot jobs use
+`time.AfterFunc` directly. Cancellation goes through a per-job handle in a
+shared map. When a job fires, the manager publishes a synthetic
+`Envelope` onto the same bus integrations use — the agent loop cannot
+distinguish it from a real inbound message, which is the point.
+
+The fired envelope inherits `Integration` / `Channel` / `Thread` / `User`
+/ `UserName` from the originating turn (carried by `scope.UserScope`,
+extended for this feature). The reply therefore lands in the channel that
+asked for the timer, memory tools route under the right user tree, and
+the session transcript stays coherent. `Content` is prefixed with
+`[scheduled fire: <name>]` so the model can tell self-fires apart.
+
+**Why.** Reminders, follow-ups, and "check on this in an hour" are
+high-value behaviours that don't fit into a single turn. The existing
+static-tick `Scheduler` covers reflection / heartbeat hooks but not
+arbitrary model-authored timers. Persistence is mandatory — a reminder
+that vanishes on restart is worse than no reminder. One file per job
+matches the rest of the project's "plain text, no DB" stance (D-008) and
+keeps the cancel path a single `os.Remove`.
+
+**Misfire policy: skip.** If tobee is down when a one-shot was supposed
+to fire, the next boot deletes the file rather than running stale.
+Recurring jobs simply pick up at their next natural fire. Running a
+reminder hours late is worse than silence; the model can reschedule when
+it learns the gap happened.
+
+**Cost.**
+
+- New dependency: `github.com/robfig/cron/v3`. Mature, small, well-scoped.
+- New abstraction surface: `JobManager`, a `schedules` Reporter, and three
+  tools. Justified by the same reasoning as D-014 — the alternative
+  (model-callable shell-out, ad-hoc goroutine spawning) is worse.
+- `scope.UserScope` now carries `Channel` / `Thread` / `UserName` in
+  addition to user identity. `Key()` / `Dir()` are unchanged and still
+  user-only, so the memory-FS sandbox invariant (D-003) is preserved.
+- One-shot jobs lose precise sub-second accuracy after a process restart
+  if the persisted `At` is in the future — we re-arm with `time.Until`
+  which is fine for human timescales.
+
+**Don't revert** without proposing an alternative for the persistence and
+the routing-back-to-channel requirement; both are load-bearing.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

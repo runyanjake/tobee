@@ -16,17 +16,29 @@ import (
 	"tobee/internal/integrations"
 )
 
-// UserScope identifies one user within one integration. Empty User means
-// no user is attached to the turn (e.g. scheduler ticks).
+// UserScope identifies the originating turn: the user, the integration that
+// delivered the inbound event, and the channel/thread the reply will land in.
+// Empty User means no user is attached (e.g. scheduler ticks). Channel and
+// Thread are pure routing hints — they do not affect Key() / Dir(), which
+// remain user-only and safe for filesystem use.
 type UserScope struct {
 	Integration string
 	User        string
+	UserName    string
+	Channel     string
+	Thread      string
 }
 
 // FromEnvelope derives a scope from an inbound envelope. Returns the
 // zero value if the envelope has no user attached.
 func FromEnvelope(e integrations.Envelope) UserScope {
-	return UserScope{Integration: e.Integration, User: e.User}
+	return UserScope{
+		Integration: e.Integration,
+		User:        e.User,
+		UserName:    e.UserName,
+		Channel:     e.Channel,
+		Thread:      e.Thread,
+	}
 }
 
 // HasUser reports whether the scope identifies a specific user.
