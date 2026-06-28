@@ -613,6 +613,126 @@ all without prompt acrobatics.
 
 ---
 
+## D-020 — Think → plan → act with closed-loop replan as the loop shape
+
+**Status:** Accepted · **Date:** 2026-06-28 · Amends D-001 (which set
+ReAct + native tool-use as the loop body; this decision wraps the
+ReAct sub-loop in an explicit plan/replan/synthesise scaffold).
+
+**Decision.** A turn is no longer one ReAct sub-loop. It is four
+phases coordinated by `processTurn` in
+[internal/agent/loop.go](../internal/agent/loop.go):
+
+1. **Plan** ([internal/agent/planner.go](../internal/agent/planner.go)).
+   `Planner.Initial` runs one LLM call with the planner persona
+   ([prompts/planner.md](../prompts/planner.md)) and a single virtual
+   tool, `plan.commit`. Two outcomes: the model commits a structured
+   plan (ordered `Step`s, each with a free-text `intent`), or it
+   produces trivial-reply text and we skip the rest of the turn. The
+   plan is JSON-decoded from the tool call's arguments; we never parse
+   structure out of the text body (D-001 still holds).
+2. **Act** ([internal/agent/executor.go](../internal/agent/executor.go)).
+   `Executor.RunStep` runs the ReAct sub-loop, scoped to one Step at a
+   time. Per-step iteration cap (`PLAN_MAX_STEPS_PER_STEP`, default 4)
+   and turn-wide total cap (`PLAN_MAX_STEPS_TOTAL`, default 12) bound
+   it. A step ends `done` when the model produces a final text
+   response with no tool calls; it ends `failed` when either cap is
+   hit without a terminal response.
+3. **Replan** ([internal/agent/planner.go](../internal/agent/planner.go)).
+   On step failure, `Planner.Revise` runs another LLM call with the
+   prior plan + a `<replan>` system reminder and a `plan.revise`
+   virtual tool. Hard cap `PLAN_MAX_REPLANS` (default 3); on
+   exhaustion the loop finalises the plan with whatever steps did
+   complete.
+4. **Synthesise** ([internal/agent/synthesizer.go](../internal/agent/synthesizer.go)).
+   Multi-step plans get one final LLM call using
+   [prompts/synthesizer.md](../prompts/synthesizer.md) to compose the
+   user-facing reply from the plan's step results. Single-step plans
+   skip this and use the step's own result text as the reply, since a
+   synthesis call would just paraphrase one input.
+
+The plan is **turn-scoped**: it lives only inside `processTurn`. It is
+not persisted to `recent.json` and does not survive a crash. The user
+message is committed to the session transcript before the planner
+runs, so a mid-turn crash leaves a recoverable anchor (the next turn
+will see the orphaned user message and can react).
+
+**The virtual tools.** `plan.commit` and `plan.revise` are advertised
+only on the planner's LLM calls — they are never registered on the
+global `tools.Registry`. `Planner.Initial` / `Planner.Revise` watch
+for them in the response's `ToolCalls` and decode the arguments into a
+`*Plan`. This is how we get structure without violating D-001's
+"no JSON-in-string" rule: the structure rides on the native tool-call
+protocol.
+
+**Prefix-cache contract** (D-017) still holds. `ContextBuilder.ComposeSystem`
+puts the plan render *last* among the data sections, so the prefix is
+stable across executor sub-iterations within a step — only the trailing
+`<plan>` block and the `<current_step>` reminder change. Persona swaps
+between phases break the prefix once per phase boundary; that's
+unavoidable and acceptable.
+
+**Why.** The implicit ReAct loop conflated "decide what to do" with
+"do it." Two observable failures fell out:
+
+- Long multi-step turns where the model improvised step ordering
+  badly (re-reading the same memory file twice, skipping the obvious
+  first step). An explicit planner forces an ordering before any tool
+  is called.
+- Tool failures handled inconsistently. With no plan, "retry" and
+  "give up" looked identical from the loop's perspective. With a
+  plan, a failed step is a clear signal: revise or stop.
+
+The plan-and-execute family (LangChain's `PlanAndExecute`, ReWOO, the
+Anthropic computer-use loop) all converge on this shape. We picked
+the closest variant — linear plan, single replan tool, conditional
+synthesis — that fits tobee's "personal agent, fast simple turns
+shouldn't pay structure tax" constraint.
+
+**Trivial-turn fast path.** Critical for keeping latency reasonable.
+Chitchat ("hi tobee") goes planner → reply, one LLM call, same cost
+as the old loop. Multi-step turns pay `1 + N steps + (0 or 1)
+synthesis` calls. Worst case (3 replans + total budget) is bounded by
+the cap, not unbounded.
+
+**Cost.**
+
+- One mandatory extra LLM call per turn (the planner). Trivial turns
+  amortise it; the planner doubles as the responder when no plan is
+  needed.
+- One synthesis LLM call per multi-step turn.
+- The plan does not persist across crash. Acceptable per the user
+  decision; mid-turn crashes are rare and the user message survives.
+- `agent.Config` lost its `MaxSteps` field; budgets now split across
+  `Executor.maxPerStep` / `totalBudget` and `Config.MaxReplans`. A
+  one-time churn at the wiring site
+  ([cmd/tobee/main.go](../cmd/tobee/main.go)).
+- New env-var surface: `PLAN_MAX_STEPS_TOTAL`, `PLAN_MAX_STEPS_PER_STEP`,
+  `PLAN_MAX_REPLANS`. Documented in `.env.example`.
+
+**Explicitly not built.**
+
+- **Reflection / post-turn self-critique.** Logged as a deliberate
+  follow-up. The plan artifact gives us the substrate; a reflect
+  pass becomes a fifth phase (Plan → Act → Replan? → Synth → Reflect)
+  feeding memory. Not now.
+- **DAG / parallel steps.** Linear plan. If parallelism becomes
+  useful the `Step` type can grow `dependsOn` without breaking
+  callers.
+- **Plan persistence across restart.** Turn-scoped per user
+  decision. Resuming a mid-flight plan is a separate ADR.
+- **Skipping the planner for known-simple inputs.** Considered a
+  triage heuristic; rejected for now because the planner *is* the
+  simple-input responder via the trivial-reply path. Two-routers
+  doesn't beat one.
+
+**Don't revert** without first explaining how the replacement keeps
+(a) a structured plan artifact the loop can inspect, and (b) the
+single-LLM-call trivial-turn path. Both are load-bearing — the first
+for the user-stated robustness requirement, the second for latency.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

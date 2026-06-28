@@ -2,65 +2,68 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/runyanjake/tobee/internal/integrations"
 	"github.com/runyanjake/tobee/internal/llm"
 	"github.com/runyanjake/tobee/internal/scope"
-	"github.com/runyanjake/tobee/internal/tools"
 )
 
-// Config controls the agent's execution limits.
+// Config controls the agent's execution limits at the turn-coordinator
+// level. Per-step and total executor budgets live on Executor.
 type Config struct {
-	MaxSteps   int           // hard cap on tool-call iterations per turn
 	TurnBudget time.Duration // wall-clock cap on a single turn
+	MaxReplans int           // hard cap on planner.Revise calls per turn
 }
 
-// Agent is the serial worker that consumes envelopes from the bus and drives
-// each through a ReAct-style tool-use loop.
+// Agent is the serial worker that consumes envelopes from the bus and
+// drives each through the think → plan → act → (replan) → synthesize
+// pipeline. One goroutine processes envelopes sequentially.
 type Agent struct {
 	bus      *integrations.Bus
-	llm      *llm.Client
-	tools    *tools.Registry
 	sessions *SessionStore
 	ctxb     *ContextBuilder
 	replies  *Replies
 	summ     *Summarizer
+
+	planner *Planner
+	exec    *Executor
+	synth   *Synthesizer
 
 	cfg Config
 }
 
 func New(
 	bus *integrations.Bus,
-	client *llm.Client,
-	reg *tools.Registry,
 	sessions *SessionStore,
 	ctxb *ContextBuilder,
 	replies *Replies,
 	summ *Summarizer,
+	planner *Planner,
+	exec *Executor,
+	synth *Synthesizer,
 	cfg Config,
 ) *Agent {
-	if cfg.MaxSteps <= 0 {
-		cfg.MaxSteps = 8
-	}
 	if cfg.TurnBudget <= 0 {
 		cfg.TurnBudget = 2 * time.Minute
 	}
+	if cfg.MaxReplans < 0 {
+		cfg.MaxReplans = 0
+	}
 	return &Agent{
-		bus: bus, llm: client, tools: reg, sessions: sessions,
-		ctxb: ctxb, replies: replies, summ: summ, cfg: cfg,
+		bus: bus, sessions: sessions, ctxb: ctxb,
+		replies: replies, summ: summ,
+		planner: planner, exec: exec, synth: synth,
+		cfg: cfg,
 	}
 }
 
-// Start launches the single worker goroutine. It returns immediately; cancel
-// ctx to stop the loop. One goroutine processes envelopes sequentially so
-// memory-file writes never race and replies remain deterministic.
+// Start launches the single worker goroutine. Cancel ctx to stop the loop.
 func (a *Agent) Start(ctx context.Context) {
 	go func() {
-		slog.Info("agent: loop started", "tools", a.tools.Names(), "senders", a.replies.Summary())
+		slog.Info("agent: loop started", "senders", a.replies.Summary())
 		for {
 			select {
 			case <-ctx.Done():
@@ -73,81 +76,114 @@ func (a *Agent) Start(ctx context.Context) {
 	}()
 }
 
-// processTurn drives a single envelope to completion.
+// processTurn drives a single envelope from inbound to reply through the
+// think → plan → act → (replan) → synthesize phases. Each phase is a
+// distinct LLM call (or sub-loop of calls) with its own persona; the
+// transcript carries through unchanged, with the system slot swapped per
+// phase.
 func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	ctx, cancel := context.WithTimeout(parent, a.cfg.TurnBudget)
 	defer cancel()
 
-	// Attach the originating user identity so memory tools and reporters
-	// can route to the right slice of state. Scheduler ticks carry an empty
-	// User and tools that require user scope will surface a clear error.
 	ctx = scope.With(ctx, scope.FromEnvelope(env))
 
 	slog.Info("agent: turn begin",
 		"integration", env.Integration, "channel", env.Channel, "user", env.User)
 
 	session := a.sessions.Get(env.Key(), env.IsDirect)
-	messages := a.ctxb.Build(env)
+	transcript := a.ctxb.ComposeTranscript(env)
 
-	// The user message is the last entry Build produced; commit it to the
-	// session transcript immediately so it survives a crash mid-turn.
+	// Commit the user message to the session transcript before the first
+	// LLM call so a crash mid-turn leaves a recoverable record.
 	session.Append(llm.Message{Role: llm.RoleUser, Content: env.Content})
 
-	toolSpecs := a.tools.Specs()
-	finalText := ""
-
-	for step := 0; step < a.cfg.MaxSteps; step++ {
-		resp, err := a.llm.Call(ctx, messages, toolSpecs)
-		if err != nil {
-			slog.Error("agent: llm error", "step", step, "err", err)
+	// --- Phase 1: think + plan ------------------------------------------
+	plan, fastReply, err := a.planner.Initial(ctx, env, transcript)
+	if err != nil {
+		slog.Error("agent: planner failed", "err", err)
+		return
+	}
+	if plan == nil {
+		// Trivial-turn fast path: the planner replied directly.
+		fastReply = strings.TrimSpace(fastReply)
+		if fastReply == "" {
+			slog.Debug("agent: planner produced empty reply")
 			return
 		}
+		a.deliver(ctx, env, session, fastReply)
+		return
+	}
 
-		// Record the assistant message (text + any tool_calls) verbatim so
-		// the transcript matches what we send back on the next iteration.
-		asst := llm.Message{
-			Role:      llm.RoleAssistant,
-			Content:   resp.Text,
-			ToolCalls: resp.ToolCalls,
+	slog.Info("agent: plan committed",
+		"goal", plan.Goal, "steps", len(plan.Steps))
+
+	// --- Phase 2: act (per step) with closed-loop replan ---------------
+	for !plan.Complete() {
+		if ctx.Err() != nil {
+			slog.Warn("agent: turn ctx expired during execution")
+			break
 		}
-		messages = append(messages, asst)
-		session.Append(asst)
-
-		if resp.Text != "" {
-			finalText = resp.Text
-		}
-
-		if len(resp.ToolCalls) == 0 {
+		step := plan.Next()
+		if step == nil {
 			break
 		}
 
-		for _, tc := range resp.ToolCalls {
-			out, cerr := a.tools.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
-			content := out
-			if cerr != nil {
-				slog.Warn("agent: tool error", "tool", tc.Function.Name, "err", cerr)
-				content = fmt.Sprintf("error: %v", cerr)
-			} else {
-				slog.Debug("agent: tool ok", "tool", tc.Function.Name)
-			}
-			tmsg := llm.Message{
-				Role:       llm.RoleTool,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    content,
-			}
-			messages = append(messages, tmsg)
-			session.Append(tmsg)
+		var ok bool
+		transcript, ok = a.exec.RunStep(ctx, env, plan, step, transcript, session)
+		if ok {
+			slog.Info("agent: step done", "id", step.ID)
+			continue
 		}
+
+		slog.Warn("agent: step failed", "id", step.ID, "err", step.Error)
+
+		if plan.Replans >= a.cfg.MaxReplans {
+			slog.Warn("agent: replan budget exhausted; finalising incomplete plan",
+				"replans", plan.Replans)
+			break
+		}
+
+		// Phase 2b: replan with the failure context the executor produced.
+		revised, rerr := a.planner.Revise(ctx, env, plan, step.Error, transcript)
+		if rerr != nil {
+			slog.Error("agent: replan failed; finalising incomplete plan", "err", rerr)
+			break
+		}
+		slog.Info("agent: plan revised",
+			"replans", revised.Replans, "steps", len(revised.Steps))
+		plan = revised
 	}
 
-	if finalText != "" {
-		a.replies.Send(ctx, env.Integration, env.Channel, env.Thread, finalText)
+	// --- Phase 3: synthesize (multi-step only) --------------------------
+	var reply string
+	if plan.HasMultipleSteps() {
+		out, serr := a.synth.Finalize(ctx, env, plan, transcript)
+		if serr != nil {
+			slog.Error("agent: synthesizer failed; falling back to last step", "err", serr)
+			reply = plan.LastStepText()
+		} else {
+			reply = out
+		}
 	} else {
-		slog.Debug("agent: turn produced no reply text")
+		reply = plan.LastStepText()
 	}
 
-	// Rolling summary is best-effort; failure must not block future turns.
+	a.deliver(ctx, env, session, strings.TrimSpace(reply))
+}
+
+// deliver sends the reply and runs the post-turn summarizer. Both are
+// best-effort: a failure here must not block future turns.
+func (a *Agent) deliver(ctx context.Context, env integrations.Envelope, session *Session, reply string) {
+	if reply == "" {
+		slog.Debug("agent: turn produced no reply text")
+	} else {
+		// Mirror the delivered reply into session so the model sees what
+		// it actually told the user on the next turn. Plan-synthesised
+		// replies are not otherwise present in the executor transcript.
+		session.Append(llm.Message{Role: llm.RoleAssistant, Content: reply})
+		a.replies.Send(ctx, env.Integration, env.Channel, env.Thread, reply)
+	}
+
 	if a.summ != nil {
 		if err := a.summ.Update(ctx, env.Key(), session.Recent()); err != nil {
 			slog.Warn("agent: summarizer failed", "err", err)
@@ -155,5 +191,5 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	}
 
 	slog.Info("agent: turn end",
-		"integration", env.Integration, "channel", env.Channel, "chars", len(finalText))
+		"integration", env.Integration, "channel", env.Channel, "chars", len(reply))
 }

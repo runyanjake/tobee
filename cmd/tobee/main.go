@@ -59,6 +59,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	planMaxStepsTotal, err := strconv.Atoi(envOr("PLAN_MAX_STEPS_TOTAL", "12"))
+	if err != nil {
+		slog.Error("PLAN_MAX_STEPS_TOTAL: invalid integer", "err", err)
+		os.Exit(1)
+	}
+	planMaxStepsPerStep, err := strconv.Atoi(envOr("PLAN_MAX_STEPS_PER_STEP", "4"))
+	if err != nil {
+		slog.Error("PLAN_MAX_STEPS_PER_STEP: invalid integer", "err", err)
+		os.Exit(1)
+	}
+	planMaxReplans, err := strconv.Atoi(envOr("PLAN_MAX_REPLANS", "3"))
+	if err != nil {
+		slog.Error("PLAN_MAX_REPLANS: invalid integer", "err", err)
+		os.Exit(1)
+	}
+
 	// --- LLM client -------------------------------------------------------
 	client := llm.NewClient(aiURL, aiModel, llm.Options{
 		Temperature: 0.7,
@@ -106,6 +122,8 @@ func main() {
 		os.Exit(1)
 	}
 	persona := readPersona(promptsDir + "/persona")
+	plannerPrompt := readFile(promptsDir+"/planner.md", "")
+	synthPrompt := readFile(promptsDir+"/synthesizer.md", "")
 	summPrompt := readFile(promptsDir+"/summarizer.md", "")
 	summarizer := agent.NewSummarizer(client, summPrompt, sessions)
 
@@ -118,12 +136,19 @@ func main() {
 	}
 	replies := agent.NewReplies()
 
+	// --- Planner / executor / synthesizer --------------------------------
+	planner := agent.NewPlanner(client, ctxb, plannerPrompt)
+	executor := agent.NewExecutor(client, registry, ctxb, planMaxStepsPerStep, planMaxStepsTotal)
+	synthesizer := agent.NewSynthesizer(client, ctxb, synthPrompt)
+
 	// --- Event bus + agent loop ------------------------------------------
 	bus := integrations.NewBus(64)
-	loop := agent.New(bus, client, registry, sessions, ctxb, replies, summarizer, agent.Config{
-		MaxSteps:   8,
-		TurnBudget: 2 * time.Minute,
-	})
+	loop := agent.New(bus, sessions, ctxb, replies, summarizer,
+		planner, executor, synthesizer,
+		agent.Config{
+			TurnBudget: 2 * time.Minute,
+			MaxReplans: planMaxReplans,
+		})
 
 	// --- Integrations -----------------------------------------------------
 	dbot, err := discord.New(discord.Config{

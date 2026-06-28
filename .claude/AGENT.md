@@ -7,51 +7,96 @@ budget runs out.
 
 ## Loop shape
 
-Pattern: **ReAct with native tool-use.** The loop is a small state machine
-driven by the LLM's `tool_calls` response, not by parsed JSON text in the
-message body. This is a hard break from the earlier homegrown
-`{"response":..., "tool_calls":[...]}` protocol — see
-[DECISIONS.md](DECISIONS.md).
+Pattern: **plan-and-execute with closed-loop replan, on top of native
+tool-use.** A turn is four phases coordinated by `processTurn` in
+[internal/agent/loop.go](../internal/agent/loop.go). The Act phase is a
+small ReAct sub-loop scoped to one Step. The structure rides on the
+LLM's `tool_calls` response — we never parse JSON out of the text body.
+See [DECISIONS.md](DECISIONS.md) D-001 and D-020.
 
-On each step the loop:
+The phases:
 
-1. Calls `llm.Client.Call(messages, tools)` with the full message list and
-   the currently-registered tool specs.
-2. Appends the assistant message (text + any tool_calls) to both the
-   in-flight `messages` slice and the session transcript.
-3. If the assistant produced final text, remembers it as `finalText`.
-4. If the response contains tool_calls, dispatches each via the registry
-   and appends the tool result as a `role: tool` message.
-5. Breaks when there are no tool_calls, or when the step budget is hit.
+1. **Plan.** `Planner.Initial` runs one LLM call with the planner
+   persona ([prompts/planner.md](../prompts/planner.md)) and a single
+   virtual tool, `plan.commit`. Either the model commits a structured
+   `Plan` (ordered `Step`s, each with a free-text `intent`), or it
+   produces a trivial-reply text and we skip the rest of the turn.
+   `plan.commit` is advertised only on this call — it is never
+   registered on the global `tools.Registry`.
+
+2. **Act.** `Executor.RunStep` runs the ReAct sub-loop, scoped to one
+   Step. Per-step iteration cap (`PLAN_MAX_STEPS_PER_STEP`, default 4)
+   and turn-wide total cap (`PLAN_MAX_STEPS_TOTAL`, default 12) bound
+   it. Within a step:
+   - Compose system message: executor persona + data sections + plan +
+     a focused `<current_step>` reminder.
+   - Call the LLM with all registered tools.
+   - Append the assistant message (text + tool_calls) to the
+     in-flight transcript and the session.
+   - Dispatch any tool_calls; append each result as a `role: tool`
+     message.
+   - Break when the response has no tool_calls (terminal text). That
+     text becomes the step's `Result`.
+   If the per-step or total cap is hit without a terminal text, the
+   step is marked `failed`.
+
+3. **Replan.** When a step fails, `Planner.Revise` runs another LLM
+   call with the prior plan + a `<replan>` system reminder and a
+   `plan.revise` virtual tool. The replan budget is
+   `Config.MaxReplans` (default 3); on exhaustion the loop finalises
+   the plan with whatever steps did complete.
+
+4. **Synthesise.** Multi-step plans get one final LLM call using
+   [prompts/synthesizer.md](../prompts/synthesizer.md) to compose the
+   user-facing reply from the plan's step results. Single-step plans
+   skip this and use the step's own result text directly.
 
 At the end, the loop:
 
-1. Delivers `finalText` via `Replies.Send(integration, channel, …)`.
-2. Runs the summarizer against the session transcript (best-effort).
+1. Mirrors the delivered reply into the session as an assistant
+   message (so the model sees what it told the user next turn).
+2. Delivers it via `Replies.Send(integration, channel, …)`.
+3. Runs the summarizer against the session transcript (best-effort).
 
-See [internal/agent/loop.go](../internal/agent/loop.go) for the real code.
+The plan is **turn-scoped**: it does not persist to `recent.json` and
+does not survive a crash. The user message is committed to the session
+before the planner runs, so a mid-turn crash leaves a recoverable
+anchor.
 
 ## Key choices
 
-- **Serial worker.** A single goroutine drains the bus. This is deliberate:
-  it makes memory-file writes race-free without locks, keeps replies
-  deterministically ordered, and avoids "two replies in parallel" footguns.
-  A message from channel A blocks a message from channel B for the duration
-  of one turn. Acceptable for a personal agent. Revisit if scale demands.
+- **Serial worker.** A single goroutine drains the bus. Makes
+  memory-file writes race-free without locks, keeps replies
+  deterministically ordered, avoids parallel-reply footguns. A
+  message from channel A blocks a message from channel B for the
+  duration of one turn. Acceptable for a personal agent. Revisit if
+  scale demands.
 
 - **Native tool-use, not JSON-in-string.** The LLM returns structured
-  `tool_calls`; we never parse the text body for a JSON envelope. This
-  ties us to providers that support function calling. LM Studio does, when
-  the loaded model does. This is a load-bearing decision — do not
-  re-introduce JSON-in-string as a fallback.
+  `tool_calls`; we never parse the text body for a JSON envelope.
+  This applies to the planner's virtual tools too (`plan.commit`,
+  `plan.revise`) — they ride on the same protocol. Load-bearing.
 
-- **Step budget** (`Config.MaxSteps`, default 8) and **wall-clock budget**
-  (`Config.TurnBudget`, default 2 min) prevent runaway loops.
+- **Trivial-turn fast path.** Chitchat skips the executor and
+  synthesiser. The planner doubles as the responder when no plan is
+  needed: one LLM call, reply.
+
+- **Plan is the central state.** It is rendered into the system
+  prompt at every executor and replan call, last in the data sections
+  so the prefix-cache invariant (D-017) holds across consecutive
+  sub-iterations within a step.
+
+- **Budgets.** `Config.TurnBudget` (default 2 min, wall-clock) is the
+  outer ceiling. `Config.MaxReplans` (default 3) caps replan calls.
+  `Executor.maxPerStep` (default 4) caps each step's sub-loop. The
+  total across the whole turn is capped at `Executor.totalBudget`
+  (default 12).
 
 - **Interruptible.** The turn takes a context derived from the service
-  context; cancellation during shutdown stops the turn mid-step.
+  context; cancellation during shutdown stops the turn mid-phase.
 
-- **Summarizer is best-effort.** Its failure must never block a reply.
+- **Summarizer is best-effort.** Its failure must never block a
+  reply.
 
 ## Context building
 

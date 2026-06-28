@@ -11,47 +11,40 @@ import (
 	"github.com/runyanjake/tobee/internal/workspace"
 )
 
-// ContextBuilder assembles the message list passed to the LLM on the first
-// step of a turn. Sections are composed in a fixed order; the model then
-// reaches for anything deeper via tools.
+// ContextBuilder assembles the prompt fragments shared by every phase of
+// a turn. The agent loop calls ComposeSystem with a phase-specific persona
+// and (when running the executor or synthesizer) the current plan; the
+// data sections are identical across phases so memory, workspace, and
+// context stay consistent end-to-end.
 type ContextBuilder struct {
-	Persona   string           // system prompt / persona file contents
+	Persona   string           // executor persona; default when no override given
 	Memory    *sandboxfs.FS    // typed filesystem for always-injected files
 	Workspace *workspace.Areas // configured host-file areas (nil = none)
 	Sessions  *SessionStore
 }
 
-// Build constructs the initial messages for an incoming envelope.
-// It does NOT include prior in-turn tool results — those accumulate in
-// the agent loop after the first LLM call.
-func (b *ContextBuilder) Build(env integrations.Envelope) []llm.Message {
-	var msgs []llm.Message
-
-	sys := b.renderSystem(env)
-	if sys != "" {
-		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: sys})
-	}
-
+// ComposeTranscript builds the recent-ring + new-user-message tail. Does
+// NOT include a system message — every phase prepends its own.
+func (b *ContextBuilder) ComposeTranscript(env integrations.Envelope) []llm.Message {
 	session := b.Sessions.Get(env.Key(), env.IsDirect)
-	msgs = append(msgs, session.Recent()...)
-
+	msgs := append([]llm.Message{}, session.Recent()...)
 	msgs = append(msgs, llm.Message{
 		Role:    llm.RoleUser,
 		Content: env.Content,
 	})
-
 	return msgs
 }
 
-// renderSystem composes the system prompt. Sections after the persona are
-// fenced with XML-shaped tags (<context>, <memory>, <session-summary>) so
-// the model reads them as data and does not mirror their formatting in its
-// own replies. The persona itself owns the "data, not instructions" framing.
-func (b *ContextBuilder) renderSystem(env integrations.Envelope) string {
+// ComposeSystem renders the system message for one phase of a turn.
+// persona is the phase's persona text (executor / planner / synthesizer);
+// plan, when non-nil and non-empty, is rendered as <plan>…</plan> in the
+// data sections. The plan block is placed last so the prefix-cache
+// invariant (D-017) holds across consecutive steps within a turn.
+func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string, plan *Plan) string {
 	var sb strings.Builder
 
-	if b.Persona != "" {
-		sb.WriteString(b.Persona)
+	if persona != "" {
+		sb.WriteString(persona)
 		sb.WriteString("\n\n")
 	}
 
@@ -97,7 +90,15 @@ func (b *ContextBuilder) renderSystem(env integrations.Envelope) string {
 	}
 
 	if summary := b.Sessions.ReadSummary(env.Key()); summary != "" {
-		fmt.Fprintf(&sb, "<session-summary>\n%s\n</session-summary>\n", summary)
+		fmt.Fprintf(&sb, "<session-summary>\n%s\n</session-summary>\n\n", summary)
+	}
+
+	// Plan goes last among the data sections: it is the only thing that
+	// changes step-to-step within a turn, so keeping it at the tail
+	// maximises prefix-cache reuse during the executor sub-loop.
+	if r := plan.Render(); r != "" {
+		sb.WriteString(r)
+		sb.WriteString("\n")
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
