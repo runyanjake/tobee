@@ -87,6 +87,64 @@ func (p *Plan) LastStepText() string {
 	return ""
 }
 
+// RenderUserMessage returns the plan-announcement text sent to the user
+// immediately after a multi-step plan is committed. Single-step plans
+// skip this; the final reply lands directly.
+func (p *Plan) RenderUserMessage() string {
+	if p == nil || len(p.Steps) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	if goal := strings.TrimSpace(p.Goal); goal != "" {
+		fmt.Fprintf(&sb, "Working on: %s\n\n", goal)
+	} else {
+		sb.WriteString("Working on it.\n\n")
+	}
+	for i, s := range p.Steps {
+		fmt.Fprintf(&sb, "%d. %s\n", i+1, strings.TrimSpace(s.Intent))
+	}
+	sb.WriteString("\nI'll reply when done.")
+	return sb.String()
+}
+
+// RenderStepStatus produces a one-line internal marker appended to the
+// session after a step terminates. Not sent to the user — it lets the
+// next turn's planner (and a future replan-from-thought loop) read step
+// progress out of the recent ring even after the in-flight plan is gone.
+func (p *Plan) RenderStepStatus(step *Step) string {
+	if p == nil || step == nil {
+		return ""
+	}
+	idx := 0
+	for i := range p.Steps {
+		if p.Steps[i].ID == step.ID {
+			idx = i + 1
+			break
+		}
+	}
+	intent := truncateOneLine(step.Intent, 60)
+	switch step.Status {
+	case StepDone:
+		return fmt.Sprintf("[progress] step %d/%d (%s): done", idx, len(p.Steps), intent)
+	case StepFailed:
+		reason := truncateOneLine(step.Error, 80)
+		if reason == "" {
+			reason = "unknown error"
+		}
+		return fmt.Sprintf("[progress] step %d/%d (%s): failed - %s", idx, len(p.Steps), intent, reason)
+	default:
+		return ""
+	}
+}
+
+func truncateOneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if max > 0 && len(s) > max {
+		s = s[:max-3] + "..."
+	}
+	return s
+}
+
 // Render returns the <plan> block injected into the system prompt.
 // Empty when the plan has no steps yet.
 func (p *Plan) Render() string {

@@ -117,6 +117,16 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	slog.Info("agent: plan committed",
 		"goal", plan.Goal, "steps", len(plan.Steps))
 
+	// Announce multi-step plans so the user sees what's coming while the
+	// executor runs. Mirrored into the session so the model sees on the
+	// next turn what it told the user it would do.
+	if plan.HasMultipleSteps() {
+		if msg := plan.RenderUserMessage(); msg != "" {
+			a.replies.Send(ctx, env.Integration, env.Channel, env.Thread, msg)
+			session.Append(llm.Message{Role: llm.RoleAssistant, Content: msg})
+		}
+	}
+
 	// --- Phase 2: act (per step) with closed-loop replan ---------------
 	for !plan.Complete() {
 		if ctx.Err() != nil {
@@ -130,6 +140,9 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 
 		var ok bool
 		transcript, ok = a.exec.RunStep(ctx, env, plan, step, transcript, session)
+		if line := plan.RenderStepStatus(step); line != "" {
+			session.Append(llm.Message{Role: llm.RoleAssistant, Content: line})
+		}
 		if ok {
 			slog.Info("agent: step done", "id", step.ID)
 			continue
