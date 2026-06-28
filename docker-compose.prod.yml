@@ -66,8 +66,11 @@ services:
     volumes:
       # Live-reloadable prompts (edit on host, restart the process to apply).
       - ./prompts:/app/prompts
-      # Persist the agent's memory + session summaries across restarts.
-      - ./data:/app/data
+      # tobee's "brain": memory, sessions, scheduler jobs. Lives outside the
+      # repo on the prod host so it survives redeploys and is editable in
+      # place. Create the directory on the server before first run:
+      #   sudo mkdir -p /pwspool/software/tobee && sudo chown $(id -u):$(id -g) /pwspool/software/tobee
+      - /pwspool/software/tobee:/app/data
     restart: unless-stopped
 
 volumes:
