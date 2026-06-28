@@ -20,10 +20,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scope"
 	"github.com/runyanjake/tobee/internal/tools"
+	"github.com/runyanjake/tobee/internal/tools/datedname"
 )
 
 const sharedRoot = "shared"
@@ -45,12 +47,15 @@ func Register(reg *tools.Registry, fs *sandboxfs.FS) {
 	})
 
 	reg.MustRegister(tools.Spec{
-		Name:        "memory.write",
-		Description: `Create or overwrite a memory file. scope="user" (default) writes to the active user's tree; scope="shared" writes to cross-user knowledge.`,
+		Name: "memory.write",
+		Description: `Create or overwrite a memory file. Pass the filename you want; the backend ` +
+			`prepends today's date and kebab-cases the name. "My Notes.md" becomes ` +
+			`"YYYY.MM.DD-my-notes.md". Subdirectories are preserved. scope="user" (default) ` +
+			`writes to the active user's tree; scope="shared" writes to cross-user knowledge.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"path":    {"type": "string", "description": "Path relative to the scope root"},
+				"path":    {"type": "string", "description": "Filename (with optional subdir). Date prefix and kebab-case applied automatically. Do not add a date yourself."},
 				"content": {"type": "string", "description": "Full file contents"},
 				"scope":   {"type": "string", "enum": ["user", "shared"], "description": "Default \"user\"."}
 			},
@@ -60,12 +65,15 @@ func Register(reg *tools.Registry, fs *sandboxfs.FS) {
 	})
 
 	reg.MustRegister(tools.Spec{
-		Name:        "memory.append",
-		Description: `Append content to a memory file, creating it if needed. Prefer this over memory.write when adding to a list or journal.`,
+		Name: "memory.append",
+		Description: `Append content to a memory file, creating it if needed. Filename is ` +
+			`auto-stamped with today's date and kebab-cased the first time it is created; ` +
+			`subsequent appends in the same turn target the same dated file. Prefer this over ` +
+			`memory.write when adding to a list or journal.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"path":    {"type": "string", "description": "Path relative to the scope root"},
+				"path":    {"type": "string", "description": "Filename (with optional subdir). Date prefix and kebab-case applied automatically."},
 				"content": {"type": "string", "description": "Text to append (include leading newline if needed)"},
 				"scope":   {"type": "string", "enum": ["user", "shared"], "description": "Default \"user\"."}
 			},
@@ -186,11 +194,15 @@ func writeHandler(fs *sandboxfs.FS) tools.Handler {
 		if err != nil {
 			return "", err
 		}
-		full := joinScope(root.Dir, in.Path)
+		dated, err := datedname.Apply(in.Path, time.Now())
+		if err != nil {
+			return "", err
+		}
+		full := joinScope(root.Dir, dated)
 		if err := fs.Write(full, in.Content); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("wrote %s:%s (%d bytes)", root.Label, in.Path, len(in.Content)), nil
+		return fmt.Sprintf("wrote %s:%s (%d bytes)", root.Label, dated, len(in.Content)), nil
 	}
 }
 
@@ -208,11 +220,15 @@ func appendHandler(fs *sandboxfs.FS) tools.Handler {
 		if err != nil {
 			return "", err
 		}
-		full := joinScope(root.Dir, in.Path)
+		dated, err := datedname.Apply(in.Path, time.Now())
+		if err != nil {
+			return "", err
+		}
+		full := joinScope(root.Dir, dated)
 		if err := fs.Append(full, in.Content); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("appended to %s:%s (%d bytes)", root.Label, in.Path, len(in.Content)), nil
+		return fmt.Sprintf("appended to %s:%s (%d bytes)", root.Label, dated, len(in.Content)), nil
 	}
 }
 

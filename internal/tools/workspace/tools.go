@@ -16,8 +16,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/runyanjake/tobee/internal/tools"
+	"github.com/runyanjake/tobee/internal/tools/datedname"
 	"github.com/runyanjake/tobee/internal/workspace"
 )
 
@@ -64,13 +66,15 @@ func Register(reg *tools.Registry, areas *workspace.Areas) {
 
 	reg.MustRegister(tools.Spec{
 		Name: "workspace.write",
-		Description: `Create or overwrite a file in a workspace area. Fails if the area is ` +
-			`read-only. Path is relative to the area root.`,
+		Description: `Create or overwrite a file in a workspace area. Pass the filename you ` +
+			`want; the backend prepends today's date and kebab-cases the name. "My Notes.md" ` +
+			`becomes "YYYY.MM.DD-my-notes.md". Subdirectories are preserved. Fails if the area ` +
+			`is read-only.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"area":    {"type": "string", "description": "Configured area name."},
-				"path":    {"type": "string", "description": "File path relative to the area root."},
+				"path":    {"type": "string", "description": "Filename (with optional subdir) relative to the area root. Date prefix and kebab-case applied automatically. Do not add a date yourself."},
 				"content": {"type": "string", "description": "Full file contents."}
 			},
 			"required": ["area", "path", "content"]
@@ -171,10 +175,14 @@ func writeHandler(areas *workspace.Areas) tools.Handler {
 		if ar.ReadOnly {
 			return "", fmt.Errorf("area %q is read-only", ar.Name)
 		}
-		if err := ar.FS.Write(in.Path, in.Content); err != nil {
+		dated, err := datedname.Apply(in.Path, time.Now())
+		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("wrote %s:%s (%d bytes)", ar.Name, in.Path, len(in.Content)), nil
+		if err := ar.FS.Write(dated, in.Content); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("wrote %s:%s (%d bytes)", ar.Name, dated, len(in.Content)), nil
 	}
 }
 
