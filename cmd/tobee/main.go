@@ -137,7 +137,7 @@ func main() {
 	replies := agent.NewReplies()
 
 	// --- Planner / executor / synthesizer --------------------------------
-	planner := agent.NewPlanner(client, ctxb, plannerPrompt)
+	planner := agent.NewPlanner(client, ctxb, registry, plannerPrompt)
 	executor := agent.NewExecutor(client, registry, ctxb, planMaxStepsPerStep, planMaxStepsTotal)
 	synthesizer := agent.NewSynthesizer(client, ctxb, synthPrompt)
 

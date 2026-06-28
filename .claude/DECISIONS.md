@@ -626,10 +626,16 @@ phases coordinated by `processTurn` in
 1. **Plan** ([internal/agent/planner.go](../internal/agent/planner.go)).
    `Planner.Initial` runs one LLM call with the planner persona
    ([prompts/planner.md](../prompts/planner.md)) and a single virtual
-   tool, `plan.commit`. Two outcomes: the model commits a structured
-   plan (ordered `Step`s, each with a free-text `intent`), or it
-   produces trivial-reply text and we skip the rest of the turn. The
-   plan is JSON-decoded from the tool call's arguments; we never parse
+   tool, `plan.commit`. The planner's system prompt also carries a
+   read-only `<tools>` catalogue rendered from `tools.Registry` —
+   the planner cannot call those tools itself but it sees their
+   names + descriptions so it can plan steps that use them. Without
+   the catalogue the planner has no signal that memory or workspace
+   exist and falls back to the trivial-reply path on knowledge
+   questions. Two outcomes: the model commits a structured plan
+   (ordered `Step`s, each with a free-text `intent`), or it produces
+   trivial-reply text and we skip the rest of the turn. The plan is
+   JSON-decoded from the tool call's arguments; we never parse
    structure out of the text body (D-001 still holds).
 2. **Act** ([internal/agent/executor.go](../internal/agent/executor.go)).
    `Executor.RunStep` runs the ReAct sub-loop, scoped to one Step at a

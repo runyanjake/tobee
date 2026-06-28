@@ -8,6 +8,7 @@ import (
 
 	"github.com/runyanjake/tobee/internal/integrations"
 	"github.com/runyanjake/tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/tools"
 )
 
 const (
@@ -39,15 +40,73 @@ var planCommitSchema = json.RawMessage(`{
 // Planner produces and revises a turn's Plan. It is a thin wrapper around
 // the LLM client with a planner-specific system prompt and a single
 // virtual tool (plan.commit / plan.revise) whose output is decoded here
-// rather than dispatched through the global tool registry.
+// rather than dispatched through the global tool registry. The planner
+// also sees a static catalogue of executor-callable tools so it can
+// plan steps that use them — without itself being able to call them.
 type Planner struct {
-	client *llm.Client
-	ctxb   *ContextBuilder
-	prompt string // contents of prompts/planner.md
+	client        *llm.Client
+	ctxb          *ContextBuilder
+	prompt        string // contents of prompts/planner.md
+	toolCatalogue string // rendered once at startup; <tools>…</tools> block
 }
 
-func NewPlanner(client *llm.Client, ctxb *ContextBuilder, prompt string) *Planner {
-	return &Planner{client: client, ctxb: ctxb, prompt: prompt}
+func NewPlanner(client *llm.Client, ctxb *ContextBuilder, reg *tools.Registry, prompt string) *Planner {
+	return &Planner{
+		client:        client,
+		ctxb:          ctxb,
+		prompt:        prompt,
+		toolCatalogue: renderToolCatalogue(reg),
+	}
+}
+
+// renderToolCatalogue produces the <tools> block injected into the
+// planner's system prompt. Lists the executor's tools by name + one-line
+// description so the planner can plan steps that use them. Returns "" if
+// the registry is nil or empty.
+func renderToolCatalogue(reg *tools.Registry) string {
+	if reg == nil {
+		return ""
+	}
+	specs := reg.Specs()
+	if len(specs) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("<tools>\n")
+	sb.WriteString("These are the tools the executor can call when working a step. Plan steps that use them when they fit.\n")
+	for _, s := range specs {
+		desc := oneLine(s.Description)
+		if desc == "" {
+			fmt.Fprintf(&sb, "- %s\n", s.Name)
+		} else {
+			fmt.Fprintf(&sb, "- %s — %s\n", s.Name, desc)
+		}
+	}
+	sb.WriteString("</tools>")
+	return sb.String()
+}
+
+// oneLine collapses whitespace in a tool description so the catalogue
+// stays one entry per line. Empty input yields empty output.
+func oneLine(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// composeSystem builds the planner's system message: the planner persona
+// + the standard data sections (workspace, context, memory, summary,
+// optional plan) + the executor's tool catalogue. The catalogue sits at
+// the tail so it doesn't push the planner persona far from the front of
+// the prompt — order: persona → data → tools.
+func (p *Planner) composeSystem(env integrations.Envelope, plan *Plan) string {
+	sys := p.ctxb.ComposeSystem(env, p.prompt, plan)
+	if p.toolCatalogue != "" {
+		sys += "\n\n" + p.toolCatalogue
+	}
+	return sys
 }
 
 // commitArgs is the JSON shape the planner emits via plan.commit/plan.revise.
@@ -66,7 +125,7 @@ func (p *Planner) Initial(ctx context.Context, env integrations.Envelope, transc
 		return nil, "", fmt.Errorf("planner: not configured")
 	}
 
-	sys := p.ctxb.ComposeSystem(env, p.prompt, nil)
+	sys := p.composeSystem(env, nil)
 	msgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, transcript...)
 
 	resp, err := p.client.Call(ctx, msgs, []llm.ToolSpec{{
@@ -102,7 +161,7 @@ func (p *Planner) Revise(ctx context.Context, env integrations.Envelope, prev *P
 		return nil, fmt.Errorf("planner: not configured")
 	}
 
-	sys := p.ctxb.ComposeSystem(env, p.prompt, prev)
+	sys := p.composeSystem(env, prev)
 	sys += fmt.Sprintf("\n\n<replan>\nPrior plan did not complete. Revise.\nReason: %s\n</replan>",
 		strings.TrimSpace(reason))
 
