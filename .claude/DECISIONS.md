@@ -1019,6 +1019,136 @@ losing that loses the win.
 
 ---
 
+## D-024 — Strict plan → announce → execute → synth; synth sees only structured input
+
+**Status:** Accepted · **Date:** 2026-06-29 · Supersedes D-023.
+Restores much of D-020/D-022's plan-execute structure with a strict
+contract on synth's input and a single text-wrap fallback for model
+non-compliance with the tool protocol.
+
+**Decision.** Every turn is four phases (then deliver):
+
+1. **Plan.** One LLM call with [prompts/planner.md](../prompts/planner.md)
+   and the `plan.commit` virtual tool. `tool_choice=required`. The
+   model commits an ordered `Plan` (goal + steps, each with intent +
+   tool scope). The planner persona frames plain text as a "protocol
+   violation" (per Cline / II-agent system-prompt conventions).
+2. **Announce.** Plan rendered with emoji statuses (⏳/🔄/✅/❌) and
+   sent to the user. The platform message ID is stored on `Turn`
+   for in-place edits as step statuses change. The wrap-fallback
+   case (see below) skips the announcement.
+3. **Execute.** For each step in order: mark running, edit plan
+   message, run `Executor.RunStep`, edit again with done/failed
+   status. Per-step ReAct sub-loop scoped to the planner-granted
+   tools. Bounds: `PLAN_MAX_STEPS_PER_STEP` (default 4),
+   `PLAN_MAX_STEPS_TOTAL` (default 12).
+4. **Synth.** One LLM call with [prompts/synthesizer.md](../prompts/synthesizer.md)
+   advertising no tools. Input is `persona + plan-as-typed-artifact
+   + original user message`. The act loop's assistant messages are
+   deliberately omitted. Synth prompt borrows Cline's `attempt_completion`
+   discipline verbatim ("the work is complete… do not plan, do not
+   announce next steps, do not ask questions").
+
+**Synth's input contract.** The single most load-bearing change vs
+D-023. Under D-023, the synth saw the full transcript ending in the
+act loop's last assistant message; for trivial inputs that message
+was already a conversational reply, and synth produced a *continuation*
+("Feel free to let me know!") instead of a *rendering*. With synth's
+input restricted to plan + step results + original user message,
+there is no conversational tail to continue. The plan is the
+ground-truth record of what happened; synth's only job is to render
+it as one user-facing message.
+
+**Trivial-input handling — strict + single fallback.** The model
+must commit `plan.commit` even for greetings (one-step plan with
+empty tools list). If the model emits text instead, `Planner.Run`
+wraps the text as `Plan{Steps:[Step{Status: done, Result: <text>}]}`
+and the loop proceeds: no announcement (one no-tools step is
+unworth announcing), execute is a no-op (Result pre-set), synth
+renders the wrap-fallback text into a tobee-voiced reply. One
+edge case lives in `Planner.Run`; nowhere else in the loop branches
+on the wrap case.
+
+**Plan-message editing.** `Replies` carries an optional `MessageEditor`
+per integration alongside `ReplySender`. Discord registers both —
+`ChannelMessageSend` returns the message ID; `ChannelMessageEdit`
+mutates it. As step statuses change, the agent calls
+`Replies.Edit` to update the announcement message in place. If the
+editor is missing or the edit fails, status updates degrade silently
+(debug log only) — the user still sees the final synth reply at
+turn end.
+
+**Why this returns to plan-execute shape vs D-023's collapsed loop.**
+D-023 produced the "self-talk" failure mode on real traffic
+("Hey @TOBEE" → act loop emits "Hello!" → synth continues with
+"Feel free to let me know! 😃" instead of rewriting). The root
+cause was structural: open-ended ReAct + always-synthesis with
+synth seeing the transcript meant synth couldn't distinguish
+"rewrite this" from "continue this." The plan-execute split with
+synth restricted to structured input separates the two cleanly.
+
+**Reference inputs.** The system-prompt design draws on prompts in
+[LouisShark/chatgpt_system_prompt](https://github.com/LouisShark/chatgpt_system_prompt),
+specifically: Cline's `attempt_completion` discipline for the
+synthesiser; II-agent's "plain text is a protocol violation" for the
+planner; Manus / Devin / Suna's "plan is a typed artifact, not prose"
+framing for plan.commit's contract.
+
+**Cost.**
+
+- Trivial turn (greeting): 2 LLM calls (planner + synth). Same as
+  D-023.
+- Multi-step turn: 1 planner + N executor + 1 synth + 1+N user-side
+  message edits. Edits are cheap (single Discord API call each).
+- Surface added back: `internal/agent/plan.go`, `planner.go`,
+  `prompts/planner.md`. `Replies` gained `MessageEditor` registration.
+  Discord gained `editReply`. `agent.New` gained a `*Planner` arg.
+- Env vars: `LOOP_MAX_ITERATIONS` replaced with the D-022-era pair
+  `PLAN_MAX_STEPS_PER_STEP` (default 4) + `PLAN_MAX_STEPS_TOTAL`
+  (default 12).
+- New prompt-level debug logging: every LLM call now logs its
+  prompt (system size + per-message roles + tail content) at debug
+  via a shared `logPrompt` helper in `internal/agent/log.go`.
+
+**Regressions explicitly accepted.**
+
+- **D-021 status verbatim relay.** Status tools still pre-render
+  deterministic text, but the synthesiser is free to reword them.
+  User-accepted formatting drift in exchange for one uniform shape.
+  Same trade made in D-023; unchanged here.
+
+**Invariants preserved.**
+
+- Native tool-use only (D-001).
+- Sandboxed FS (D-003), in-process janitor (D-010), idle rotation
+  + persistence (D-011 / D-016), per-user memory layout (D-013),
+  reporter registry (D-014), dynamic scheduled jobs (D-015), prefix-
+  cache contract (D-017), workspace areas (D-019) — all unchanged.
+- Serial worker (D-005).
+
+**Explicitly not built.**
+
+- **Plan revise loop.** D-020's `plan.revise` flow on step failure
+  is not restored. Step failures surface to the user via the
+  synth's "failed: <reason>" framing. If empirical badness recurs
+  (steps that obviously could be retried with a small tweak), the
+  revise loop is a logical next addition — log a new decision then.
+- **Reply-to-message fallback when edit is missing.** The user
+  said reply-to-message would be acceptable when in-place edit is
+  not. Not implemented today since Discord supports edit; will be
+  needed when a non-edit integration is added.
+- **Per-step user-visible progress as separate messages.** Edit-in-
+  place is the chosen channel for progress. Falling back to
+  per-step new messages is intentionally avoided as too chatty.
+
+**Don't revert** without first explaining how the replacement (a)
+prevents synth from continuing the conversation rather than rendering
+it, (b) handles trivial inputs without per-failure-mode edge cases,
+and (c) maintains the typed-plan artifact the executor and synthesiser
+both depend on.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

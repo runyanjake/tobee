@@ -2,96 +2,100 @@
 
 The agent loop lives in [internal/agent/](../internal/agent/). One worker
 goroutine consumes Envelopes from the bus and drives each through a
-uniform **two-phase turn**: an act loop (the model freely calling tools
-until it produces terminal text) followed by a synthesis LLM call that
-composes the user-facing reply. The structure rides on the LLM's
-`tool_calls` response — we never parse JSON out of the text body. See
-[DECISIONS.md](DECISIONS.md) D-001 and D-023.
+linear sequence: **plan → announce → execute → synth → deliver**. The
+plan is a typed artifact; each step is a per-step ReAct sub-loop; the
+synthesiser composes the final user-facing reply from the structured
+plan + step results, not from the act loop's raw assistant messages.
+See [DECISIONS.md](DECISIONS.md) D-001 and D-024.
 
 ## Per-turn state: `Turn`
 
 `Turn` ([internal/agent/turn.go](../internal/agent/turn.go)) is the
-single value threaded through the turn's two phases:
+single value threaded through every phase:
 
-| Field      | Set by                                       |
-|------------|----------------------------------------------|
-| Ctx        | processTurn (with turn timeout + scope)      |
-| Env        | processTurn (from the envelope)              |
-| Session    | processTurn (loaded from SessionStore)       |
-| Transcript | ContextBuilder; grown by Executor.Run        |
-| Reply      | Synthesizer.Finalize                         |
-
-## Shape
-
-```
-Executor.Run (act loop)  ─►  Synthesizer.Finalize  ─►  deliver
-```
-
-`processTurn` is a linear sequence, not a state machine. No phaseFn
-driver, no categorical routing, no Plan/Step artifact — the model
-itself decides what (if any) tools to call inside the act loop.
+| Field          | Set by                                       |
+|----------------|----------------------------------------------|
+| Ctx            | processTurn (with turn timeout + scope)      |
+| Env            | processTurn (from the envelope)              |
+| Session        | processTurn (loaded from SessionStore)       |
+| Transcript     | ContextBuilder; grown by Executor per step   |
+| Plan           | Planner.Run (with text-wrap fallback)        |
+| PlanMessageID  | processTurn (after announce, for edits)      |
+| Reply          | Synthesizer.Finalize                         |
 
 ## The phases
 
-1. **Act loop** ([internal/agent/executor.go](../internal/agent/executor.go)).
-   `Executor.Run` drives the per-turn ReAct loop, bounded by
-   `LOOP_MAX_ITERATIONS` (default 12). Per iteration:
-   - Compose system message: persona + data sections.
-   - Call the LLM with every registered tool advertised.
-   - Append the assistant message (text + tool_calls) to the
-     in-flight transcript and the session.
-   - Dispatch any tool_calls; append each result as a `role: tool`
-     message.
-   - Terminate when the response has no tool_calls. This includes
-     the very first iteration — a greeting produces zero tool calls
-     and ends the loop in one round-trip. Trivial input is the
-     expected fast path, not a special case.
-   The act loop is the model's scratchpad. Its terminal text is
-   passed to the synthesiser, not directly to the user.
+1. **Plan** ([internal/agent/planner.go](../internal/agent/planner.go)).
+   One LLM call with [prompts/planner.md](../prompts/planner.md) and
+   the `plan.commit` virtual tool. `tool_choice=required`. The model
+   commits an ordered `Plan` (goal + `Step`s, each with intent + tool
+   scope). If the model emits text instead of `plan.commit` (model
+   non-compliance with the tool protocol), the text is wrapped as a
+   one-step Plan whose Result is the text — letting the rest of the
+   loop run uniformly on the trivial-input path. `plan.commit` is
+   advertised only on this call; never registered on `tools.Registry`.
 
-2. **Synthesis** ([internal/agent/synthesizer.go](../internal/agent/synthesizer.go)).
-   Always runs. `Synthesizer.Finalize` makes one LLM call with the
-   synthesiser persona ([prompts/synthesizer.md](../prompts/synthesizer.md))
-   advertising no tools. It reads the act-loop transcript (tool calls,
-   tool results, terminal text) and composes the one outbound message.
-   Tone, formatting, and length are enforced here.
+2. **Announce.** The plan is rendered with per-step emoji statuses
+   (⏳/🔄/✅/❌) and sent via `Replies.Send`. The platform message ID
+   is captured on `Turn.PlanMessageID`. The wrap-fallback case (one
+   no-tools step) skips announcement — there's nothing useful to show.
 
-After synthesis, `deliver`:
+3. **Execute** ([internal/agent/executor.go](../internal/agent/executor.go)).
+   For each step in order: mark step running, edit the plan message
+   via `Replies.Edit`, run `Executor.RunStep` (per-step ReAct sub-loop
+   bounded by `PLAN_MAX_STEPS_PER_STEP`, default 4, and turn-total
+   `PLAN_MAX_STEPS_TOTAL`, default 12), then edit the plan message
+   again with done/failed status. No-tools steps (wrap fallback) are
+   no-ops with Result pre-set.
 
-1. Mirrors `turn.Reply` into the session (so the next turn's act loop
-   sees what was said).
-2. Sends it via `Replies.Send(integration, channel, …)`.
-3. Runs the summarizer against the session transcript (best-effort).
+4. **Synthesise** ([internal/agent/synthesizer.go](../internal/agent/synthesizer.go)).
+   One LLM call with [prompts/synthesizer.md](../prompts/synthesizer.md)
+   advertising no tools. Input is `persona + plan-as-typed-artifact +
+   original user message` — the act loop's assistant messages are
+   deliberately omitted. This is the fix for the "self-talk" failure
+   mode: with no conversational tail to continue, the synth produces
+   a one-shot reply rendering of finished work.
 
-The act-loop transcript is **turn-scoped** as an in-flight artifact,
-but the messages within it are mirrored to the session as they go —
-so a mid-turn crash leaves the user message + any tool calls already
-made committed to `recent.json`.
+5. **Deliver.** Send the reply via `Replies.Send`, mirror into session,
+   run the (best-effort) summariser.
+
+## Plan-message editing
+
+`Replies` carries an optional `MessageEditor` per integration alongside
+the always-required `ReplySender`. Discord registers both. The agent
+edits the plan-announcement message in place as step statuses change.
+If the editor is missing or fails, status updates degrade silently
+(debug log only) — the user still sees the final reply.
 
 ## Key choices
 
 - **Serial worker.** A single goroutine drains the bus. Makes
   memory-file writes race-free without locks, keeps replies
-  deterministically ordered, avoids parallel-reply footguns. A
-  message from channel A blocks a message from channel B for the
-  duration of one turn. Acceptable for a personal agent. Revisit if
-  scale demands.
+  deterministically ordered, avoids parallel-reply footguns.
+  Acceptable for a personal agent.
 
 - **Native tool-use, not JSON-in-string.** The LLM returns structured
   `tool_calls`; we never parse the text body for a JSON envelope.
   Load-bearing.
 
-- **One shape for every turn.** Greetings, knowledge questions,
-  status, action requests — all flow through act loop + synthesis.
-  "No tool call needed" is the expected trivial path on iteration 1,
-  not an error. See D-023 for why the previous triage/plan scaffold
-  was collapsed.
+- **Plan is a typed artifact.** Goal + ordered steps + per-step result.
+  Used both for execution control (executor scopes tools per step) and
+  for user comms (announcement + edits) and for synthesis (single
+  structured input). The model's free-text output during the act loop
+  is scratchpad — it never reaches the synthesiser.
 
-- **Act loop is scratchpad; synthesiser is the user-facing voice.**
-  The act loop emits assistant messages that may or may not be in
-  tobee's voice; the synthesiser always rewrites them to tobee's
-  voice with consistent tone and length. Pay one extra LLM call per
-  turn for predictable formatting.
+- **Strict planner with one fallback.** `plan.commit` is the only
+  legal output from the planner phase. When the model bypasses the
+  tool protocol and emits text, the text is wrapped as a one-step
+  plan whose Result is the text. This keeps the rest of the loop
+  uniform on the trivial path without re-introducing a categorical
+  branch. See D-024.
+
+- **Synthesiser sees only structured input.** Persona + plan +
+  original user message. No act-loop assistant messages. This
+  eliminates the "self-talk" failure mode where the synth saw a
+  conversational tail and continued it instead of rendering a final
+  reply.
 
 - **Budgets.** `Config.TurnBudget` (default 2 min, wall-clock) is the
   outer ceiling. `Config.MaxReplans` (default 3) caps replan calls.

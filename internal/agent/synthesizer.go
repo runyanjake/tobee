@@ -9,12 +9,11 @@ import (
 )
 
 // Synthesizer composes the user-facing reply at the end of every turn.
-// It reads whatever the act loop produced (tool calls, tool results,
-// terminal text — or just terminal text for trivial turns) and turns
-// it into one outbound message in tobee's voice.
-//
-// The act loop is the model's scratchpad; the synthesizer is the only
-// thing the user sees. Tone, length, and formatting are enforced here.
+// Its input is the planner's typed Plan artifact (with each step's
+// result) plus the original user message — NOT the act-loop's
+// assistant messages. Feeding only structured data prevents the
+// synthesizer from treating the act loop as a conversation it should
+// continue (the "self-talk" failure mode).
 type Synthesizer struct {
 	client *llm.Client
 	ctxb   *ContextBuilder
@@ -25,21 +24,29 @@ func NewSynthesizer(client *llm.Client, ctxb *ContextBuilder, prompt string) *Sy
 	return &Synthesizer{client: client, ctxb: ctxb, prompt: prompt}
 }
 
-// Finalize runs the synthesis LLM call and returns the reply text. The
-// transcript (including the act loop's terminal assistant message and
-// any tool results) is in scope; the synthesizer persona occupies the
-// system slot.
+// Finalize runs the synthesis LLM call and returns the reply text.
 func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 	if s == nil || s.client == nil {
 		return "", fmt.Errorf("synthesizer: not configured")
 	}
 
 	sys := s.ctxb.ComposeSystem(t.Env, s.prompt)
-	sys += "\n\n<synthesize>\nCompose the user-facing reply now. No tool calls.\n</synthesize>"
+	if r := t.Plan.Render(); r != "" {
+		sys += "\n\n" + r
+	}
+	sys += "\n\n<synthesize>\nThe work above is complete. Render the user's final reply now. No tool calls. Do not plan, announce, ask questions, or say 'I will'.\n</synthesize>"
 
-	msgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, t.Transcript...)
+	// Synth sees only the original user turn plus the system prompt
+	// (persona + plan-as-artifact). The act-loop assistant messages
+	// are deliberately omitted.
+	userTurn := llm.Message{Role: llm.RoleUser, Content: t.Env.Content}
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: sys},
+		userTurn,
+	}
 
-	slog.Debug("agent: synthesizer: begin", "transcript_msgs", len(t.Transcript))
+	slog.Debug("agent: synthesizer: begin", "plan_steps", len(t.Plan.Steps))
+	logPrompt("agent: synthesizer: prompt", msgs)
 	resp, err := s.client.Call(t.Ctx, msgs, nil, llm.ToolChoiceUnset)
 	if err != nil {
 		return "", fmt.Errorf("synthesizer: llm: %w", err)

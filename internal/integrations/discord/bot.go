@@ -73,6 +73,7 @@ func New(cfg Config, bus *integrations.Bus, replies *agent.Replies) (*Bot, error
 	session.AddHandler(b.onMessageCreate)
 
 	replies.Register("discord", b.sendReply)
+	replies.RegisterEditor("discord", b.editReply)
 	return b, nil
 }
 
@@ -168,18 +169,41 @@ func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) bool
 	return nameRe.MatchString(m.Content)
 }
 
-// sendReply is registered on the agent's Replies table. channel is the
-// Discord channel ID; thread is unused for now (future: forum/thread support).
-func (b *Bot) sendReply(_ context.Context, channel, _, text string) error {
+// sendReply is registered on the agent's Replies table. channel is
+// the Discord channel ID; thread is unused for now (future:
+// forum/thread support). Returns the ID of the LAST sent chunk so the
+// agent can later edit it. For multi-chunk replies, in-place edit only
+// makes sense for short messages that fit in one chunk — the plan
+// announcement is sized to fit, so this is fine in practice.
+func (b *Bot) sendReply(_ context.Context, channel, _, text string) (string, error) {
 	text = b.rewriteOutboundMentions(text)
 	chunks := splitMessage(text)
+	var lastID string
 	for i, chunk := range chunks {
 		slog.Debug("discord: message sent",
 			"channel", channel, "chunk", i+1, "chunks", len(chunks),
 			"chars", len(chunk), "content", chunk)
-		if _, err := b.session.ChannelMessageSend(channel, chunk); err != nil {
-			return fmt.Errorf("send: %w", err)
+		msg, err := b.session.ChannelMessageSend(channel, chunk)
+		if err != nil {
+			return lastID, fmt.Errorf("send: %w", err)
 		}
+		if msg != nil {
+			lastID = msg.ID
+		}
+	}
+	return lastID, nil
+}
+
+// editReply is registered on the agent's Replies table as an in-place
+// editor. Used to update the plan-announcement message with step
+// status changes (running / done / failed emojis).
+func (b *Bot) editReply(_ context.Context, channel, messageID, text string) error {
+	text = b.rewriteOutboundMentions(text)
+	slog.Debug("discord: message edited",
+		"channel", channel, "message_id", messageID,
+		"chars", len(text), "content", text)
+	if _, err := b.session.ChannelMessageEdit(channel, messageID, text); err != nil {
+		return fmt.Errorf("edit: %w", err)
 	}
 	return nil
 }

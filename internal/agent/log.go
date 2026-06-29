@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/llm"
@@ -29,4 +30,35 @@ func oneLine(s string) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// logPrompt emits a debug log of the prompt the agent is about to send
+// to the LLM. The system prompt is reported by length only (it can be
+// several KB once memory dumps are attached); subsequent messages are
+// reported with role + length, and the tail message's content is
+// included verbatim because it usually carries the per-call ask
+// (current step reminder, replan reason, user message, etc).
+func logPrompt(msg string, msgs []llm.Message) {
+	if len(msgs) == 0 {
+		slog.Debug(msg, "messages", 0)
+		return
+	}
+	systemChars := 0
+	if msgs[0].Role == llm.RoleSystem {
+		systemChars = len(msgs[0].Content)
+	}
+	var roles strings.Builder
+	for i, m := range msgs {
+		if i > 0 {
+			roles.WriteString(", ")
+		}
+		fmt.Fprintf(&roles, "%s:%d", m.Role, len(m.Content))
+	}
+	tail := msgs[len(msgs)-1]
+	slog.Debug(msg,
+		"messages", len(msgs),
+		"system_chars", systemChars,
+		"roles", roles.String(),
+		"tail_role", tail.Role,
+		"tail", tail.Content)
 }

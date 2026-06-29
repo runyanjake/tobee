@@ -7,19 +7,33 @@ import (
 	"sync"
 )
 
-// ReplySender delivers a final assistant message back to the source of an
-// envelope. Integrations register one for their own integration name so the
-// agent can reply without knowing how the transport works.
-type ReplySender func(ctx context.Context, channel, thread, text string) error
+// ReplySender delivers a message to a channel and returns the platform
+// message ID of the message it sent. Integrations register one for
+// their own integration name so the agent can deliver without knowing
+// how the transport works. The returned ID is needed by the agent to
+// edit the plan announcement in place as steps progress.
+type ReplySender func(ctx context.Context, channel, thread, text string) (messageID string, err error)
 
-// Replies is a lookup table of integration name → ReplySender.
+// MessageEditor mutates an existing message's content. Integrations
+// register one for their integration name when the transport supports
+// in-place edits (Discord does). When no editor is registered, callers
+// fall back to sending a new message.
+type MessageEditor func(ctx context.Context, channel, messageID, text string) error
+
+// Replies is a lookup table of integration name → sender (+ optional
+// editor). The agent looks up by integration to deliver replies and
+// to update plan-announcement messages as steps progress.
 type Replies struct {
 	mu      sync.RWMutex
 	senders map[string]ReplySender
+	editors map[string]MessageEditor
 }
 
 func NewReplies() *Replies {
-	return &Replies{senders: make(map[string]ReplySender)}
+	return &Replies{
+		senders: make(map[string]ReplySender),
+		editors: make(map[string]MessageEditor),
+	}
 }
 
 // Register associates an integration name with its reply sender.
@@ -29,20 +43,48 @@ func (r *Replies) Register(integration string, s ReplySender) {
 	r.senders[integration] = s
 }
 
-// Send delivers text via the sender registered for integration. If no sender
-// exists the event is logged and dropped — this should never happen in
-// normal operation (every inbound integration ought to register one).
-func (r *Replies) Send(ctx context.Context, integration, channel, thread, text string) {
+// RegisterEditor associates an integration name with an in-place
+// message editor. Optional; not all transports support edits.
+func (r *Replies) RegisterEditor(integration string, e MessageEditor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.editors[integration] = e
+}
+
+// Send delivers text via the sender registered for integration.
+// Returns the platform message ID of the sent message (empty if the
+// sender does not produce one or on error).
+func (r *Replies) Send(ctx context.Context, integration, channel, thread, text string) (string, error) {
 	r.mu.RLock()
 	s, ok := r.senders[integration]
 	r.mu.RUnlock()
 	if !ok {
 		slog.Error("reply: no sender registered", "integration", integration)
-		return
+		return "", fmt.Errorf("no sender for %q", integration)
 	}
-	if err := s(ctx, channel, thread, text); err != nil {
+	id, err := s(ctx, channel, thread, text)
+	if err != nil {
 		slog.Error("reply: send failed", "integration", integration, "err", err)
+		return "", err
 	}
+	return id, nil
+}
+
+// Edit replaces the content of a previously-sent message. Returns
+// the underlying error if the editor is missing or fails — callers
+// usually log and continue rather than abort the turn over a missed
+// status update.
+func (r *Replies) Edit(ctx context.Context, integration, channel, messageID, text string) error {
+	r.mu.RLock()
+	e, ok := r.editors[integration]
+	r.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("no editor for %q", integration)
+	}
+	if err := e(ctx, channel, messageID, text); err != nil {
+		return fmt.Errorf("edit: %w", err)
+	}
+	return nil
 }
 
 // Summary returns the list of registered integration names, for diagnostics.
@@ -58,6 +100,9 @@ func (r *Replies) Summary() string {
 			names += ", "
 		}
 		names += n
+		if _, ok := r.editors[n]; ok {
+			names += "+edit"
+		}
 	}
 	return fmt.Sprintf("reply senders: %s", names)
 }

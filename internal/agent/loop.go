@@ -11,17 +11,15 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
-// Config controls the agent's execution limits at the turn-coordinator
-// level. The per-turn iteration cap lives on Executor.
+// Config controls the agent's execution limits at the turn level.
+// Per-step and total executor caps live on Executor.
 type Config struct {
 	TurnBudget time.Duration // wall-clock cap on a single turn
 }
 
 // Agent is the serial worker that consumes envelopes from the bus and
-// drives each through a uniform two-phase turn: a ReAct loop (think +
-// act + reflect, driven by the model itself) followed by a synthesis
-// LLM call that composes the user-facing reply. One goroutine processes
-// envelopes sequentially.
+// drives each through plan → announce → execute → synth → deliver.
+// One goroutine processes envelopes sequentially.
 type Agent struct {
 	bus      *integrations.Bus
 	sessions *SessionStore
@@ -29,8 +27,9 @@ type Agent struct {
 	replies  *Replies
 	summ     *Summarizer
 
-	exec  *Executor
-	synth *Synthesizer
+	planner *Planner
+	exec    *Executor
+	synth   *Synthesizer
 
 	cfg Config
 }
@@ -41,6 +40,7 @@ func New(
 	ctxb *ContextBuilder,
 	replies *Replies,
 	summ *Summarizer,
+	planner *Planner,
 	exec *Executor,
 	synth *Synthesizer,
 	cfg Config,
@@ -51,12 +51,12 @@ func New(
 	return &Agent{
 		bus: bus, sessions: sessions, ctxb: ctxb,
 		replies: replies, summ: summ,
-		exec: exec, synth: synth,
+		planner: planner, exec: exec, synth: synth,
 		cfg: cfg,
 	}
 }
 
-// Start launches the single worker goroutine. Cancel ctx to stop the loop.
+// Start launches the single worker goroutine. Cancel ctx to stop.
 func (a *Agent) Start(ctx context.Context) {
 	go func() {
 		slog.Info("agent: loop started", "senders", a.replies.Summary())
@@ -77,18 +77,23 @@ func (a *Agent) Start(ctx context.Context) {
 
 // processTurn drives one envelope through:
 //
-//  1. ReAct loop (Executor.Run): the model is given the persona, data
-//     sections, recent transcript, and all registered tools, and loops
-//     calling tools until it produces terminal text (no tool calls).
-//     Zero tool calls is a valid first-iteration outcome — e.g. for
-//     greetings, the model just says hello and the loop terminates
-//     immediately.
-//  2. Synthesis (Synthesizer.Finalize): always runs. Reads the
-//     transcript and composes the user-facing reply in tobee's voice.
-//     This is the place where tone, formatting, and length are
-//     enforced — the act loop is free to be scratchpad-ish.
-//  3. Deliver: send the reply to the originating integration, mirror
-//     it into the session, run the (best-effort) summarizer.
+//  1. Plan (Planner.Run): one LLM call commits a typed Plan via the
+//     plan.commit tool. If the model emits text instead, the planner
+//     wraps it as a single-step plan whose Result is the text — so
+//     the rest of the loop runs uniformly on trivial input.
+//  2. Announce: the plan is rendered as a Discord message with per-step
+//     emoji statuses and sent. The returned message ID is stored on
+//     the Turn so subsequent step transitions edit this same message.
+//  3. Execute: for each step in order, RunStep does the per-step ReAct
+//     sub-loop. Between steps, the plan-announcement message is edited
+//     to reflect the new step statuses. No-tools steps (planner wrap
+//     fallback) are no-ops.
+//  4. Synth: the synthesiser composes the user-facing reply from the
+//     plan + per-step results + the original user message. Crucially
+//     it does NOT see the act loop's assistant messages — that's the
+//     fix for the self-talk failure mode.
+//  5. Deliver: send the reply, mirror it into the session, run the
+//     (best-effort) summariser.
 func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	ctx, cancel := context.WithTimeout(parent, a.cfg.TurnBudget)
 	defer cancel()
@@ -107,8 +112,8 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 		"key", session.Key, "recent_msgs", len(session.Recent()),
 		"transcript_msgs", len(transcript))
 
-	// Commit the user message to the session transcript before the first
-	// LLM call so a crash mid-turn leaves a recoverable record.
+	// Commit the user message before the first LLM call so a mid-turn
+	// crash leaves a recoverable record.
 	session.Append(llm.Message{Role: llm.RoleUser, Content: env.Content})
 
 	turn := &Turn{
@@ -118,34 +123,96 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 		Transcript: transcript,
 	}
 
-	if ok := a.exec.Run(turn); !ok {
-		slog.Warn("agent: act loop hit budget without natural termination")
+	// --- Phase 1: plan -------------------------------------------------
+	plan, err := a.planner.Run(ctx, env, transcript)
+	if err != nil {
+		slog.Error("agent: planner failed; aborting turn",
+			"err", err,
+			"integration", env.Integration, "channel", env.Channel, "user", env.User,
+			"ctx_err", ctx.Err())
+		a.deliver(turn)
+		return
+	}
+	turn.Plan = plan
+	slog.Info("agent: plan committed",
+		"goal", plan.Goal, "steps", len(plan.Steps), "has_tools", plan.HasTools())
+
+	// --- Phase 2: announce --------------------------------------------
+	// Send the plan message and capture its ID for in-place edits.
+	// Only announce when there's real work to show: the trivial
+	// wrap-fallback (one no-tools step) gives the user nothing useful
+	// in an announcement, so we skip it.
+	if plan.HasTools() {
+		if msg := plan.RenderAnnouncement(); msg != "" {
+			id, sendErr := a.replies.Send(ctx, env.Integration, env.Channel, env.Thread, msg)
+			if sendErr != nil {
+				slog.Warn("agent: announce failed; continuing without status updates",
+					"err", sendErr, "integration", env.Integration)
+			} else {
+				turn.PlanMessageID = id
+				session.Append(llm.Message{Role: llm.RoleAssistant, Content: msg})
+			}
+		}
 	}
 
+	// --- Phase 3: execute ---------------------------------------------
+	for !plan.Complete() {
+		if ctx.Err() != nil {
+			slog.Warn("agent: turn ctx expired during execution")
+			break
+		}
+		step := plan.Next()
+		if step == nil {
+			break
+		}
+
+		// Mark the step running and push that state to the user.
+		step.Status = StepRunning
+		a.updatePlanMessage(turn)
+
+		slog.Debug("agent: step begin",
+			"id", step.ID, "intent", step.Intent, "tools", step.Tools)
+		ok := a.exec.RunStep(turn, step)
+		if ok {
+			slog.Info("agent: step done", "id", step.ID)
+		} else {
+			slog.Warn("agent: step failed", "id", step.ID, "err", step.Error)
+		}
+		a.updatePlanMessage(turn)
+	}
+
+	// --- Phase 4: synthesise ------------------------------------------
 	if ctx.Err() == nil {
-		out, err := a.synth.Finalize(turn)
-		if err != nil {
-			slog.Error("agent: synthesizer failed; falling back to last assistant text",
-				"err", err,
+		out, serr := a.synth.Finalize(turn)
+		if serr != nil {
+			slog.Error("agent: synthesizer failed; aborting reply",
+				"err", serr,
 				"integration", env.Integration, "channel", env.Channel, "user", env.User)
-			turn.Reply = strings.TrimSpace(lastAssistantText(turn.Transcript))
 		} else {
 			turn.Reply = strings.TrimSpace(out)
 		}
 	}
 
+	// --- Phase 5: deliver ---------------------------------------------
 	a.deliver(turn)
 }
 
-// lastAssistantText returns the most recent assistant message's text
-// from the transcript, used as a fallback reply when synthesis fails.
-func lastAssistantText(msgs []llm.Message) string {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == llm.RoleAssistant && msgs[i].Content != "" {
-			return msgs[i].Content
-		}
+// updatePlanMessage edits the plan-announcement message to reflect
+// current step statuses. Best-effort: if there's no message ID (e.g.
+// announce was skipped or failed) or the editor isn't available, this
+// is a no-op apart from a debug log.
+func (a *Agent) updatePlanMessage(t *Turn) {
+	if t.PlanMessageID == "" {
+		return
 	}
-	return ""
+	msg := t.Plan.RenderStatus()
+	if msg == "" {
+		return
+	}
+	if err := a.replies.Edit(t.Ctx, t.Env.Integration, t.Env.Channel, t.PlanMessageID, msg); err != nil {
+		slog.Debug("agent: plan-message edit failed; continuing",
+			"err", err, "message_id", t.PlanMessageID)
+	}
 }
 
 // deliver sends the reply (if any) and runs the post-turn summarizer.
@@ -160,11 +227,10 @@ func (a *Agent) deliver(t *Turn) {
 			"integration", t.Env.Integration, "channel", t.Env.Channel,
 			"thread", t.Env.Thread, "user", t.Env.User,
 			"chars", len(t.Reply), "content", t.Reply)
-		// Mirror the delivered reply into the session so the next turn's
-		// model sees what was said. Synthesised replies are otherwise
-		// absent from the act-loop transcript.
 		t.Session.Append(llm.Message{Role: llm.RoleAssistant, Content: t.Reply})
-		a.replies.Send(t.Ctx, t.Env.Integration, t.Env.Channel, t.Env.Thread, t.Reply)
+		if _, err := a.replies.Send(t.Ctx, t.Env.Integration, t.Env.Channel, t.Env.Thread, t.Reply); err != nil {
+			slog.Error("agent: deliver failed", "err", err)
+		}
 	}
 
 	if a.summ != nil {

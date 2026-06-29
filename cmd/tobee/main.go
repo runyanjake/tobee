@@ -60,9 +60,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	loopMaxIterations, err := strconv.Atoi(envOr("LOOP_MAX_ITERATIONS", "12"))
+	planMaxStepsPerStep, err := strconv.Atoi(envOr("PLAN_MAX_STEPS_PER_STEP", "4"))
 	if err != nil {
-		slog.Error("LOOP_MAX_ITERATIONS: invalid integer", "err", err)
+		slog.Error("PLAN_MAX_STEPS_PER_STEP: invalid integer", "err", err)
+		os.Exit(1)
+	}
+	planMaxStepsTotal, err := strconv.Atoi(envOr("PLAN_MAX_STEPS_TOTAL", "12"))
+	if err != nil {
+		slog.Error("PLAN_MAX_STEPS_TOTAL: invalid integer", "err", err)
 		os.Exit(1)
 	}
 
@@ -113,6 +118,7 @@ func main() {
 		os.Exit(1)
 	}
 	persona := readPersona(promptsDir + "/persona")
+	plannerPrompt := readFile(promptsDir+"/planner.md", "")
 	synthPrompt := readFile(promptsDir+"/synthesizer.md", "")
 	summPrompt := readFile(promptsDir+"/summarizer.md", "")
 	summarizer := agent.NewSummarizer(client, summPrompt, sessions)
@@ -126,14 +132,15 @@ func main() {
 	}
 	replies := agent.NewReplies()
 
-	// --- Executor / synthesizer -----------------------------------------
-	executor := agent.NewExecutor(client, registry, ctxb, loopMaxIterations)
+	// --- Planner / executor / synthesizer -------------------------------
+	planner := agent.NewPlanner(client, ctxb, registry, plannerPrompt)
+	executor := agent.NewExecutor(client, registry, ctxb, planMaxStepsPerStep, planMaxStepsTotal)
 	synthesizer := agent.NewSynthesizer(client, ctxb, synthPrompt)
 
 	// --- Event bus + agent loop ------------------------------------------
 	bus := integrations.NewBus(64)
 	loop := agent.New(bus, sessions, ctxb, replies, summarizer,
-		executor, synthesizer,
+		planner, executor, synthesizer,
 		agent.Config{
 			TurnBudget: 2 * time.Minute,
 		})
