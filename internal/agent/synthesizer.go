@@ -45,7 +45,11 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		return "", fmt.Errorf("synthesizer: llm: %w", err)
 	}
 	out := strings.TrimSpace(resp.Text)
-	slog.Debug("agent: synthesizer: done",
-		"finish", resp.Finish, "reply_chars", len(out))
+	slog.Debug("agent: synthesizer: llm response",
+		"finish", resp.Finish,
+		"text_chars", len(resp.Text),
+		"text", resp.Text,
+		"tool_calls_count", len(resp.ToolCalls),
+		"tool_calls", renderToolCalls(resp.ToolCalls))
 	return out, nil
 }

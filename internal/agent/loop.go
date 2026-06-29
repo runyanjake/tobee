@@ -152,11 +152,14 @@ func lastAssistantText(msgs []llm.Message) string {
 // Both are best-effort: a failure here must not block future turns.
 func (a *Agent) deliver(t *Turn) {
 	if t.Reply == "" {
-		slog.Debug("agent: turn produced no reply text")
-	} else {
-		slog.Debug("agent: message sent",
+		slog.Warn("agent: turn produced no reply text",
 			"integration", t.Env.Integration, "channel", t.Env.Channel,
-			"user", t.Env.User, "content", t.Reply)
+			"user", t.Env.User)
+	} else {
+		slog.Info("agent: deliver: sending",
+			"integration", t.Env.Integration, "channel", t.Env.Channel,
+			"thread", t.Env.Thread, "user", t.Env.User,
+			"chars", len(t.Reply), "content", t.Reply)
 		// Mirror the delivered reply into the session so the next turn's
 		// model sees what was said. Synthesised replies are otherwise
 		// absent from the act-loop transcript.

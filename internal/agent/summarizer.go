@@ -60,6 +60,13 @@ Produce the updated rolling summary.`, previous, transcript)
 	if err != nil {
 		return fmt.Errorf("summarizer llm: %w", err)
 	}
+	slog.Debug("agent: summarizer: llm response",
+		"key", key,
+		"finish", resp.Finish,
+		"text_chars", len(resp.Text),
+		"text", resp.Text,
+		"tool_calls_count", len(resp.ToolCalls),
+		"tool_calls", renderToolCalls(resp.ToolCalls))
 	out := strings.TrimSpace(resp.Text)
 	if out == "" {
 		slog.Debug("agent: summarizer: empty output; skipping write", "key", key)

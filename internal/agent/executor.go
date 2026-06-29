@@ -64,8 +64,11 @@ func (e *Executor) Run(t *Turn) bool {
 		}
 		slog.Debug("agent: act: llm response",
 			"iter", i,
-			"finish", resp.Finish, "text_chars", len(resp.Text),
-			"tool_calls", len(resp.ToolCalls))
+			"finish", resp.Finish,
+			"text_chars", len(resp.Text),
+			"text", resp.Text,
+			"tool_calls_count", len(resp.ToolCalls),
+			"tool_calls", renderToolCalls(resp.ToolCalls))
 
 		asst := llm.Message{
 			Role:      llm.RoleAssistant,
