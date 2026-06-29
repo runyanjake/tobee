@@ -137,9 +137,26 @@ func (t *Triage) Run(ctx context.Context, env integrations.Envelope, transcript 
 	if err != nil {
 		return nil, fmt.Errorf("triage: llm: %w", err)
 	}
-	slog.Debug("agent: triage: response", "diag", describeResponse(resp))
+	slog.Debug("agent: triage: response",
+		"diag", describeResponse(resp),
+		"text", resp.Text,
+		"tool_calls", renderToolCalls(resp.ToolCalls))
 
 	return extractTriage(resp)
+}
+
+// renderToolCalls flattens an LLM response's tool calls into a single
+// log-line string: `name1(args1); name2(args2)`. Returns "" for none.
+// Arguments are passed through verbatim — they are already JSON.
+func renderToolCalls(calls []llm.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		parts = append(parts, fmt.Sprintf("%s(%s)", tc.Function.Name, oneLine(tc.Function.Arguments)))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func extractTriage(resp *llm.Response) (*TriageResult, error) {
