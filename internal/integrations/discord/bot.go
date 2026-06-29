@@ -60,7 +60,12 @@ func New(cfg Config, bus *integrations.Bus, replies *agent.Replies) (*Bot, error
 	if err != nil {
 		return nil, fmt.Errorf("create discord session: %w", err)
 	}
-	session.Identify.Intents = discordgo.IntentsAllWithoutPrivileged
+	// MessageContent is a privileged intent; without it Discord delivers
+	// m.Content as an empty string in guild channels unless the bot is in
+	// m.Mentions, which breaks bare-name addressing like "tobee, ..." and
+	// the "@TOBEE" plain-text form. Must also be enabled in the developer
+	// portal for the bot application.
+	session.Identify.Intents = discordgo.IntentsAllWithoutPrivileged | discordgo.IntentMessageContent
 
 	b := &Bot{
 		session:   session,
@@ -118,8 +123,16 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	}
 
 	if !b.isAddressed(s, m) {
+		mentionIDs := make([]string, 0, len(m.Mentions))
+		for _, u := range m.Mentions {
+			if u != nil {
+				mentionIDs = append(mentionIDs, u.ID)
+			}
+		}
 		slog.Debug("discord: ambient (not addressed); dropping",
-			"channel", m.ChannelID, "author", displayName(m.Author))
+			"channel", m.ChannelID, "author", displayName(m.Author),
+			"self_id", s.State.User.ID, "is_dm", m.GuildID == "",
+			"mentions", mentionIDs, "content", m.Content)
 		return
 	}
 
@@ -148,20 +161,30 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 
 // nameRe matches the bot's name as a whole word, case-insensitive. Used to
 // detect bare-name addressing ("tobee, are you there?") alongside the @-mention
-// and reply-to-bot paths in isAddressed.
+// and reply-to-bot paths in isAddressed. The \b boundaries already match
+// "@TOBEE" because @ is a non-word character — the boundary sits between @ and T.
 var nameRe = regexp.MustCompile(`(?i)\btobee\b`)
 
 // isAddressed reports whether m is for the bot. We forward to the agent loop
-// when any of: the bot is in the mentions list, the message is a reply to one
-// of the bot's own messages, or the bot's name appears as a whole word in the
-// body. Everything else is ambient channel chatter and gets dropped here so we
-// don't burn an LLM call on it.
+// when any of:
+//   - the bot is in the mentions list,
+//   - the bot's raw mention token (<@id> or <@!id>) appears in the body even
+//     though it's missing from Mentions (defensive against gateway state races),
+//   - the message is a reply to one of the bot's own messages, or
+//   - the bot's name appears as a whole word in the body (covers "tobee, ..."
+//     and plain-text "@TOBEE" alike — see nameRe).
+//
+// Everything else is ambient channel chatter and gets dropped here so we don't
+// burn an LLM call on it.
 func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	selfID := s.State.User.ID
 	for _, u := range m.Mentions {
 		if u != nil && u.ID == selfID {
 			return true
 		}
+	}
+	if selfID != "" && (strings.Contains(m.Content, "<@"+selfID+">") || strings.Contains(m.Content, "<@!"+selfID+">")) {
+		return true
 	}
 	if ref := m.ReferencedMessage; ref != nil && ref.Author != nil && ref.Author.ID == selfID {
 		return true
