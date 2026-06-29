@@ -2,66 +2,108 @@
 
 The agent loop lives in [internal/agent/](../internal/agent/). One worker
 goroutine consumes Envelopes from the bus and drives each through a
-ReAct-style tool-use loop until the model stops calling tools or the step
-budget runs out.
+**state machine** of phases. Each phase is a function over a single
+`*Turn` value that mutates state and returns the next phase to run, or
+`nil` to terminate. The structure rides on the LLM's `tool_calls`
+response — we never parse JSON out of the text body. See
+[DECISIONS.md](DECISIONS.md) D-001, D-020, and D-022.
 
-## Loop shape
+## Per-turn state: `Turn`
 
-Pattern: **plan-and-execute with closed-loop replan, on top of native
-tool-use.** A turn is four phases coordinated by `processTurn` in
-[internal/agent/loop.go](../internal/agent/loop.go). The Act phase is a
-small ReAct sub-loop scoped to one Step. The structure rides on the
-LLM's `tool_calls` response — we never parse JSON out of the text body.
-See [DECISIONS.md](DECISIONS.md) D-001 and D-020.
+`Turn` ([internal/agent/turn.go](../internal/agent/turn.go)) is the
+single value threaded through every phase:
 
-The phases:
+| Field      | Set by                                       |
+|------------|----------------------------------------------|
+| Ctx        | processTurn (with turn timeout + scope)      |
+| Env        | processTurn (from the envelope)              |
+| Session    | processTurn (loaded from SessionStore)       |
+| Transcript | ContextBuilder; grown by phaseExec           |
+| Triage     | phaseTriage                                  |
+| Plan       | phaseTriage (plan branch) or phaseReplan     |
+| Reply      | phaseRespond / phaseStatusDispatch / phaseExec / phaseSynth |
 
-1. **Plan.** `Planner.Initial` runs one LLM call with the planner
-   persona ([prompts/planner.md](../prompts/planner.md)) and a single
-   virtual tool, `plan.commit`. Either the model commits a structured
-   `Plan` (ordered `Step`s, each with a free-text `intent`), or it
-   produces a trivial-reply text and we skip the rest of the turn.
-   `plan.commit` is advertised only on this call — it is never
-   registered on the global `tools.Registry`.
+Adding a new state grows this struct, not every phase signature.
 
-2. **Act.** `Executor.RunStep` runs the ReAct sub-loop, scoped to one
-   Step. Per-step iteration cap (`PLAN_MAX_STEPS_PER_STEP`, default 4)
-   and turn-wide total cap (`PLAN_MAX_STEPS_TOTAL`, default 12) bound
-   it. Within a step:
+## State graph
+
+```
+phaseTriage ─┬─► phaseRespond         ─► nil
+             ├─► phaseStatusDispatch  ─► nil
+             └─► phaseExec ─┬─► phaseReplan ─► phaseExec
+                            └─► phaseSynth  ─► nil
+```
+
+`processTurn` is the driver:
+
+```go
+for phase := a.phaseTriage; phase != nil; {
+    next, err := phase(turn)
+    if err != nil { /* log + break */ }
+    phase = next
+}
+a.deliver(turn)
+```
+
+## The phases
+
+1. **`phaseTriage`** ([internal/agent/triage.go](../internal/agent/triage.go)).
+   One LLM call with the triage persona
+   ([prompts/triage.md](../prompts/triage.md)) and three virtual tools:
+   `triage.respond`, `triage.plan`, `triage.status`. The model picks
+   exactly one. The category becomes the routing decision; the payload
+   feeds the next phase. None of these tools are registered on the
+   global `tools.Registry`.
+
+2. **`phaseRespond`**. Writes `turn.Triage.Reply` onto `turn.Reply`
+   and returns `nil`. One LLM call total for the whole turn.
+
+3. **`phaseStatusDispatch`**. Calls the named status tool
+   (`status.summary` / `status.report`) directly through
+   `tools.Registry.Call` — no executor LLM call. D-021 says status
+   tools relay verbatim, so passing the output through an LLM only
+   risks drift.
+
+4. **`phaseExec`** ([internal/agent/executor.go](../internal/agent/executor.go)).
+   Runs one Step of the committed plan through the ReAct sub-loop.
+   Per-step iteration cap (`PLAN_MAX_STEPS_PER_STEP`, default 4) and
+   turn-wide total cap (`PLAN_MAX_STEPS_TOTAL`, default 12) bound it.
+   Within a step:
    - Compose system message: executor persona + data sections + plan +
      a focused `<current_step>` reminder.
-   - Call the LLM with all registered tools.
+   - Call the LLM with the planner-granted tool subset.
    - Append the assistant message (text + tool_calls) to the
      in-flight transcript and the session.
    - Dispatch any tool_calls; append each result as a `role: tool`
      message.
    - Break when the response has no tool_calls (terminal text). That
      text becomes the step's `Result`.
-   If the per-step or total cap is hit without a terminal text, the
-   step is marked `failed`.
+   Returns `phaseExec` if more steps remain, `phaseReplan` on step
+   failure (when budget allows), `phaseSynth` for completed multi-step
+   plans, or terminates with `Reply` set for completed single-step
+   plans.
 
-3. **Replan.** When a step fails, `Planner.Revise` runs another LLM
-   call with the prior plan + a `<replan>` system reminder and a
-   `plan.revise` virtual tool. The replan budget is
-   `Config.MaxReplans` (default 3); on exhaustion the loop finalises
-   the plan with whatever steps did complete.
+5. **`phaseReplan`** ([internal/agent/planner.go](../internal/agent/planner.go)).
+   `Planner.Revise` runs one LLM call with the prior plan + a
+   `<replan>` system reminder and the `plan.revise` virtual tool. The
+   replan budget is `Config.MaxReplans` (default 3); on exhaustion
+   phaseExec finalises with whatever did complete.
 
-4. **Synthesise.** Multi-step plans get one final LLM call using
+6. **`phaseSynth`** ([internal/agent/synthesizer.go](../internal/agent/synthesizer.go)).
+   Multi-step plans get one final LLM call using
    [prompts/synthesizer.md](../prompts/synthesizer.md) to compose the
-   user-facing reply from the plan's step results. Single-step plans
-   skip this and use the step's own result text directly.
+   user-facing reply from the plan's step results.
 
-At the end, the loop:
+After the state machine terminates, `deliver`:
 
-1. Mirrors the delivered reply into the session as an assistant
-   message (so the model sees what it told the user next turn).
-2. Delivers it via `Replies.Send(integration, channel, …)`.
+1. Mirrors `turn.Reply` into the session (so the next turn's triage
+   sees what was said).
+2. Sends it via `Replies.Send(integration, channel, …)`.
 3. Runs the summarizer against the session transcript (best-effort).
 
 The plan is **turn-scoped**: it does not persist to `recent.json` and
 does not survive a crash. The user message is committed to the session
-before the planner runs, so a mid-turn crash leaves a recoverable
-anchor.
+before triage runs, so a mid-turn crash leaves a recoverable anchor.
 
 ## Key choices
 
@@ -74,12 +116,20 @@ anchor.
 
 - **Native tool-use, not JSON-in-string.** The LLM returns structured
   `tool_calls`; we never parse the text body for a JSON envelope.
-  This applies to the planner's virtual tools too (`plan.commit`,
-  `plan.revise`) — they ride on the same protocol. Load-bearing.
+  This applies to the triage and planner virtual tools too
+  (`triage.respond` / `triage.plan` / `triage.status` / `plan.revise`)
+  — they ride on the same protocol. Load-bearing.
 
-- **Trivial-turn fast path.** Chitchat skips the executor and
-  synthesiser. The planner doubles as the responder when no plan is
-  needed: one LLM call, reply.
+- **Triage as the forcing function.** Three-way categorical commit
+  (respond / plan / status) lets the model express intent
+  structurally instead of via free text. Defaulting to plan is
+  cheap; an unjustified respond is expensive (hallucinated answer)
+  — that asymmetry is spelled out in triage.md.
+
+- **Direct status dispatch.** `phaseStatusDispatch` calls the status
+  tool through `tools.Registry` with no executor LLM call. D-021 says
+  the tool output is already pre-rendered; the LLM adds nothing on
+  that path.
 
 - **Plan is the central state.** It is rendered into the system
   prompt at every executor and replan call, last in the data sections

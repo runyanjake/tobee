@@ -123,6 +123,7 @@ func main() {
 		os.Exit(1)
 	}
 	persona := readPersona(promptsDir + "/persona")
+	triagePrompt := readFile(promptsDir+"/triage.md", "")
 	plannerPrompt := readFile(promptsDir+"/planner.md", "")
 	synthPrompt := readFile(promptsDir+"/synthesizer.md", "")
 	summPrompt := readFile(promptsDir+"/summarizer.md", "")
@@ -137,15 +138,16 @@ func main() {
 	}
 	replies := agent.NewReplies()
 
-	// --- Planner / executor / synthesizer --------------------------------
+	// --- Triage / planner / executor / synthesizer ----------------------
+	triage := agent.NewTriage(client, ctxb, registry, triagePrompt)
 	planner := agent.NewPlanner(client, ctxb, registry, plannerPrompt)
 	executor := agent.NewExecutor(client, registry, ctxb, planMaxStepsPerStep, planMaxStepsTotal)
 	synthesizer := agent.NewSynthesizer(client, ctxb, synthPrompt)
 
 	// --- Event bus + agent loop ------------------------------------------
 	bus := integrations.NewBus(64)
-	loop := agent.New(bus, sessions, ctxb, replies, summarizer,
-		planner, executor, synthesizer,
+	loop := agent.New(bus, sessions, ctxb, replies, summarizer, registry,
+		triage, planner, executor, synthesizer,
 		agent.Config{
 			TurnBudget: 2 * time.Minute,
 			MaxReplans: planMaxReplans,

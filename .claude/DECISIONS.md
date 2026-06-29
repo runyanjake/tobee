@@ -793,6 +793,129 @@ to keep this contract.
 
 ---
 
+## D-022 — Triage phase + state-machine driver; planner narrows to revise-only
+
+**Status:** Accepted · **Date:** 2026-06-29 · Amends D-020 (which placed
+the simple-input responder on the planner via a "trivial reply" path)
+and D-021 (whose status-routing prose moves out of planner.md into the
+triage contract).
+
+**Decision.** Two coupled changes:
+
+1. A new **triage** phase runs before the planner on every turn. One
+   LLM call with the [prompts/triage.md](../prompts/triage.md) persona
+   and three virtual tools: `triage.respond`, `triage.plan`,
+   `triage.status`. The model picks exactly one — the category becomes
+   the routing decision; the payload becomes the inputs for the next
+   phase. `triage.plan` carries the same shape the old `plan.commit`
+   did; `triage.respond` carries a verbatim reply; `triage.status`
+   carries one of `status.summary` / `status.report`.
+
+2. `processTurn` is rewritten as a **state-machine driver**. Per-turn
+   state lives on a single `*Turn` value (env, session, transcript,
+   triage result, plan, reply). Phases are `phaseFn` methods on
+   `*Agent` that mutate `*Turn` and return the next phase to run or
+   `nil` to terminate. The state graph:
+
+       phaseTriage ─┬─► phaseRespond         ─► nil
+                    ├─► phaseStatusDispatch  ─► nil
+                    └─► phaseExec ─┬─► phaseReplan ─► phaseExec
+                                   └─► phaseSynth  ─► nil
+
+   `phaseStatusDispatch` calls the named status tool directly through
+   `tools.Registry` — no executor LLM call. Per D-021 the output is
+   already pre-rendered; passing it through an LLM only invites drift.
+
+The `Planner` type narrows to **revise-only**. `Planner.Initial` and
+`plan.commit` are removed; `plan.revise` stays. `prompts/planner.md`
+is rewritten as a replan-after-failure persona (no trivial-reply
+section, no status-routing section, no two-outputs framing).
+
+**Why.** D-020's planner-as-responder design produced sporadic
+hallucinations on knowledge questions: when the planner saw a
+"do you remember…?" message it could (and increasingly did) take the
+trivial-reply path and answer from its head rather than commit a
+plan that hits memory. The forcing function we wanted — "every
+non-chit-chat input must commit a plan" — was prose guidance, not a
+schema constraint, and the model drifted off it.
+
+The three-way categorical commit fixes that structurally: the model
+cannot emit free text, only one of three tool calls, each with its
+own schema and description. `triage.respond`'s description carries
+a hard "ONLY for chit-chat — never for anything that may be in
+memory" framing, and the asymmetry between false-positive cost
+(hallucinated answer) and false-negative cost (one extra LLM call)
+is spelled out in the persona itself. Defaulting to plan is cheaper.
+
+The state-machine refactor is the other half. The previous
+`processTurn` already passed `ctx`, `env`, `transcript`, `session`,
+`plan`, `step`, `prev`, `reason` around as ad-hoc args; adding
+triage and status-dispatch as phases would have fanned that out
+further. Threading a single `*Turn` plus a phase-function pattern
+keeps every state a first-class function with one signature,
+which lets us add future states (reflection? clarification?)
+without touching unrelated phases.
+
+D-020 explicitly rejected "skipping the planner for known-simple
+inputs" because the planner *was* the simple-input responder. That
+reasoning no longer applies — we've split the responder role
+(now on Triage) from the replan role (still on Planner). There is
+no "second router"; there's one router with a stricter, structured
+contract.
+
+**Cost.**
+
+- Simple chit-chat turn: 1 LLM call (triage, returns `triage.respond`).
+  Same as today.
+- Status turn: 1 LLM call (triage) + 1 deterministic tool dispatch.
+  Strictly cheaper than today's planner-then-executor path (2 LLM calls).
+- Complex turn: 1 LLM call (triage commits the plan) + N executor +
+  optional synthesis. Same call count as today — the triage call IS
+  the planner call; we did not add an extra LLM round-trip.
+- Replan path: 1 extra LLM call per replan, as before.
+- New surface: `prompts/triage.md`, `internal/agent/triage.go`,
+  `internal/agent/turn.go`, `phaseFn` driver in `loop.go`.
+- New wiring in `cmd/tobee/main.go`: `agent.New` now also takes
+  `*tools.Registry` (for direct status dispatch) and `*Triage`.
+
+**Extensibility seam.** `TriageResult.Metadata` is a forward-compatible
+bag (`map[string]any`) for future enrichment — intent labels, topic
+classifiers, user-state hints. The schema for each virtual tool can
+also grow optional fields without breaking callers. When a real second
+metadata axis appears, we either grow the existing tools or split
+triage into two phases (classify-then-route); both are additive.
+
+**Invariants preserved.**
+
+- Native tool-use only (D-001) — the routing decision is carried by
+  `tool_calls`, never parsed from text.
+- Prefix-cache contract (D-017) holds within each phase. Persona swaps
+  between triage / executor / synthesizer break the prefix once per
+  phase boundary, which was already true under D-020.
+- Status tools relay verbatim (D-021) — phaseStatusDispatch passes the
+  tool output through without an LLM call.
+- Serial worker (D-005) unchanged. One goroutine per turn.
+
+**Explicitly not built.**
+
+- **Categorisation beyond simple/plan/status.** The metadata seam is
+  there; we didn't fill it. Add categories when a downstream phase
+  needs to branch on them.
+- **Triage prompt-cache reuse across turns.** Triage runs once per
+  turn with a session-tail-only transcript; cache wins are bounded.
+  Worth measuring before optimising.
+- **Replacing the executor's per-step ReAct sub-loop with state
+  machine phases.** The inner loop lives inside `Executor.RunStep`.
+  Pulling it out would be a separate decision.
+
+**Don't revert** without first explaining how the replacement keeps
+(a) the three-way categorical routing (the forcing function for the
+hallucination fix), (b) the direct status dispatch (cheaper than
+LLM-paraphrased status), and (c) the per-turn `*Turn` value as the
+single state seam new phases can grow off.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

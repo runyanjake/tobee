@@ -1,20 +1,17 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 
-	"github.com/runyanjake/tobee/internal/integrations"
 	"github.com/runyanjake/tobee/internal/llm"
 	"github.com/runyanjake/tobee/internal/tools"
 )
 
-// Executor runs a single Step through a ReAct sub-loop. It is the
-// post-D-001 ReAct body extracted from the old monolithic loop, scoped to
-// a single Step's worth of LLM iterations.
+// Executor runs a single Step through a ReAct sub-loop. The post-D-001
+// ReAct body, scoped to one Step's worth of LLM iterations.
 type Executor struct {
 	client      *llm.Client
 	tools       *tools.Registry
@@ -23,8 +20,6 @@ type Executor struct {
 	totalBudget int // hard cap on LLM iterations across the whole turn
 }
 
-// NewExecutor builds an Executor. maxPerStep and totalBudget are hard
-// caps; either being non-positive means use sensible defaults (4 and 12).
 func NewExecutor(client *llm.Client, reg *tools.Registry, ctxb *ContextBuilder, maxPerStep, totalBudget int) *Executor {
 	if maxPerStep <= 0 {
 		maxPerStep = 4
@@ -41,21 +36,11 @@ func NewExecutor(client *llm.Client, reg *tools.Registry, ctxb *ContextBuilder, 
 	}
 }
 
-// RunStep executes one Step. Mutates step in place (Status, Result, Error,
-// Attempts) and returns the (possibly grown) transcript. Appends every
-// assistant and tool message to session as it goes so a mid-turn crash
-// resumes with the model's exact partial state.
-//
-// Returns true when the step ended cleanly (Status == StepDone). Returns
-// false when the step failed — caller decides whether to replan.
-func (e *Executor) RunStep(
-	ctx context.Context,
-	env integrations.Envelope,
-	plan *Plan,
-	step *Step,
-	transcript []llm.Message,
-	session *Session,
-) ([]llm.Message, bool) {
+// RunStep executes one Step. Mutates step in place (Status, Result,
+// Error, Attempts) and grows t.Transcript with every assistant + tool
+// message. Returns true when the step ended cleanly (Status == StepDone).
+// Returns false when the step failed — caller decides whether to replan.
+func (e *Executor) RunStep(t *Turn, step *Step) bool {
 	step.Status = StepRunning
 	step.Attempts++
 
@@ -63,37 +48,37 @@ func (e *Executor) RunStep(
 	if terr != nil {
 		step.Error = terr.Error()
 		step.Status = StepFailed
-		return transcript, false
+		return false
 	}
 	stepResult := ""
 	clean := false
 
 	for sub := 0; sub < e.maxPerStep; sub++ {
-		if plan.StepsRun >= e.totalBudget {
+		if t.Plan.StepsRun >= e.totalBudget {
 			step.Error = "turn step-budget exhausted"
 			step.Status = StepFailed
 			slog.Warn("agent: executor: total step budget exhausted",
-				"step", step.ID, "steps_run", plan.StepsRun, "total_budget", e.totalBudget)
-			return transcript, false
+				"step", step.ID, "steps_run", t.Plan.StepsRun, "total_budget", e.totalBudget)
+			return false
 		}
-		plan.StepsRun++
+		t.Plan.StepsRun++
 
 		slog.Debug("agent: executor: iteration",
-			"step", step.ID, "sub", sub, "steps_run", plan.StepsRun,
-			"transcript_msgs", len(transcript))
+			"step", step.ID, "sub", sub, "steps_run", t.Plan.StepsRun,
+			"transcript_msgs", len(t.Transcript))
 
-		sys := e.composeStepSystem(env, plan, step)
-		callMsgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, transcript...)
+		sys := e.composeStepSystem(t, step)
+		callMsgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, t.Transcript...)
 
-		resp, err := e.client.Call(ctx, callMsgs, toolSpecs)
+		resp, err := e.client.Call(t.Ctx, callMsgs, toolSpecs)
 		if err != nil {
 			slog.Error("agent: executor llm error",
 				"step", step.ID, "sub", sub, "err", err,
-				"integration", env.Integration, "channel", env.Channel, "user", env.User,
-				"ctx_err", ctx.Err())
+				"integration", t.Env.Integration, "channel", t.Env.Channel, "user", t.Env.User,
+				"ctx_err", t.Ctx.Err())
 			step.Error = err.Error()
 			step.Status = StepFailed
-			return transcript, false
+			return false
 		}
 		slog.Debug("agent: executor: llm response",
 			"step", step.ID, "sub", sub,
@@ -105,8 +90,8 @@ func (e *Executor) RunStep(
 			Content:   resp.Text,
 			ToolCalls: resp.ToolCalls,
 		}
-		transcript = append(transcript, asst)
-		session.Append(asst)
+		t.Transcript = append(t.Transcript, asst)
+		t.Session.Append(asst)
 
 		if resp.Text != "" {
 			stepResult = resp.Text
@@ -118,7 +103,7 @@ func (e *Executor) RunStep(
 		}
 
 		for _, tc := range resp.ToolCalls {
-			out, cerr := e.tools.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			out, cerr := e.tools.Call(t.Ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 			content := out
 			if cerr != nil {
 				slog.Warn("agent: tool error", "tool", tc.Function.Name, "err", cerr)
@@ -132,8 +117,8 @@ func (e *Executor) RunStep(
 				Name:       tc.Function.Name,
 				Content:    content,
 			}
-			transcript = append(transcript, tmsg)
-			session.Append(tmsg)
+			t.Transcript = append(t.Transcript, tmsg)
+			t.Session.Append(tmsg)
 		}
 	}
 
@@ -142,20 +127,20 @@ func (e *Executor) RunStep(
 		if step.Error == "" {
 			step.Error = fmt.Sprintf("step did not terminate within %d iterations", e.maxPerStep)
 		}
-		return transcript, false
+		return false
 	}
 
 	step.Status = StepDone
 	step.Result = strings.TrimSpace(stepResult)
-	return transcript, true
+	return true
 }
 
 // toolsForStep returns the tool specs advertised to the LLM for this
 // step. When the planner listed step.Tools, only the named tools that
-// also exist in the registry are advertised; an empty intersection is
-// a plan-time error reported back so the loop can replan. When the
-// planner did not list any (legacy / minimal plans), all registered
-// tools are advertised.
+// also exist in the registry are advertised; an empty intersection is a
+// plan-time error reported back so the loop can replan. When the planner
+// did not list any (legacy / minimal plans), all registered tools are
+// advertised.
 func (e *Executor) toolsForStep(step *Step) ([]llm.ToolSpec, error) {
 	all := e.tools.Specs()
 	if len(step.Tools) == 0 {
@@ -192,10 +177,10 @@ func (e *Executor) toolsForStep(step *Step) ([]llm.ToolSpec, error) {
 }
 
 // composeStepSystem renders the executor system message for one
-// sub-iteration: the executor persona + data sections + plan + a focused
+// sub-iteration: executor persona + data sections + plan + a focused
 // <current_step> reminder pointing at the step that's running.
-func (e *Executor) composeStepSystem(env integrations.Envelope, plan *Plan, step *Step) string {
-	sys := e.ctxb.ComposeSystem(env, e.ctxb.Persona, plan)
+func (e *Executor) composeStepSystem(t *Turn, step *Step) string {
+	sys := e.ctxb.ComposeSystem(t.Env, e.ctxb.Persona, t.Plan)
 	sys += fmt.Sprintf(`
 
 <current_step id="%s">
