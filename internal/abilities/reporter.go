@@ -29,12 +29,12 @@ import (
 // Render returns two deterministic views over the subsystem's state:
 //
 //   - full:    multi-line strict format used by status.report. Should
-//              include every relevant Doing / Done / Waiting fact for the
-//              window. Return "" when the subsystem genuinely has nothing
-//              to say.
+//     include every relevant Doing / Done / Waiting fact for the
+//     window. Return "" when the subsystem genuinely has nothing
+//     to say.
 //   - summary: one short sentence used by status.summary. Return "" when
-//              the subsystem is uninteresting (idle, no recent activity)
-//              so the composed summary stays tight.
+//     the subsystem is uninteresting (idle, no recent activity)
+//     so the composed summary stays tight.
 //
 // Both strings are emitted verbatim to the user; the same state must
 // always yield the same text.
