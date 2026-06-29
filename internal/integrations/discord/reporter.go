@@ -2,83 +2,106 @@ package discord
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
 // Reporter exposes Discord state via the abilities.Reporter contract.
-//
-// Doing — connected/listening state, last RX timestamp.
-// Done  — count of inbound messages within the window.
 func (b *Bot) Reporter() abilities.Reporter { return discReporter{b: b} }
 
 type discReporter struct{ b *Bot }
 
 func (r discReporter) Name() string { return "discord" }
 
-func (r discReporter) Report(_ context.Context, since time.Time) (abilities.ReportData, error) {
-	var data abilities.ReportData
-
+func (r discReporter) Render(_ context.Context, since time.Time) (string, string) {
 	r.b.statsMu.RLock()
 	connect := r.b.connect
 	lastRx := r.b.lastRx
-	rxLog := r.b.rxLog
+	rxLog := append([]rxEvent(nil), r.b.rxLog...)
 	rxHead := r.b.rxHead
 	rxFill := r.b.rxFill
 	r.b.statsMu.RUnlock()
 
-	type doingOut struct {
-		Connected     bool      `json:"connected"`
-		ConnectedAt   time.Time `json:"connectedAt,omitempty"`
-		ChannelFilter string    `json:"channelFilter,omitempty"`
-		LastRx        time.Time `json:"lastRx,omitempty"`
-	}
-	d := doingOut{
-		Connected:     !connect.IsZero(),
-		ConnectedAt:   connect,
-		ChannelFilter: r.b.channelID,
-		LastRx:        lastRx,
-	}
-	if raw, err := json.Marshal(d); err == nil {
-		data.Doing = raw
-	}
+	connected := !connect.IsZero()
 
-	count := 0
+	inbound := 0
 	channels := map[string]int{}
-	n := rxHead
-	if rxFill {
-		n = len(rxLog)
-	}
-	walk := func(ev rxEvent) {
+	count := func(ev rxEvent) {
 		if ev.At.IsZero() {
 			return
 		}
 		if !since.IsZero() && ev.At.Before(since) {
 			return
 		}
-		count++
+		inbound++
 		channels[ev.Ch]++
 	}
 	if rxFill {
 		for i := 0; i < len(rxLog); i++ {
-			walk(rxLog[(rxHead+i)%len(rxLog)])
+			count(rxLog[(rxHead+i)%len(rxLog)])
 		}
 	} else {
-		for i := 0; i < n; i++ {
-			walk(rxLog[i])
-		}
-	}
-	if count > 0 {
-		out := struct {
-			Inbound  int            `json:"inbound"`
-			Channels map[string]int `json:"channels,omitempty"`
-		}{Inbound: count, Channels: channels}
-		if raw, err := json.Marshal(out); err == nil {
-			data.Done = raw
+		for i := 0; i < rxHead; i++ {
+			count(rxLog[i])
 		}
 	}
 
-	return data, nil
+	var full strings.Builder
+	fmt.Fprintf(&full, "Doing: %s\n", discordDoingLine(connected, connect, r.b.channelID, lastRx))
+	if inbound == 0 {
+		full.WriteString("Done: no inbound messages in window\n")
+	} else {
+		fmt.Fprintf(&full, "Done: %d inbound — %s\n", inbound, discordChannelCounts(channels))
+	}
+	full.WriteString("Waiting: —\n")
+
+	var summary string
+	switch {
+	case !connected:
+		summary = "Discord is offline"
+	case inbound == 0:
+		summary = "Discord is connected with no recent messages"
+	default:
+		summary = fmt.Sprintf("Discord is connected and saw %d inbound message%s in the window",
+			inbound, discordPlural(inbound))
+	}
+	return full.String(), summary
+}
+
+func discordDoingLine(connected bool, connect time.Time, channel string, lastRx time.Time) string {
+	if !connected {
+		return "offline"
+	}
+	parts := []string{fmt.Sprintf("connected since %s", connect.UTC().Format(time.RFC3339))}
+	if channel != "" {
+		parts = append(parts, fmt.Sprintf("channel=%s", channel))
+	}
+	if !lastRx.IsZero() {
+		parts = append(parts, fmt.Sprintf("last RX %s", lastRx.UTC().Format(time.RFC3339)))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func discordChannelCounts(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, fmt.Sprintf("%s=%d", k, m[k]))
+	}
+	return strings.Join(out, ", ")
+}
+
+func discordPlural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

@@ -739,6 +739,60 @@ for the user-stated robustness requirement, the second for latency.
 
 ---
 
+## D-021 — Status tools render their own text; LLM relays verbatim
+
+**Status:** Accepted · **Date:** 2026-06-28 · Amends D-014 (which had
+`status.report` return composed JSON for the LLM to summarise).
+
+**Decision.** The single `status.report` tool is replaced by two tools,
+both of which return pre-rendered deterministic strings:
+
+- `status.summary` — a brief few-sentence overview for general "what
+  are you up to?" inquiries.
+- `status.report` — a strict multi-line full-detail block per
+  subsystem (`Doing` / `Done` / `Waiting`), used when the user asks
+  for specifics.
+
+The `abilities.Reporter` contract drops `Report(ctx, since)
+(ReportData, error)` and gains
+`Render(ctx, since) (full, summary string)`. Each reporter formats its
+own state; the registry composes sections (`RenderReport`) or joins
+summaries (`RenderSummary`). The `ReportData` struct and the
+`json.RawMessage` Doing/Done/Waiting buckets are gone.
+
+Tool descriptions explicitly instruct the model to relay the output
+verbatim, and [prompts/planner.md](../prompts/planner.md) routes
+status questions to the appropriate tool (with status no longer
+qualifying for the trivial-reply path).
+
+**Why.** D-014's JSON-then-summarise path produced sporadic phrasing:
+the same underlying state turned into a different reply each turn,
+sometimes dropping sections, sometimes inventing reassurances. The
+variability lived in the LLM's translation step. Moving the format
+into the reporter removes that step — the LLM still picks *which*
+tool to call, but it no longer rewrites the answer.
+
+The summary/report split keeps the model's discretion useful: it
+decides "casual ask" vs. "detailed ask" and routes accordingly, but
+the wording at each level is fixed.
+
+**Cost.**
+
+- Reporter implementations got longer — they now format text per
+  bucket instead of marshalling a typed struct. Mechanical; one-time.
+- Two tools instead of one. Trivially more surface in the tool
+  catalogue; selection is rule-bound, not heuristic.
+- The model loses the ability to reason over the structured JSON
+  (e.g., "answer just the next-fire times"). If that comes up, we add
+  a third tool or restore a JSON view alongside the rendered ones.
+
+**Don't revert** without first checking whether the LLM is in fact
+producing reliable summaries from JSON in the current model / temp
+configuration. The phrasing-drift symptom is the load-bearing reason
+to keep this contract.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

@@ -139,36 +139,42 @@ right area without spending a tool call on discovery. See
 
 ## Abilities — Reporter contract
 
-The agent's introspection layer (status.report and future siblings) is built
-on a small `Reporter` interface in [internal/abilities/](../internal/abilities/):
+The agent's introspection layer (the `status.*` tools and future
+siblings) is built on a small `Reporter` interface in
+[internal/abilities/](../internal/abilities/):
 
 ```go
-type ReportData struct {
-    Doing   json.RawMessage `json:"doing,omitempty"`   // active right now
-    Done    json.RawMessage `json:"done,omitempty"`    // since `since`
-    Waiting json.RawMessage `json:"waiting,omitempty"` // scheduled / pending
-}
-
 type Reporter interface {
     Name() string
-    Report(ctx context.Context, since time.Time) (ReportData, error)
+    Render(ctx context.Context, since time.Time) (full, summary string)
 }
 ```
 
-Anything (subsystem, integration, future ability) can implement it and
-register on the shared `abilities.Registry` in `cmd/tobee/main.go`. The
-`status.report` tool snapshots the registry and returns one composed JSON
-blob to the model.
+Each Reporter formats its own state into two views:
+
+- `full` — multi-line strict block (Doing / Done / Waiting), consumed
+  by `status.report`.
+- `summary` — one short sentence, consumed by `status.summary`. Return
+  `""` when the subsystem is idle so the joined summary stays tight.
+
+Both strings are emitted to the user verbatim, so the same state must
+always yield the same text. Anything (subsystem, integration, future
+ability) can implement the interface and register on the shared
+`abilities.Registry` in `cmd/tobee/main.go`. The status tools call
+`RenderReport` / `RenderSummary` on the registry, which composes the
+sections in name-sorted order.
 
 Two conventions:
 
-- **Reporters filter, the ability composes.** Each Reporter knows its own
-  staleness rules and surfaces only relevant items. The status tool stays a
-  dumb composer.
-- **User-aware reporters read scope from ctx** via `scope.From(ctx)`. Day-one
-  reporters (scheduler, janitor, discord) are system-wide and ignore scope.
+- **Reporters filter and format, the ability composes.** Each Reporter
+  knows its own staleness rules and produces its own wording. The
+  registry only joins sections.
+- **User-aware reporters read scope from ctx** via `scope.From(ctx)`.
+  Day-one reporters (scheduler, janitor, discord) are system-wide and
+  ignore scope.
 
-See [DECISIONS.md](DECISIONS.md) D-014 for the rationale.
+See [DECISIONS.md](DECISIONS.md) D-014 for the original rationale and
+D-021 for the move from JSON buckets to deterministic rendered text.
 
 ## MCP — not yet
 

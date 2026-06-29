@@ -89,7 +89,7 @@ tobee/
 │  │  ├─ memory/                        # memory.{read,write,append,search,list} (scoped)
 │  │  ├─ workspace/                     # workspace.{areas,list,read,write,search} over configured roots
 │  │  ├─ schedule/                      # schedule.{create,cancel,list} — model-authored timers
-│  │  └─ status/                        # status.report — aggregates abilities.Reporter snapshots
+│  │  └─ status/                        # status.summary / status.report — pre-rendered text from abilities.Reporters
 │  ├─ integrations/
 │  │  ├─ integration.go                 # interface + Envelope
 │  │  ├─ bus.go                         # buffered channel event bus

@@ -2,33 +2,23 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
 // Reporter exposes scheduled-job state via abilities.Reporter.
-//
-// Done    — fires within the `since` window (one-shots are noted).
-// Waiting — currently scheduled jobs with their next fire time.
 func (m *JobManager) Reporter() abilities.Reporter { return jobsReporter{m: m} }
 
 type jobsReporter struct{ m *JobManager }
 
 func (r jobsReporter) Name() string { return "schedules" }
 
-func (r jobsReporter) Report(_ context.Context, since time.Time) (abilities.ReportData, error) {
-	var data abilities.ReportData
-
-	type fireOut struct {
-		ID      string    `json:"id"`
-		Name    string    `json:"name,omitempty"`
-		At      time.Time `json:"at"`
-		OneShot bool      `json:"oneShot,omitempty"`
-	}
-	var done []fireOut
+func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string) {
+	var done []firedJobEvent
 	for _, ev := range r.m.snapshotRecent() {
 		if ev.At.IsZero() {
 			continue
@@ -36,44 +26,63 @@ func (r jobsReporter) Report(_ context.Context, since time.Time) (abilities.Repo
 		if !since.IsZero() && ev.At.Before(since) {
 			continue
 		}
-		done = append(done, fireOut{ID: ev.ID, Name: ev.Name, At: ev.At, OneShot: ev.OneShot})
-	}
-	if len(done) > 0 {
-		raw, err := json.Marshal(done)
-		if err != nil {
-			return data, err
-		}
-		data.Done = raw
-	}
-
-	type waitOut struct {
-		ID       string    `json:"id"`
-		Name     string    `json:"name,omitempty"`
-		Cron     string    `json:"cron,omitempty"`
-		At       time.Time `json:"at,omitempty"`
-		NextFire time.Time `json:"nextFire,omitempty"`
-		Prompt   string    `json:"prompt,omitempty"`
+		done = append(done, ev)
 	}
 	jobs := r.m.snapshotJobs()
 	sort.Slice(jobs, func(i, k int) bool { return jobs[i].CreatedAt.Before(jobs[k].CreatedAt) })
-	var waiting []waitOut
-	for _, j := range jobs {
-		waiting = append(waiting, waitOut{
-			ID:       j.ID,
-			Name:     j.Name,
-			Cron:     j.Cron,
-			At:       j.At,
-			NextFire: r.m.nextFire(j),
-			Prompt:   j.Prompt,
-		})
-	}
-	if len(waiting) > 0 {
-		raw, err := json.Marshal(waiting)
-		if err != nil {
-			return data, err
+
+	var full strings.Builder
+	full.WriteString("Doing: —\n")
+	if len(done) == 0 {
+		full.WriteString("Done: no jobs fired in window\n")
+	} else {
+		full.WriteString("Done:\n")
+		for _, ev := range done {
+			name := ev.Name
+			if name == "" {
+				name = ev.ID
+			}
+			suffix := ""
+			if ev.OneShot {
+				suffix = " (one-shot)"
+			}
+			fmt.Fprintf(&full, "  - %s at %s%s\n", name, ev.At.UTC().Format(time.RFC3339), suffix)
 		}
-		data.Waiting = raw
+	}
+	if len(jobs) == 0 {
+		full.WriteString("Waiting: no jobs scheduled\n")
+	} else {
+		full.WriteString("Waiting:\n")
+		for _, j := range jobs {
+			name := j.Name
+			if name == "" {
+				name = j.ID
+			}
+			schedule := j.Cron
+			if schedule == "" && !j.At.IsZero() {
+				schedule = fmt.Sprintf("once at %s", j.At.UTC().Format(time.RFC3339))
+			}
+			line := fmt.Sprintf("  - %s — %s", name, schedule)
+			if next := r.m.nextFire(j); !next.IsZero() {
+				line += fmt.Sprintf(", next %s", next.UTC().Format(time.RFC3339))
+			}
+			full.WriteString(line + "\n")
+		}
 	}
 
-	return data, nil
+	var summary string
+	switch {
+	case len(jobs) == 0 && len(done) == 0:
+		summary = ""
+	case len(jobs) == 0:
+		summary = fmt.Sprintf("%d job%s fired in window, none still scheduled",
+			len(done), schedPlural(len(done)))
+	case len(done) == 0:
+		summary = fmt.Sprintf("%d job%s scheduled, none fired in window",
+			len(jobs), schedPlural(len(jobs)))
+	default:
+		summary = fmt.Sprintf("%d job%s fired in window, %d still scheduled",
+			len(done), schedPlural(len(done)), len(jobs))
+	}
+	return full.String(), summary
 }
