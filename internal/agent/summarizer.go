@@ -56,7 +56,7 @@ Produce the updated rolling summary.`, previous, transcript)
 	resp, err := s.client.Call(ctx, []llm.Message{
 		{Role: llm.RoleSystem, Content: s.prompt},
 		{Role: llm.RoleUser, Content: user},
-	}, nil)
+	}, nil, llm.ToolChoiceUnset)
 	if err != nil {
 		return fmt.Errorf("summarizer llm: %w", err)
 	}

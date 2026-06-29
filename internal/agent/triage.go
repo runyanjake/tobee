@@ -133,7 +133,7 @@ func (t *Triage) Run(ctx context.Context, env integrations.Envelope, transcript 
 		{Name: triageRespondTool, Description: "Reply directly with conversational text. ONLY for greetings, thanks, or social chit-chat. Never for factual questions or anything that may be remembered. If in doubt, do not use this — use triage.plan instead.", InputSchema: triageRespondSchema},
 		{Name: triagePlanTool, Description: "Commit a structured plan. Default choice for anything that requires memory lookups, tool actions, or multi-step reasoning. Same shape as the executor's plan contract.", InputSchema: triagePlanSchema},
 		{Name: triageStatusTool, Description: "Route to a status tool. Use for questions about what tobee is currently doing, what is scheduled, recent activity, or subsystem state. Picks status.summary or status.report.", InputSchema: triageStatusSchema},
-	})
+	}, llm.ToolChoiceRequired)
 	if err != nil {
 		return nil, fmt.Errorf("triage: llm: %w", err)
 	}

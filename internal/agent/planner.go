@@ -89,7 +89,7 @@ func (p *Planner) Revise(ctx context.Context, env integrations.Envelope, prev *P
 		Name:        planReviseTool,
 		Description: "Commit a revised plan after a prior step failed.",
 		InputSchema: planReviseSchema,
-	}})
+	}}, llm.ToolChoiceRequired)
 	if err != nil {
 		return nil, fmt.Errorf("planner: revise llm: %w", err)
 	}

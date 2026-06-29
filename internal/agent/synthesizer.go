@@ -37,7 +37,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 
 	slog.Debug("agent: synthesizer: begin",
 		"steps", len(t.Plan.Steps), "transcript_msgs", len(t.Transcript))
-	resp, err := s.client.Call(t.Ctx, msgs, nil)
+	resp, err := s.client.Call(t.Ctx, msgs, nil, llm.ToolChoiceUnset)
 	if err != nil {
 		return "", fmt.Errorf("synthesizer: llm: %w", err)
 	}

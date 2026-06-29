@@ -70,7 +70,7 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 		sys := e.composeStepSystem(t, step)
 		callMsgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, t.Transcript...)
 
-		resp, err := e.client.Call(t.Ctx, callMsgs, toolSpecs)
+		resp, err := e.client.Call(t.Ctx, callMsgs, toolSpecs, llm.ToolChoiceUnset)
 		if err != nil {
 			slog.Error("agent: executor llm error",
 				"step", step.ID, "sub", sub, "err", err,

@@ -49,8 +49,11 @@ func NewClient(baseURL, model string, opts Options) *Client {
 }
 
 // Call sends messages to the LLM. If tools is non-empty it is advertised
-// via the OpenAI `tools` field so the model may invoke them.
-func (c *Client) Call(ctx context.Context, messages []Message, tools []ToolSpec) (*Response, error) {
+// via the OpenAI `tools` field so the model may invoke them. toolChoice
+// constrains the model's tool-use behaviour for this call: ToolChoiceUnset
+// omits the field (server default), ToolChoiceRequired forces a tool call,
+// etc. Required + empty tools is a caller bug and would 400 at the server.
+func (c *Client) Call(ctx context.Context, messages []Message, tools []ToolSpec, toolChoice ToolChoice) (*Response, error) {
 	req := chatRequest{
 		Model:       c.model,
 		Messages:    messages,
@@ -69,6 +72,9 @@ func (c *Client) Call(ctx context.Context, messages []Message, tools []ToolSpec)
 					Parameters:  t.InputSchema,
 				},
 			}
+		}
+		if toolChoice != ToolChoiceUnset {
+			req.ToolChoice = string(toolChoice)
 		}
 	}
 
@@ -119,6 +125,7 @@ type chatRequest struct {
 	MaxTokens   int            `json:"max_tokens"`
 	Stream      bool           `json:"stream"`
 	Tools       []toolEnvelope `json:"tools,omitempty"`
+	ToolChoice  string         `json:"tool_choice,omitempty"`
 }
 
 type toolEnvelope struct {

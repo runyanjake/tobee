@@ -82,3 +82,16 @@ type Response struct {
 	ToolCalls []ToolCall // tool invocations requested by the model
 	Finish    string     // e.g. "stop", "tool_calls", "length"
 }
+
+// ToolChoice controls whether the model may, must, or must not call a
+// tool on this call. Maps to the OpenAI `tool_choice` request field.
+// Unset omits the field; the server then defaults (typically "auto"
+// when tools are present, "none" when not).
+type ToolChoice string
+
+const (
+	ToolChoiceUnset    ToolChoice = ""
+	ToolChoiceAuto     ToolChoice = "auto"
+	ToolChoiceRequired ToolChoice = "required"
+	ToolChoiceNone     ToolChoice = "none"
+)
