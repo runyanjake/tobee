@@ -59,7 +59,12 @@ func (e *Executor) RunStep(
 	step.Status = StepRunning
 	step.Attempts++
 
-	toolSpecs := e.tools.Specs()
+	toolSpecs, terr := e.toolsForStep(step)
+	if terr != nil {
+		step.Error = terr.Error()
+		step.Status = StepFailed
+		return transcript, false
+	}
 	stepResult := ""
 	clean := false
 
@@ -130,6 +135,47 @@ func (e *Executor) RunStep(
 	step.Status = StepDone
 	step.Result = strings.TrimSpace(stepResult)
 	return transcript, true
+}
+
+// toolsForStep returns the tool specs advertised to the LLM for this
+// step. When the planner listed step.Tools, only the named tools that
+// also exist in the registry are advertised; an empty intersection is
+// a plan-time error reported back so the loop can replan. When the
+// planner did not list any (legacy / minimal plans), all registered
+// tools are advertised.
+func (e *Executor) toolsForStep(step *Step) ([]llm.ToolSpec, error) {
+	all := e.tools.Specs()
+	if len(step.Tools) == 0 {
+		return all, nil
+	}
+	wanted := make(map[string]bool, len(step.Tools))
+	for _, t := range step.Tools {
+		wanted[t] = true
+	}
+	out := make([]llm.ToolSpec, 0, len(step.Tools))
+	for _, s := range all {
+		if wanted[s.Name] {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("planner listed no known tools: %v", step.Tools)
+	}
+	if len(out) < len(step.Tools) {
+		have := make(map[string]bool, len(out))
+		for _, s := range out {
+			have[s.Name] = true
+		}
+		missing := make([]string, 0)
+		for _, t := range step.Tools {
+			if !have[t] {
+				missing = append(missing, t)
+			}
+		}
+		slog.Warn("agent: executor dropped unknown planner tools",
+			"step", step.ID, "missing", missing)
+	}
+	return out, nil
 }
 
 // composeStepSystem renders the executor system message for one

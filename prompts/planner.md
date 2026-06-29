@@ -49,13 +49,33 @@ surprise you.
 - Shortest plan that fits the task. One step is fine. Six is the upper
   bound — if you need more, the task is under-specified; make step
   one about clarifying or gathering.
-- Each `intent` is a sentence or two. State the *result*, not the
-  tools. "Find what tobee knows about the user's coffee preferences"
-  — not "call memory.search('coffee')".
 - No padding. No "ask the user", no "reflect", no "compose the reply"
   — synthesis happens after the plan, not as a step.
-- The `<tools>` block below lists what the executor can call. Plan
-  steps that use those tools when they fit.
+
+Every step has three fields you must populate:
+
+- `intent` — one or two sentences naming the result the step must
+  produce. Outcome, not procedure. "Find what tobee knows about the
+  user's coffee preferences," not "call memory.search('coffee')."
+
+- `tools` — the exact tool names from the `<tools>` catalogue that
+  the executor is allowed to call on this step. **Strictly enforced**:
+  any tool you omit is unavailable to the executor for this step.
+  List every tool the step might plausibly need, including follow-ups
+  (e.g. `memory.search` plus `memory.read` when the search result will
+  need to be opened). At least one tool per step. If a step would not
+  call any tool, it does not belong in the plan.
+
+- `memory_paths` — when the step touches stored knowledge, the
+  specific files you want the executor to consult. Choose paths from
+  the indexes visible to you in this prompt (`shared/INDEX.md`, the
+  user's `INDEX.md`, etc.). This is a hint, not a hard constraint;
+  the executor may broaden. Omit when the step is not memory-related.
+
+Think of the plan as a contract you sign on the executor's behalf.
+The executor inherits exactly the tools you grant it. Forgetting a
+tool causes the step to fail and forces a replan — costly. Listing
+too many is harmless.
 
 ## Style
 

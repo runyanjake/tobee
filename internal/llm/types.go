@@ -1,6 +1,8 @@
 package llm
 
-import "encoding/json"
+import (
+	"encoding/json"
+)
 
 // Role identifies who produced a message in a chat turn.
 type Role string
@@ -21,6 +23,35 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
+}
+
+// MarshalJSON always emits a content field. OpenAI-compatible servers
+// (LM Studio in particular) reject assistant messages where content is
+// absent — an assistant turn that only made tool calls becomes
+// "content": null, never an omitted field. Other roles always emit
+// the string form.
+func (m Message) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		Role       Role            `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+		ToolCallID string          `json:"tool_call_id,omitempty"`
+		Name       string          `json:"name,omitempty"`
+	}
+	var content json.RawMessage
+	if m.Role == RoleAssistant && len(m.ToolCalls) > 0 && m.Content == "" {
+		content = json.RawMessage("null")
+	} else {
+		b, err := json.Marshal(m.Content)
+		if err != nil {
+			return nil, err
+		}
+		content = b
+	}
+	return json.Marshal(wire{
+		Role: m.Role, Content: content, ToolCalls: m.ToolCalls,
+		ToolCallID: m.ToolCallID, Name: m.Name,
+	})
 }
 
 // ToolCall is a function invocation requested by the model.

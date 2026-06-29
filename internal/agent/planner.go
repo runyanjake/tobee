@@ -28,9 +28,20 @@ var planCommitSchema = json.RawMessage(`{
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["intent"],
+        "required": ["intent", "tools"],
         "properties": {
-          "intent": {"type": "string", "description": "What this step must achieve. The outcome, not the tool."}
+          "intent": {"type": "string", "description": "The result this step must produce. State the outcome, not the procedure."},
+          "tools": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string"},
+            "description": "Exact tool names from the <tools> catalogue that the executor is allowed to call on this step. Strictly enforced: anything not listed is unavailable. Include every tool the step might plausibly need."
+          },
+          "memory_paths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Specific memory file paths (relative to the memory root) the executor should consult, chosen from the indexes shown in this prompt. Informational hint — the executor may still broaden if needed."
+          }
         }
       }
     }
@@ -96,6 +107,26 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// trimStrings returns a copy of in with whitespace-trimmed entries,
+// dropping any that are empty after trim. Returns nil for empty input
+// so the field stays omitted on serialisation.
+func trimStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // composeSystem builds the planner's system message: the planner persona
 // + the standard data sections (workspace, context, memory, summary,
 // optional plan) + the executor's tool catalogue. The catalogue sits at
@@ -113,7 +144,9 @@ func (p *Planner) composeSystem(env integrations.Envelope, plan *Plan) string {
 type commitArgs struct {
 	Goal  string `json:"goal"`
 	Steps []struct {
-		Intent string `json:"intent"`
+		Intent      string   `json:"intent"`
+		Tools       []string `json:"tools"`
+		MemoryPaths []string `json:"memory_paths"`
 	} `json:"steps"`
 }
 
@@ -204,7 +237,12 @@ func extractPlan(resp *llm.Response, toolName string) (*Plan, string, error) {
 			if intent == "" {
 				continue
 			}
-			plan.Steps = append(plan.Steps, Step{Intent: intent, Status: StepPending})
+			plan.Steps = append(plan.Steps, Step{
+				Intent:      intent,
+				Tools:       trimStrings(s.Tools),
+				MemoryPaths: trimStrings(s.MemoryPaths),
+				Status:      StepPending,
+			})
 		}
 		if len(plan.Steps) == 0 {
 			return nil, "", fmt.Errorf("planner: %s produced zero steps", toolName)

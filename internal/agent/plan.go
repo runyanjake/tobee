@@ -17,16 +17,20 @@ const (
 	StepSkipped StepStatus = "skipped"
 )
 
-// Step is one unit of work the planner committed to. Intent is what the
-// executor must achieve, stated as a result. Tools to use are the executor's
-// call, not the planner's.
+// Step is one unit of work the planner committed to. Intent is the
+// result the executor must produce. Tools is the strictly-enforced set
+// of tool names the executor may call on this step (planner-chosen
+// from the catalogue). MemoryPaths is an informational hint pointing
+// at specific files the planner believes are relevant.
 type Step struct {
-	ID       string     `json:"id"`
-	Intent   string     `json:"intent"`
-	Status   StepStatus `json:"status"`
-	Result   string     `json:"result,omitempty"`
-	Error    string     `json:"error,omitempty"`
-	Attempts int        `json:"attempts,omitempty"`
+	ID          string     `json:"id"`
+	Intent      string     `json:"intent"`
+	Tools       []string   `json:"tools,omitempty"`
+	MemoryPaths []string   `json:"memory_paths,omitempty"`
+	Status      StepStatus `json:"status"`
+	Result      string     `json:"result,omitempty"`
+	Error       string     `json:"error,omitempty"`
+	Attempts    int        `json:"attempts,omitempty"`
 }
 
 // Plan is the turn-scoped artifact the planner produces. It is rendered
