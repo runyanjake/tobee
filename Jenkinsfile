@@ -12,6 +12,10 @@ pipeline {
     // Accepts debug | info | warn | error.
     LOG_LEVEL = credentials('tobee-log-level')
 
+    // Discord webhook for post-build notifications. Stored as a Secret
+    // text credential. Consumed by discordSend in post.always.
+    DISCORD_WEBHOOK = credentials('discord-pws-builds-channel-webhook')
+
     // Non-secret instance config. Edit here to retarget the deploy.
     // AI_MODEL must support native tool-use (see .claude/DECISIONS.md D-001).
     AI_MODEL          = 'qwen2.5:7b'
@@ -151,6 +155,41 @@ EOF
   }
 
   post {
+    always {
+      // Post-build notification to Discord. Requires the Discord Notifier
+      // plugin and a webhook URL in the tobee-discord-webhook credential.
+      script {
+        def result = currentBuild.currentResult
+        def emoji = result == 'SUCCESS' ? ':green_circle:' :
+                    result == 'FAILURE' ? ':red_circle:' : ':yellow_circle:'
+
+        def branch = env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'Main/Manual'
+
+        def duration = currentBuild.durationString
+            .replace(' and no weeks', '')
+            .replace(' and counting', '')
+
+        def commits = currentBuild.changeSets.collectMany { set ->
+          set.items.collect { "> ${it.msg} (by *${it.author.fullName}*)" }
+        }
+        def commitText = commits ? commits.join('\n') : 'No recent changes detected.'
+
+        def discordDescription = """**Status:** ${emoji} ${result}
+**Branch:** `${branch}`
+**Duration:** :stopwatch: ${duration}
+
+**Commits:**
+${commitText}"""
+
+        discordSend(
+          webhookURL: env.DISCORD_WEBHOOK,
+          title: "📦 Build Alert: ${env.JOB_NAME} [Build #${env.BUILD_NUMBER}]",
+          link: "${env.BUILD_URL}",
+          result: "${currentBuild.currentResult}",
+          description: discordDescription
+        )
+      }
+    }
     failure {
       sh 'docker compose -f "$COMPOSE_FILE" ps || true'
       sh 'docker compose -f "$COMPOSE_FILE" logs --tail=200 || true'
