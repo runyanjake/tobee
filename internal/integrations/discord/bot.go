@@ -129,8 +129,10 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 
 	authorName := displayName(m.Author)
 	b.recordRx(m.ChannelID)
-	slog.Debug("discord: recv",
-		"channel", m.ChannelID, "author", authorName, "content", content)
+	slog.Debug("discord: message received",
+		"channel", m.ChannelID, "author", authorName,
+		"author_id", m.Author.ID, "is_dm", m.GuildID == "",
+		"content", content)
 
 	b.bus.Publish(integrations.Envelope{
 		Integration: "discord",
@@ -170,8 +172,11 @@ func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) bool
 // Discord channel ID; thread is unused for now (future: forum/thread support).
 func (b *Bot) sendReply(_ context.Context, channel, _, text string) error {
 	text = b.rewriteOutboundMentions(text)
-	for _, chunk := range splitMessage(text) {
-		slog.Debug("discord: send", "channel", channel, "chars", len(chunk))
+	chunks := splitMessage(text)
+	for i, chunk := range chunks {
+		slog.Debug("discord: message sent",
+			"channel", channel, "chunk", i+1, "chunks", len(chunks),
+			"chars", len(chunk), "content", chunk)
 		if _, err := b.session.ChannelMessageSend(channel, chunk); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}

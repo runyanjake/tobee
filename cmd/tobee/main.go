@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -217,11 +218,27 @@ func main() {
 }
 
 func setupLogging() {
-	level := slog.LevelInfo
-	if v := os.Getenv("DEBUG"); v == "1" || v == "true" {
-		level = slog.LevelDebug
-	}
+	raw := strings.TrimSpace(os.Getenv("LOG_LEVEL"))
+	level, err := parseLogLevel(raw)
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	if err != nil {
+		slog.Warn("LOG_LEVEL: unrecognised value; using info", "value", raw)
+	}
+}
+
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(s) {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error", "err":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("unrecognised log level %q", s)
+	}
 }
 
 func mustEnv(key string) string {

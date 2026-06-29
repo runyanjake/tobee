@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/integrations"
@@ -169,6 +170,7 @@ func (p *Planner) Initial(ctx context.Context, env integrations.Envelope, transc
 	if err != nil {
 		return nil, "", fmt.Errorf("planner: llm: %w", err)
 	}
+	slog.Debug("agent: planner: response", "kind", "initial", "diag", describeResponse(resp))
 
 	plan, text, err := extractPlan(resp, planCommitTool)
 	if err != nil {
@@ -179,9 +181,32 @@ func (p *Planner) Initial(ctx context.Context, env integrations.Envelope, transc
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil, "", fmt.Errorf("planner: produced neither plan nor reply")
+		return nil, "", fmt.Errorf("planner: produced neither plan nor reply (%s)", describeResponse(resp))
 	}
 	return nil, text, nil
+}
+
+// describeResponse renders a short diagnostic of an LLM response for use
+// inside error messages. Lists the finish reason, raw text length, and the
+// names of any tool calls the model made (so a wrong-tool case is visible
+// rather than just looking like silence).
+func describeResponse(resp *llm.Response) string {
+	if resp == nil {
+		return "nil response"
+	}
+	parts := []string{
+		fmt.Sprintf("finish=%q", resp.Finish),
+		fmt.Sprintf("text_chars=%d", len(resp.Text)),
+		fmt.Sprintf("tool_calls=%d", len(resp.ToolCalls)),
+	}
+	if len(resp.ToolCalls) > 0 {
+		names := make([]string, 0, len(resp.ToolCalls))
+		for _, tc := range resp.ToolCalls {
+			names = append(names, tc.Function.Name)
+		}
+		parts = append(parts, fmt.Sprintf("tools=[%s]", strings.Join(names, ",")))
+	}
+	return strings.Join(parts, " ")
 }
 
 // Revise reruns the planner after a step failed. The prior plan and the
@@ -208,12 +233,13 @@ func (p *Planner) Revise(ctx context.Context, env integrations.Envelope, prev *P
 	if err != nil {
 		return nil, fmt.Errorf("planner: revise llm: %w", err)
 	}
+	slog.Debug("agent: planner: response", "kind", "revise", "diag", describeResponse(resp))
 	plan, _, err := extractPlan(resp, planReviseTool)
 	if err != nil {
 		return nil, err
 	}
 	if plan == nil {
-		return nil, fmt.Errorf("planner: revise produced no plan")
+		return nil, fmt.Errorf("planner: revise produced no plan (%s)", describeResponse(resp))
 	}
 	plan.Replans = prev.Replans + 1
 	return plan, nil

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/llm"
@@ -49,6 +50,9 @@ New transcript to incorporate (most recent last):
 
 Produce the updated rolling summary.`, previous, transcript)
 
+	slog.Debug("agent: summarizer: begin",
+		"key", key, "transcript_chars", len(transcript),
+		"previous_chars", len(previous))
 	resp, err := s.client.Call(ctx, []llm.Message{
 		{Role: llm.RoleSystem, Content: s.prompt},
 		{Role: llm.RoleUser, Content: user},
@@ -56,10 +60,13 @@ Produce the updated rolling summary.`, previous, transcript)
 	if err != nil {
 		return fmt.Errorf("summarizer llm: %w", err)
 	}
-	if strings.TrimSpace(resp.Text) == "" {
+	out := strings.TrimSpace(resp.Text)
+	if out == "" {
+		slog.Debug("agent: summarizer: empty output; skipping write", "key", key)
 		return nil
 	}
-	return s.sessions.WriteSummary(key, strings.TrimSpace(resp.Text))
+	slog.Debug("agent: summarizer: write", "key", key, "summary_chars", len(out))
+	return s.sessions.WriteSummary(key, out)
 }
 
 // renderTranscript flattens a message list into a plain-text dialogue so

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/integrations"
@@ -41,9 +42,14 @@ func (s *Synthesizer) Finalize(
 
 	msgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, transcript...)
 
+	slog.Debug("agent: synthesizer: begin",
+		"steps", len(plan.Steps), "transcript_msgs", len(transcript))
 	resp, err := s.client.Call(ctx, msgs, nil)
 	if err != nil {
 		return "", fmt.Errorf("synthesizer: llm: %w", err)
 	}
-	return strings.TrimSpace(resp.Text), nil
+	out := strings.TrimSpace(resp.Text)
+	slog.Debug("agent: synthesizer: done",
+		"finish", resp.Finish, "reply_chars", len(out))
+	return out, nil
 }

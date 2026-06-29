@@ -70,6 +70,9 @@ func (a *Agent) Start(ctx context.Context) {
 				slog.Info("agent: loop stopped")
 				return
 			case env := <-a.bus.C():
+				slog.Debug("agent: envelope dequeued",
+					"integration", env.Integration, "channel", env.Channel,
+					"user", env.User, "content_chars", len(env.Content))
 				a.processTurn(ctx, env)
 			}
 		}
@@ -89,18 +92,33 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 
 	slog.Info("agent: turn begin",
 		"integration", env.Integration, "channel", env.Channel, "user", env.User)
+	slog.Debug("agent: message received",
+		"integration", env.Integration, "channel", env.Channel,
+		"user", env.User, "user_name", env.UserName, "content", env.Content)
 
 	session := a.sessions.Get(env.Key(), env.IsDirect)
 	transcript := a.ctxb.ComposeTranscript(env)
+	slog.Debug("agent: session loaded",
+		"key", session.Key, "recent_msgs", len(session.Recent()),
+		"transcript_msgs", len(transcript))
 
 	// Commit the user message to the session transcript before the first
 	// LLM call so a crash mid-turn leaves a recoverable record.
 	session.Append(llm.Message{Role: llm.RoleUser, Content: env.Content})
 
 	// --- Phase 1: think + plan ------------------------------------------
+	slog.Debug("agent: planner: begin",
+		"integration", env.Integration, "channel", env.Channel, "user", env.User,
+		"transcript_msgs", len(transcript))
 	plan, fastReply, err := a.planner.Initial(ctx, env, transcript)
 	if err != nil {
-		slog.Error("agent: planner failed", "err", err)
+		slog.Error("agent: planner failed",
+			"err", err,
+			"integration", env.Integration, "channel", env.Channel,
+			"user", env.User, "user_name", env.UserName,
+			"content_chars", len(env.Content),
+			"transcript_msgs", len(transcript),
+			"ctx_err", ctx.Err())
 		return
 	}
 	if plan == nil {
@@ -110,12 +128,14 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 			slog.Debug("agent: planner produced empty reply")
 			return
 		}
+		slog.Debug("agent: planner: fast reply", "chars", len(fastReply))
 		a.deliver(ctx, env, session, fastReply)
 		return
 	}
 
 	slog.Info("agent: plan committed",
 		"goal", plan.Goal, "steps", len(plan.Steps))
+	slog.Debug("agent: phase=execute", "steps", len(plan.Steps), "max_replans", a.cfg.MaxReplans)
 
 	// Announce multi-step plans so the user sees what's coming while the
 	// executor runs. Mirrored into the session so the model sees on the
@@ -138,6 +158,8 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 			break
 		}
 
+		slog.Debug("agent: step begin",
+			"id", step.ID, "intent", step.Intent, "tools", step.Tools)
 		var ok bool
 		transcript, ok = a.exec.RunStep(ctx, env, plan, step, transcript, session)
 		if line := plan.RenderStepStatus(step); line != "" {
@@ -157,9 +179,14 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 		}
 
 		// Phase 2b: replan with the failure context the executor produced.
+		slog.Debug("agent: phase=replan",
+			"id", step.ID, "replans_so_far", plan.Replans, "reason", step.Error)
 		revised, rerr := a.planner.Revise(ctx, env, plan, step.Error, transcript)
 		if rerr != nil {
-			slog.Error("agent: replan failed; finalising incomplete plan", "err", rerr)
+			slog.Error("agent: replan failed; finalising incomplete plan",
+				"err", rerr,
+				"step", step.ID, "replans_so_far", plan.Replans,
+				"integration", env.Integration, "channel", env.Channel, "user", env.User)
 			break
 		}
 		slog.Info("agent: plan revised",
@@ -170,9 +197,13 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	// --- Phase 3: synthesize (multi-step only) --------------------------
 	var reply string
 	if plan.HasMultipleSteps() {
+		slog.Debug("agent: phase=synthesize", "steps_run", plan.StepsRun, "replans", plan.Replans)
 		out, serr := a.synth.Finalize(ctx, env, plan, transcript)
 		if serr != nil {
-			slog.Error("agent: synthesizer failed; falling back to last step", "err", serr)
+			slog.Error("agent: synthesizer failed; falling back to last step",
+				"err", serr,
+				"integration", env.Integration, "channel", env.Channel, "user", env.User,
+				"steps", len(plan.Steps), "steps_run", plan.StepsRun)
 			reply = plan.LastStepText()
 		} else {
 			reply = out
@@ -190,6 +221,9 @@ func (a *Agent) deliver(ctx context.Context, env integrations.Envelope, session 
 	if reply == "" {
 		slog.Debug("agent: turn produced no reply text")
 	} else {
+		slog.Debug("agent: message sent",
+			"integration", env.Integration, "channel", env.Channel,
+			"user", env.User, "content", reply)
 		// Mirror the delivered reply into session so the model sees what
 		// it actually told the user on the next turn. Plan-synthesised
 		// replies are not otherwise present in the executor transcript.
@@ -198,8 +232,10 @@ func (a *Agent) deliver(ctx context.Context, env integrations.Envelope, session 
 	}
 
 	if a.summ != nil {
+		slog.Debug("agent: phase=summarize", "key", env.Key())
 		if err := a.summ.Update(ctx, env.Key(), session.Recent()); err != nil {
-			slog.Warn("agent: summarizer failed", "err", err)
+			slog.Warn("agent: summarizer failed",
+				"err", err, "key", env.Key())
 		}
 	}
 

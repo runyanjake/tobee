@@ -72,20 +72,33 @@ func (e *Executor) RunStep(
 		if plan.StepsRun >= e.totalBudget {
 			step.Error = "turn step-budget exhausted"
 			step.Status = StepFailed
+			slog.Warn("agent: executor: total step budget exhausted",
+				"step", step.ID, "steps_run", plan.StepsRun, "total_budget", e.totalBudget)
 			return transcript, false
 		}
 		plan.StepsRun++
+
+		slog.Debug("agent: executor: iteration",
+			"step", step.ID, "sub", sub, "steps_run", plan.StepsRun,
+			"transcript_msgs", len(transcript))
 
 		sys := e.composeStepSystem(env, plan, step)
 		callMsgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, transcript...)
 
 		resp, err := e.client.Call(ctx, callMsgs, toolSpecs)
 		if err != nil {
-			slog.Error("agent: executor llm error", "step", step.ID, "sub", sub, "err", err)
+			slog.Error("agent: executor llm error",
+				"step", step.ID, "sub", sub, "err", err,
+				"integration", env.Integration, "channel", env.Channel, "user", env.User,
+				"ctx_err", ctx.Err())
 			step.Error = err.Error()
 			step.Status = StepFailed
 			return transcript, false
 		}
+		slog.Debug("agent: executor: llm response",
+			"step", step.ID, "sub", sub,
+			"finish", resp.Finish, "text_chars", len(resp.Text),
+			"tool_calls", len(resp.ToolCalls))
 
 		asst := llm.Message{
 			Role:      llm.RoleAssistant,

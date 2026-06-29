@@ -7,6 +7,11 @@ pipeline {
     // Secret. Set in Jenkins as a "Secret text" credential.
     DISCORD_TOKEN = credentials('tobee-discord-token')
 
+    // Runtime log level. Stored as a Secret text credential so it can be
+    // dialled up to debug from the Jenkins UI without editing this file.
+    // Accepts debug | info | warn | error.
+    LOG_LEVEL = credentials('tobee-log-level')
+
     // Non-secret instance config. Edit here to retarget the deploy.
     // AI_MODEL must support native tool-use (see .claude/DECISIONS.md D-001).
     AI_MODEL          = 'qwen2.5:7b'
@@ -54,7 +59,7 @@ DATA_DIR=data
 PROMPTS_DIR=prompts
 SESSION_IDLE_TIMEOUT=4h
 SESSION_TTL=168h
-DEBUG=0
+LOG_LEVEL=${LOG_LEVEL}
 EOF
         '''
       }
@@ -64,7 +69,7 @@ EOF
       steps {
         sh '''
           set -eu
-          : "${DISCORD_TOKEN:?DISCORD_TOKEN is empty}" "${AI_MODEL:?AI_MODEL is empty}"
+          : "${DISCORD_TOKEN:?DISCORD_TOKEN is empty}" "${AI_MODEL:?AI_MODEL is empty}" "${LOG_LEVEL:?LOG_LEVEL is empty}"
 
           # Verify the host can actually pass the GPU into a container. Without
           # this Ollama silently runs on CPU and nothing would fail loudly.

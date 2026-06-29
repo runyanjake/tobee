@@ -344,6 +344,9 @@ func (s *SessionStore) rotateLocked(key string) bool {
 		delete(s.sessions, key)
 		moved = true
 	}
+	if moved {
+		slog.Debug("session: rotated", "key", key)
+	}
 	return moved
 }
 
