@@ -916,6 +916,109 @@ single state seam new phases can grow off.
 
 ---
 
+## D-023 — Unified ReAct loop + always-on synthesis
+
+**Status:** Accepted · **Date:** 2026-06-29 · Supersedes D-020
+(plan-and-execute scaffold) and D-022 (triage gate + state-machine
+driver). Regresses D-021 (status verbatim relay) by explicit choice.
+
+**Decision.** A turn is two phases, not five:
+
+1. **Act loop.** One LLM call per iteration. The model sees the
+   persona, the data sections, the recent transcript, and every
+   registered tool. It either calls tools or produces terminal text
+   (zero tool calls = loop ends). Terminal text on the very first
+   iteration is the trivial path — common, expected, not an error.
+   Bounded by `LOOP_MAX_ITERATIONS` (default 12).
+2. **Synthesis.** Always runs. Reads the act-loop transcript (tool
+   calls, tool results, terminal text) and composes the one outbound
+   message the user sees. Tone, formatting, and length live here.
+   The act loop is the model's scratchpad; the synthesiser is the
+   user-facing voice.
+
+`processTurn` becomes a linear sequence: build `Turn` → `Executor.Run`
+→ `Synthesizer.Finalize` → `deliver`. No `phaseFn` driver, no
+categorical routing, no `Plan` / `Step` types, no replan budget.
+`Turn` keeps the context-object role from D-022 minus the Plan/Triage
+fields.
+
+**Why.** D-022's `tool_choice: "required"` invariant turned out not
+to hold for the loaded LM Studio model: on simple greetings ("Hey
+@TOBEE") the model emitted correct text ("Hello! How can I assist
+you today?") with zero tool calls, and the triage phase rejected it
+as "no recognised tool call." The forcing function bounced off the
+model. We tried prompt tightening and tool_choice flags; the model
+ignored both.
+
+Rather than bolt on a text-as-respond fallback (and grow a thin edge
+case per failure mode), we unify: a turn is "model thinks and may
+act, then we synthesise a reply." Greetings, knowledge questions,
+status questions, and action requests all flow through the same
+shape. The model picks tools off a menu of concrete actions; the
+synthesiser produces the reply. "No tool call needed" becomes the
+expected trivial path, not a categorical mismatch.
+
+Concrete actions remain concrete (the tool registry is the menu),
+but the model owns the choice — no upfront category commit, no
+forced tool call.
+
+**Regressions explicitly accepted.**
+
+- **D-021 status verbatim.** Status tools still pre-render
+  deterministic text, but the synthesiser is now free to reword
+  them. User-accepted formatting drift in exchange for one uniform
+  shape. Revisit if the rewording materially loses information.
+- **D-020 plan-and-execute structure.** No explicit ordering
+  artifact. The model improvises step order inside the act loop.
+  If empirical badness recurs (re-reading the same memory file,
+  skipping the obvious first step), the fix is prompt-side or a
+  reflection pass, not re-introducing a separate planner.
+
+**Cost.**
+
+- Trivial turn: 2 LLM calls (act loop with zero tool calls + always-
+  on synthesis) vs. 1 under D-022. The synthesis tax buys consistent
+  tone enforcement; the user explicitly accepted it.
+- Non-trivial turn: N act-loop iterations + 1 synthesis. Same shape
+  as D-022's exec + synth path for multi-step plans.
+- Surface deleted: `internal/agent/triage.go`, `planner.go`,
+  `plan.go`, `prompts/triage.md`, `prompts/planner.md`, the phaseFn
+  driver. ~600 lines of agent-package code gone.
+- Env-var surface: `PLAN_MAX_STEPS_TOTAL` / `PLAN_MAX_STEPS_PER_STEP`
+  / `PLAN_MAX_REPLANS` replaced with `LOOP_MAX_ITERATIONS`.
+
+**Invariants preserved.**
+
+- Native tool-use only (D-001) — the act loop reads structured
+  `tool_calls`; the synthesiser advertises no tools.
+- Sandboxed FS (D-003), in-process janitor (D-010), session idle
+  rotation + persistence (D-011 / D-016), per-user memory layout
+  (D-013), reporter registry (D-014), dynamic scheduled jobs (D-015),
+  prefix-cache contract (D-017), workspace areas (D-019) — all
+  unchanged.
+- Serial worker (D-005) — single goroutine still drains the bus.
+
+**Explicitly not built.**
+
+- **Reflection pass after synthesis.** Logged as a deliberate
+  follow-up. The transcript is the substrate; a reflect call would
+  become phase 3, feeding memory or self-critique.
+- **Streaming the act loop's tool calls back to the user.** Today
+  the user sees only the synthesised reply. A future "thinking…"
+  indicator could surface in-progress activity but is a Discord-side
+  change.
+- **Forced tool choice tuning.** D-022's `tool_choice: "required"`
+  wiring stays in the client; the act loop just doesn't use it. Any
+  future phase that needs forced structure can opt in.
+
+**Don't revert** without first explaining how the replacement
+handles the trivial-input case ("Hey @TOBEE" → correct reply) and
+how it avoids fanning out edge cases per failure mode. The whole
+point of this decision is the one-shape-for-all-turns uniformity;
+losing that loses the win.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

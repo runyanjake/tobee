@@ -36,11 +36,9 @@ func (b *ContextBuilder) ComposeTranscript(env integrations.Envelope) []llm.Mess
 }
 
 // ComposeSystem renders the system message for one phase of a turn.
-// persona is the phase's persona text (executor / planner / synthesizer);
-// plan, when non-nil and non-empty, is rendered as <plan>…</plan> in the
-// data sections. The plan block is placed last so the prefix-cache
-// invariant (D-017) holds across consecutive steps within a turn.
-func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string, plan *Plan) string {
+// persona is the phase's persona text (act-loop persona or synthesizer
+// persona). The section order is the prefix-cache contract (D-017).
+func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string) string {
 	var sb strings.Builder
 
 	if persona != "" {
@@ -91,14 +89,6 @@ func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string
 
 	if summary := b.Sessions.ReadSummary(env.Key()); summary != "" {
 		fmt.Fprintf(&sb, "<session-summary>\n%s\n</session-summary>\n\n", summary)
-	}
-
-	// Plan goes last among the data sections: it is the only thing that
-	// changes step-to-step within a turn, so keeping it at the tail
-	// maximises prefix-cache reuse during the executor sub-loop.
-	if r := plan.Render(); r != "" {
-		sb.WriteString(r)
-		sb.WriteString("\n")
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
