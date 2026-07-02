@@ -31,4 +31,10 @@ type Turn struct {
 	// Reply is set by the synthesizer at the end of the turn. The
 	// deliver step reads it and sends it to the integration.
 	Reply string
+
+	// Reactions are the emoji reactions the loop has added to the
+	// inbound message (Env.MessageID) so far, in order. On a successful
+	// turn deliver clears them; on failure it adds a failure marker and
+	// leaves the trail.
+	Reactions []string
 }

@@ -20,19 +20,28 @@ type ReplySender func(ctx context.Context, channel, thread, text string) (messag
 // fall back to sending a new message.
 type MessageEditor func(ctx context.Context, channel, messageID, text string) error
 
+// Reactor adds or removes a single emoji reaction on a message.
+// Integrations register one when the transport supports reactions
+// (Discord does); add=false removes the bot's own reaction. Used by the
+// loop to give tactile progress feedback on the inbound message.
+type Reactor func(ctx context.Context, channel, messageID, emoji string, add bool) error
+
 // Replies is a lookup table of integration name → sender (+ optional
-// editor). The agent looks up by integration to deliver replies and
-// to update plan-announcement messages as steps progress.
+// editor + reactor). The agent looks up by integration to deliver
+// replies, update plan-announcement messages, and react to the inbound
+// message as the turn progresses.
 type Replies struct {
-	mu      sync.RWMutex
-	senders map[string]ReplySender
-	editors map[string]MessageEditor
+	mu       sync.RWMutex
+	senders  map[string]ReplySender
+	editors  map[string]MessageEditor
+	reactors map[string]Reactor
 }
 
 func NewReplies() *Replies {
 	return &Replies{
-		senders: make(map[string]ReplySender),
-		editors: make(map[string]MessageEditor),
+		senders:  make(map[string]ReplySender),
+		editors:  make(map[string]MessageEditor),
+		reactors: make(map[string]Reactor),
 	}
 }
 
@@ -49,6 +58,14 @@ func (r *Replies) RegisterEditor(integration string, e MessageEditor) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.editors[integration] = e
+}
+
+// RegisterReactor associates an integration name with an emoji reactor.
+// Optional; not all transports support reactions.
+func (r *Replies) RegisterReactor(integration string, rc Reactor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reactors[integration] = rc
 }
 
 // Send delivers text via the sender registered for integration.
@@ -83,6 +100,31 @@ func (r *Replies) Edit(ctx context.Context, integration, channel, messageID, tex
 	}
 	if err := e(ctx, channel, messageID, text); err != nil {
 		return fmt.Errorf("edit: %w", err)
+	}
+	return nil
+}
+
+// React adds an emoji reaction to messageID. Returns the underlying
+// error if no reactor is registered or the call fails — callers log and
+// continue rather than abort a turn over a missed reaction.
+func (r *Replies) React(ctx context.Context, integration, channel, messageID, emoji string) error {
+	return r.reaction(ctx, integration, channel, messageID, emoji, true)
+}
+
+// RemoveReaction removes the bot's own emoji reaction from messageID.
+func (r *Replies) RemoveReaction(ctx context.Context, integration, channel, messageID, emoji string) error {
+	return r.reaction(ctx, integration, channel, messageID, emoji, false)
+}
+
+func (r *Replies) reaction(ctx context.Context, integration, channel, messageID, emoji string, add bool) error {
+	r.mu.RLock()
+	rc, ok := r.reactors[integration]
+	r.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("no reactor for %q", integration)
+	}
+	if err := rc(ctx, channel, messageID, emoji, add); err != nil {
+		return fmt.Errorf("react: %w", err)
 	}
 	return nil
 }

@@ -4,7 +4,8 @@
       "Bash(go mod tidy)",
       "Bash(go build ./...)",
       "Bash(go vet ./...)",
-      "Bash(docker compose *)"
+      "Bash(docker compose *)",
+      "Bash(git -C /home/jr/repositories/software/tobee diff --stat)"
     ]
   }
 }

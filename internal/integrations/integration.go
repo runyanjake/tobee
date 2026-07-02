@@ -27,6 +27,7 @@ type Envelope struct {
 	UserName    string // human-readable display name for User, "" if unknown
 	Channel     string // opaque routing id used when replying
 	Thread      string // optional thread id within a channel
+	MessageID   string // integration's id for the inbound message, "" if none; used to react to it
 	Content     string // user-facing text body
 	Received    time.Time
 

@@ -11,6 +11,16 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
+// Reaction emojis mark turn progress on the inbound message: received,
+// planning, executing, and (terminal) failure. A successful turn clears
+// its reactions instead of leaving a marker.
+const (
+	reactReceived  = "✅"
+	reactPlanning  = "🧠"
+	reactExecuting = "💭"
+	reactFailed    = "❌"
+)
+
 // Config controls the agent's execution limits at the turn level.
 // Per-step and total executor caps live on Executor.
 type Config struct {
@@ -122,8 +132,10 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 		Session:    session,
 		Transcript: transcript,
 	}
+	a.react(turn, reactReceived)
 
 	// --- Phase 1: plan -------------------------------------------------
+	a.react(turn, reactPlanning)
 	plan, err := a.planner.Run(ctx, env, transcript)
 	if err != nil {
 		slog.Error("agent: planner failed; aborting turn",
@@ -156,6 +168,9 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	}
 
 	// --- Phase 3: execute ---------------------------------------------
+	if plan.HasTools() {
+		a.react(turn, reactExecuting)
+	}
 	for !plan.Complete() {
 		if ctx.Err() != nil {
 			slog.Warn("agent: turn ctx expired during execution")
@@ -215,6 +230,35 @@ func (a *Agent) updatePlanMessage(t *Turn) {
 	}
 }
 
+// react adds an emoji reaction to the inbound message and records it on
+// the turn so it can be cleared later. Best-effort: no message ID (e.g.
+// scheduler ticks), no registered reactor, or a transport error all
+// degrade to a debug log — reactions are feedback, never load-bearing.
+func (a *Agent) react(t *Turn, emoji string) {
+	if t.Env.MessageID == "" {
+		return
+	}
+	if err := a.replies.React(t.Ctx, t.Env.Integration, t.Env.Channel, t.Env.MessageID, emoji); err != nil {
+		slog.Debug("agent: react failed; continuing", "err", err, "emoji", emoji)
+		return
+	}
+	t.Reactions = append(t.Reactions, emoji)
+}
+
+// clearReactions removes every reaction react added, in order. Used on a
+// successful turn so the delivered reply is the only signal left.
+func (a *Agent) clearReactions(t *Turn) {
+	if t.Env.MessageID == "" {
+		return
+	}
+	for _, emoji := range t.Reactions {
+		if err := a.replies.RemoveReaction(t.Ctx, t.Env.Integration, t.Env.Channel, t.Env.MessageID, emoji); err != nil {
+			slog.Debug("agent: reaction removal failed; continuing", "err", err, "emoji", emoji)
+		}
+	}
+	t.Reactions = nil
+}
+
 // deliver sends the reply (if any) and runs the post-turn summarizer.
 // Both are best-effort: a failure here must not block future turns.
 func (a *Agent) deliver(t *Turn) {
@@ -231,6 +275,16 @@ func (a *Agent) deliver(t *Turn) {
 		if _, err := a.replies.Send(t.Ctx, t.Env.Integration, t.Env.Channel, t.Env.Thread, t.Reply); err != nil {
 			slog.Error("agent: deliver failed", "err", err)
 		}
+	}
+
+	// Terminal reaction: a produced reply is success (clear the trail);
+	// an empty reply means the turn failed to answer (mark it). This is
+	// the single funnel every turn passes through, so the reactions are
+	// always resolved.
+	if t.Reply == "" {
+		a.react(t, reactFailed)
+	} else {
+		a.clearReactions(t)
 	}
 
 	if a.summ != nil {

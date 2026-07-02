@@ -79,6 +79,7 @@ func New(cfg Config, bus *integrations.Bus, replies *agent.Replies) (*Bot, error
 
 	replies.Register("discord", b.sendReply)
 	replies.RegisterEditor("discord", b.editReply)
+	replies.RegisterReactor("discord", b.react)
 	return b, nil
 }
 
@@ -153,6 +154,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		User:        m.Author.ID,
 		UserName:    authorName,
 		Channel:     m.ChannelID,
+		MessageID:   m.ID,
 		Content:     content,
 		Received:    time.Now(),
 		IsDirect:    m.GuildID == "",
@@ -227,6 +229,27 @@ func (b *Bot) editReply(_ context.Context, channel, messageID, text string) erro
 		"chars", len(text), "content", text)
 	if _, err := b.session.ChannelMessageEdit(channel, messageID, text); err != nil {
 		return fmt.Errorf("edit: %w", err)
+	}
+	return nil
+}
+
+// react adds or removes the bot's own emoji reaction on a message. It's
+// registered on the agent's Replies table to give tactile progress
+// feedback on the inbound user message. add=false removes the bot's own
+// reaction (no Manage Messages permission needed). Like the other
+// senders, the ctx is unused — discordgo issues a plain REST call.
+func (b *Bot) react(_ context.Context, channel, messageID, emoji string, add bool) error {
+	if messageID == "" {
+		return nil
+	}
+	if add {
+		if err := b.session.MessageReactionAdd(channel, messageID, emoji); err != nil {
+			return fmt.Errorf("react add: %w", err)
+		}
+		return nil
+	}
+	if err := b.session.MessageReactionRemove(channel, messageID, emoji, "@me"); err != nil {
+		return fmt.Errorf("react remove: %w", err)
 	}
 	return nil
 }
