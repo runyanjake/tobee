@@ -64,10 +64,13 @@ services:
       ollama-pull:
         condition: service_completed_successfully
     volumes:
-      # Live-reloadable prompts (edit on host, restart the process to apply).
-      - ./prompts:/app/prompts
-      # tobee's "brain": memory, sessions, scheduler jobs. Lives outside the
-      # repo on the prod host so it survives redeploys and is editable in
+      # Prompts are baked into the image at build time (Dockerfile:
+      # COPY prompts ./prompts). No host bind mount — prod ships one
+      # image built with one set of prompts, and prompt changes ride in
+      # on a rebuild. Dev compose still bind-mounts them for live edit.
+      #
+      # tobee's "brain": memory and scheduler jobs. Lives outside the repo
+      # on the prod host so it survives redeploys and is editable in
       # place. Create the directory on the server before first run:
       #   sudo mkdir -p /pwspool/software/tobee && sudo chown $(id -u):$(id -g) /pwspool/software/tobee
       - /pwspool/software/tobee:/app/data
