@@ -83,6 +83,7 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 	}
 
 	violations := 0
+	llmErrors := 0
 	for sub := 0; sub < e.maxPerStep; sub++ {
 		if t.Plan.StepsRun >= e.totalBudget {
 			step.Error = "turn step-budget exhausted"
@@ -103,13 +104,22 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 		logPrompt("agent: executor: prompt", callMsgs)
 		resp, err := e.client.Call(t.Ctx, callMsgs, toolSpecs, llm.ToolChoiceRequired)
 		if err != nil {
-			slog.Error("agent: executor llm error",
-				"step", step.ID, "sub", sub, "err", err,
+			slog.Error("agent: executor: LLM ERROR",
+				"step", step.ID, "sub", sub, "llm_error", llmErrors, "err", err,
 				"integration", t.Env.Integration, "channel", t.Env.Channel, "user", t.Env.User,
 				"ctx_err", t.Ctx.Err())
-			step.Error = err.Error()
-			step.Status = StepFailed
-			return false
+			if t.Ctx.Err() != nil {
+				step.Error = err.Error()
+				step.Status = StepFailed
+				return false
+			}
+			if llmErrors >= 1 {
+				step.Error = fmt.Sprintf("llm error across retries: %v", err)
+				step.Status = StepFailed
+				return false
+			}
+			llmErrors++
+			continue
 		}
 		slog.Debug("agent: executor: llm response",
 			"step", step.ID, "sub", sub,

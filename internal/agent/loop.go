@@ -277,9 +277,12 @@ func (a *Agent) deliver(t *Turn) {
 	}
 
 	// Terminal reaction: a produced reply is success (clear the trail);
-	// an empty reply means the turn failed to answer (mark it). This is
-	// the single funnel every turn passes through, so the reactions are
-	// always resolved.
+	// an empty reply means the turn failed to answer (mark it). ❌ is
+	// applied here and nowhere else — planner/executor/synth handle
+	// their own retry loops internally so that by the time we reach
+	// this point every retry-worthy failure (protocol violation OR
+	// transient LLM error) has already been exhausted. Do not add
+	// react(t, reactFailed) calls elsewhere.
 	if t.Reply == "" {
 		a.react(t, reactFailed)
 	} else {

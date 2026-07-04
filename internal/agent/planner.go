@@ -72,9 +72,11 @@ func NewPlanner(client *llm.Client, ctxb *ContextBuilder, reg *tools.Registry, p
 	}
 }
 
-// Run executes the planning LLM call and returns a committed Plan. On
-// protocol violation (no plan.commit tool call) it retries once with a
-// nudge in the transcript, then fails the turn.
+// Run executes the planning LLM call and returns a committed Plan. It
+// retries once on either a transient LLM call error or a protocol
+// violation (no plan.commit tool call), then fails. Both retry-worthy
+// failures share the same 2-attempt budget so the caller's terminal
+// ❌ reaction fires only when the planner has truly given up.
 func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript []llm.Message) (*Plan, error) {
 	if p == nil || p.client == nil {
 		return nil, fmt.Errorf("planner: not configured")
@@ -92,11 +94,18 @@ func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript
 
 	msgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, transcript...)
 
+	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		logPrompt("agent: planner: prompt", msgs)
 		resp, err := p.client.Call(ctx, msgs, toolSpec, llm.ToolChoiceRequired)
 		if err != nil {
-			return nil, fmt.Errorf("planner: llm: %w", err)
+			slog.Error("agent: planner: LLM ERROR",
+				"attempt", attempt, "err", err, "ctx_err", ctx.Err())
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("planner: llm: %w", err)
+			}
+			continue
 		}
 		slog.Debug("agent: planner: llm response",
 			"attempt", attempt,
@@ -129,6 +138,7 @@ func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript
 			"text_preview", oneLine(resp.Text),
 			"tool_calls_count", len(resp.ToolCalls),
 			"tool_calls", renderToolCalls(resp.ToolCalls))
+		lastErr = fmt.Errorf("protocol violation: no %s call", planCommitTool)
 
 		if attempt == 0 {
 			msgs = append(msgs,
@@ -138,7 +148,7 @@ func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript
 		}
 	}
 
-	return nil, fmt.Errorf("planner: protocol violation: model did not call %s after 2 attempts", planCommitTool)
+	return nil, fmt.Errorf("planner: exhausted retries: %w", lastErr)
 }
 
 // commitArgs is the JSON shape plan.commit emits.

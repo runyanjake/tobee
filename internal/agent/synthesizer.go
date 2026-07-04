@@ -86,11 +86,18 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 
 	slog.Debug("agent: synthesizer: begin", "plan_steps", len(t.Plan.Steps))
 
+	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		logPrompt("agent: synthesizer: prompt", msgs)
 		resp, err := s.client.Call(t.Ctx, msgs, toolSpec, llm.ToolChoiceRequired)
 		if err != nil {
-			return "", fmt.Errorf("synthesizer: llm: %w", err)
+			slog.Error("agent: synthesizer: LLM ERROR",
+				"attempt", attempt, "err", err, "ctx_err", t.Ctx.Err())
+			lastErr = err
+			if t.Ctx.Err() != nil {
+				return "", fmt.Errorf("synthesizer: llm: %w", err)
+			}
+			continue
 		}
 		slog.Debug("agent: synthesizer: llm response",
 			"attempt", attempt,
@@ -119,6 +126,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 			"text_preview", oneLine(resp.Text),
 			"tool_calls_count", len(resp.ToolCalls),
 			"tool_calls", renderToolCalls(resp.ToolCalls))
+		lastErr = fmt.Errorf("protocol violation: no %s call", replyCommitTool)
 
 		if attempt == 0 {
 			msgs = append(msgs,
@@ -128,7 +136,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("synthesizer: protocol violation: model did not call %s after 2 attempts", replyCommitTool)
+	return "", fmt.Errorf("synthesizer: exhausted retries: %w", lastErr)
 }
 
 // renderReply composes the final Discord message from the structured
