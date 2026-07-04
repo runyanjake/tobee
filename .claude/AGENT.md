@@ -6,7 +6,12 @@ linear sequence: **plan → announce → execute → synth → deliver**. The
 plan is a typed artifact; each step is a per-step ReAct sub-loop; the
 synthesiser composes the final user-facing reply from the structured
 plan + step results, not from the act loop's raw assistant messages.
-See [DECISIONS.md](DECISIONS.md) D-001 and D-024.
+Every LLM-authored artifact — the plan, each step's outcome, the final
+reply — is committed via a required virtual tool call; free-form text
+is a protocol violation that fails the turn (or step). Stored memory
+is never pre-injected into the system prompt — the model fetches it
+via `memory.*` tools. See [DECISIONS.md](DECISIONS.md) D-001, D-024,
+D-025, and D-026.
 
 ## Per-turn state: `Turn`
 
@@ -19,42 +24,53 @@ single value threaded through every phase:
 | Env            | processTurn (from the envelope)              |
 | Session        | processTurn (loaded from SessionStore)       |
 | Transcript     | ContextBuilder; grown by Executor per step   |
-| Plan           | Planner.Run (with text-wrap fallback)        |
+| Plan           | Planner.Run (nil if planner protocol fails)  |
 | PlanMessageID  | processTurn (after announce, for edits)      |
-| Reply          | Synthesizer.Finalize                         |
+| Reply          | Synthesizer.Finalize (via reply.commit)      |
 
 ## The phases
 
 1. **Plan** ([internal/agent/planner.go](../internal/agent/planner.go)).
-   One LLM call with [prompts/planner.md](../prompts/planner.md) and
-   the `plan.commit` virtual tool. `tool_choice=required`. The model
+   LLM call with [prompts/planner.md](../prompts/planner.md) and the
+   `plan.commit` virtual tool. `tool_choice=required`. The model
    commits an ordered `Plan` (goal + `Step`s, each with intent + tool
-   scope). If the model emits text instead of `plan.commit` (model
-   non-compliance with the tool protocol), the text is wrapped as a
-   one-step Plan whose Result is the text — letting the rest of the
-   loop run uniformly on the trivial-input path. `plan.commit` is
-   advertised only on this call; never registered on `tools.Registry`.
+   scope). If the model emits text instead of `plan.commit`, the
+   planner logs `PROTOCOL VIOLATION` at ERROR, appends a nudge to the
+   transcript, and retries once. A second violation aborts the turn
+   (no reply, ❌ reaction). `plan.commit` is advertised only on this
+   call; never registered on `tools.Registry`. See D-025.
 
 2. **Announce.** The plan is rendered with per-step emoji statuses
    (⏳/🔄/✅/❌) and sent via `Replies.Send`. The platform message ID
-   is captured on `Turn.PlanMessageID`. The wrap-fallback case (one
-   no-tools step) skips announcement — there's nothing useful to show.
+   is captured on `Turn.PlanMessageID`. A respond-only plan (no
+   tool-bearing steps, e.g. a greeting) skips announcement — there's
+   nothing useful to show.
 
 3. **Execute** ([internal/agent/executor.go](../internal/agent/executor.go)).
    For each step in order: mark step running, edit the plan message
    via `Replies.Edit`, run `Executor.RunStep` (per-step ReAct sub-loop
    bounded by `PLAN_MAX_STEPS_PER_STEP`, default 4, and turn-total
    `PLAN_MAX_STEPS_TOTAL`, default 12), then edit the plan message
-   again with done/failed status. No-tools steps (wrap fallback) are
-   no-ops with Result pre-set.
+   again with done/failed status. Each iteration runs with
+   `tool_choice=required` and advertises the planner-granted tools
+   plus the virtual `step.finish({result})` tool. `step.finish` is
+   the only legal termination for a tool-bearing step; free-form text
+   is a protocol violation that costs one retry and then fails the
+   step. A step with no declared Tools is respond-only (e.g.
+   greeting): no LLM call, empty Result, marked done immediately —
+   synth composes the reply from plan + persona. See D-025.
 
 4. **Synthesise** ([internal/agent/synthesizer.go](../internal/agent/synthesizer.go)).
-   One LLM call with [prompts/synthesizer.md](../prompts/synthesizer.md)
-   advertising no tools. Input is `persona + plan-as-typed-artifact +
-   original user message` — the act loop's assistant messages are
-   deliberately omitted. This is the fix for the "self-talk" failure
-   mode: with no conversational tail to continue, the synth produces
-   a one-shot reply rendering of finished work.
+   LLM call with [prompts/synthesizer.md](../prompts/synthesizer.md)
+   advertising only the `reply.commit({spoken, artifacts})` virtual
+   tool. `tool_choice=required`. The Discord message is composed in
+   Go by `renderReply` — `spoken` on top, each artifact as a
+   triple-fenced block with an optional `lang` hint. Prose fences
+   are never model-authored. Input is `persona + plan-as-typed-artifact
+   + original user message`; the act loop's assistant messages are
+   deliberately omitted (fix for the "self-talk" failure mode). One
+   retry on protocol violation, then the turn delivers an empty reply
+   (❌ reaction). See D-025.
 
 5. **Deliver.** Send the reply via `Replies.Send`, mirror into session,
    run the (best-effort) summariser.
@@ -84,12 +100,12 @@ If the editor is missing or fails, status updates degrade silently
   structured input). The model's free-text output during the act loop
   is scratchpad — it never reaches the synthesiser.
 
-- **Strict planner with one fallback.** `plan.commit` is the only
-  legal output from the planner phase. When the model bypasses the
-  tool protocol and emits text, the text is wrapped as a one-step
-  plan whose Result is the text. This keeps the rest of the loop
-  uniform on the trivial path without re-introducing a categorical
-  branch. See D-024.
+- **Strict tool-call protocol at every phase.** `plan.commit`,
+  `step.finish`, and `reply.commit` are the only legal LLM outputs
+  at the planner, executor, and synth phases respectively. Free-form
+  text is a protocol violation: logged loudly, retried once with a
+  nudge, then fails the turn (or step). No text-wrap fallback, no
+  free-form terminal text, no model-authored fences. See D-025.
 
 - **Synthesiser sees only structured input.** Persona + plan +
   original user message. No act-loop assistant messages. This
@@ -117,28 +133,36 @@ initial message list for a turn. Sections, in fixed order:
 | # | Section           | Source                                                  | Always shown?      |
 |---|-------------------|---------------------------------------------------------|--------------------|
 | 1 | Persona           | `prompts/persona/*.md` (concatenated)                   | Yes                |
-| 2 | Current Context   | integration / channel / thread / user tags              | Yes                |
-| 3 | Shared Memory Index | `data/memory/shared/INDEX.md`                         | If present         |
-| 4 | User Memory Index | `data/memory/users/<int>/<user>/INDEX.md`               | If present         |
-| 5 | User Profile      | `data/memory/users/<int>/<user>/user.md`                | If present         |
-| 6 | Preferences       | `data/memory/users/<int>/<user>/preferences.md`         | If present         |
-| 7 | Session Summary   | `data/sessions/.../current.md`                          | If present         |
-| 8 | Recent Turns      | in-memory ring buffer (user/assistant/tool)             | Yes (if any)       |
-| 9 | Current Input     | the incoming Envelope                                   | Yes                |
+| 2 | Workspace areas   | boot-time `workspace.Areas` config                      | If configured      |
+| 3 | Current Context   | integration / channel / thread / user tags              | Yes                |
+| 4 | Memory hint       | fixed `<memory>` block naming paths + `memory.*` tools  | Yes                |
+| 5 | Session Summary   | `data/sessions/.../current.md`                          | If present         |
+| 6 | Recent Turns      | in-memory ring buffer (user/assistant/tool)             | Yes (if any)       |
+| 7 | Current Input     | the incoming Envelope                                   | Yes                |
 
-The user-scoped sections derive their path from `scope.FromEnvelope(env)`
-(see [DECISIONS.md](DECISIONS.md) D-013). If the envelope has no user
-attached (scheduler tick), only the shared INDEX appears.
+**Memory is not pre-injected.** As of D-025, stored knowledge —
+`shared/INDEX.md`, the user's `INDEX.md`, `user.md`, `preferences.md`,
+and everything under them — is reached exclusively via the `memory.*`
+tools. Section 4 is a fixed reminder that names the paths and tools;
+the file bodies live in the sandbox, not in the system prompt. This
+keeps every LLM call's system prompt small and moves memory recall to
+an explicit, auditable tool call.
 
-The model accesses **everything else** — deeper memory, specific fact
-files, session archives — through tools. It searches with `memory.search`,
-reads with `memory.read`. This is the critical inversion vs. vector-search
-systems: we hand the model an index + a grep tool instead of pre-injecting
-similarity hits.
+The session summary (section 5) is still injected — it's the
+compressed record of the current conversation, distinct from stored
+memory. It's what "continues the chat" across turn boundaries alongside
+the ring buffer (section 6).
 
-Memory content is always framed inside `<memory path="...">...</memory>`
-fences with a system-level reminder that memory is data, not instructions.
-See [MEMORY.md](MEMORY.md) on safety.
+The user-scoped memory paths derive from `scope.FromEnvelope(env)`
+(see [DECISIONS.md](DECISIONS.md) D-013). When the envelope has no
+user attached (scheduler tick), the memory hint block calls that out
+and only `scope="shared"` is usable.
+
+This is the critical inversion vs. vector-search systems: we hand the
+model a small handbook of memory tools and let it decide what to
+fetch, instead of pre-injecting similarity hits or full index dumps.
+See [MEMORY.md](MEMORY.md) on safety around treating memory content
+as data rather than instructions.
 
 **Prefix-cache contract.** The section order above is deliberate. Stable
 content (persona, shared memory, user memory, summary) sits at the front

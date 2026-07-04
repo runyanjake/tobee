@@ -126,7 +126,6 @@ func main() {
 	// --- Context builder + reply table ------------------------------------
 	ctxb := &agent.ContextBuilder{
 		Persona:   persona,
-		Memory:    memFS,
 		Workspace: areas,
 		Sessions:  sessions,
 	}

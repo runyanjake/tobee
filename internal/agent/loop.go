@@ -87,21 +87,20 @@ func (a *Agent) Start(ctx context.Context) {
 
 // processTurn drives one envelope through:
 //
-//  1. Plan (Planner.Run): one LLM call commits a typed Plan via the
-//     plan.commit tool. If the model emits text instead, the planner
-//     wraps it as a single-step plan whose Result is the text — so
-//     the rest of the loop runs uniformly on trivial input.
+//  1. Plan (Planner.Run): commits a typed Plan via the plan.commit
+//     tool with tool_choice=required. Protocol violations are retried
+//     once, then abort the turn.
 //  2. Announce: the plan is rendered as a Discord message with per-step
 //     emoji statuses and sent. The returned message ID is stored on
 //     the Turn so subsequent step transitions edit this same message.
+//     Skipped when the plan has no tool-bearing steps.
 //  3. Execute: for each step in order, RunStep does the per-step ReAct
-//     sub-loop. Between steps, the plan-announcement message is edited
-//     to reflect the new step statuses. No-tools steps (planner wrap
-//     fallback) are no-ops.
-//  4. Synth: the synthesiser composes the user-facing reply from the
-//     plan + per-step results + the original user message. Crucially
-//     it does NOT see the act loop's assistant messages — that's the
-//     fix for the self-talk failure mode.
+//     sub-loop. The model must call a real tool or the virtual
+//     step.finish tool; free-form text is a protocol violation.
+//     No-tools steps (respond-only, e.g. greetings) are no-ops.
+//  4. Synth: composes the user-facing reply via the reply.commit tool.
+//     Its input is the structured plan + step results + original user
+//     message — not the act loop's assistant messages.
 //  5. Deliver: send the reply, mirror it into the session, run the
 //     (best-effort) summariser.
 func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
@@ -151,8 +150,8 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 
 	// --- Phase 2: announce --------------------------------------------
 	// Send the plan message and capture its ID for in-place edits.
-	// Only announce when there's real work to show: the trivial
-	// wrap-fallback (one no-tools step) gives the user nothing useful
+	// Only announce when there's real work to show: a plan of pure
+	// respond-only steps (e.g. greetings) gives the user nothing useful
 	// in an announcement, so we skip it.
 	if plan.HasTools() {
 		if msg := plan.RenderAnnouncement(); msg != "" {

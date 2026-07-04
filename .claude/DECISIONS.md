@@ -1149,6 +1149,237 @@ both depend on.
 
 ---
 
+## D-025 — Strict tool-call protocol at every phase; no free-form fallbacks
+
+**Status:** Accepted · **Date:** 2026-07-04 · Partially supersedes
+D-024's "single text-wrap fallback" clause; the rest of D-024
+(four-phase shape, synth's structured-input contract, plan-message
+editing) is unchanged.
+
+**Decision.** Every LLM-authored artifact in a turn is committed via
+a required virtual tool call. Free-form text is a protocol violation
+at all three phases:
+
+1. **Planner.** `plan.commit` remains the only legal output. The
+   text-wrap fallback in `Planner.Run` is removed. On a non-tool-call
+   response the planner logs `PROTOCOL VIOLATION` at ERROR, appends
+   a nudge to the transcript, and retries once. A second violation
+   returns an error; the turn aborts before announce (no reply, ❌
+   reaction, loud log).
+2. **Executor.** A virtual `step.finish({result})` tool is advertised
+   alongside the planner-granted tools on every executor iteration,
+   with `tool_choice=required`. `step.finish` is the only way a
+   tool-bearing step can terminate cleanly; `result` is the outcome
+   string the synthesiser consumes. Free-form text (previously
+   accepted as "terminal text ends the step") is a violation: log,
+   nudge, retry once, then fail the step. A step with an empty
+   `tools` list is still respond-only — no LLM call at all — but the
+   Result is now empty (rather than pre-populated by the planner
+   text-wrap path), and synth composes the reply from plan +
+   persona alone.
+3. **Synthesiser.** A virtual `reply.commit({spoken, artifacts})`
+   tool is the only advertised tool, with `tool_choice=required`.
+   The Discord message is composed in Go by `renderReply`: `spoken`
+   on top, each `artifact` rendered as a triple-fenced block with an
+   optional `lang` hint. The model no longer writes fences —
+   formatting rules are code, not prose. One retry on violation,
+   then the turn delivers an empty reply (❌ reaction).
+
+**Why.** D-024 kept one free-text seam per phase (planner wrap,
+executor terminal text, synth prose output) because it looked cheap
+and preserved trivial-input uniformity. In practice the seams gave
+the model latitude to choose the format — the planner sometimes
+skipped `plan.commit` on greetings, the executor sometimes narrated
+mid-step and short-circuited, the synth occasionally forgot the
+persona's fence-vs-speech distinction and dumped code without
+backticks. Every seam turned into a "the model decided" bug class.
+Closing all three moves format ownership from prose-guided model
+behaviour to code-enforced protocol, which is what the tool-calling
+API is for.
+
+**Trivial-input handling — restated.** Greetings still get a plan;
+the plan still has one step with an empty `tools` list; the executor
+still skips the LLM call for that step; synth still composes the
+reply. What's gone is the "wrap raw text as a fake plan" recovery
+path when the planner ignores `plan.commit`. Under D-025, that path
+is a bug we log and abort on rather than one we paper over.
+
+**What retry-once buys.** Local LLMs (LM Studio, small-to-medium
+models) occasionally miss the tool-call framing on the first try
+and get it right on the second when the transcript reminds them.
+One nudge-and-retry per phase catches that without materially
+expanding the budget: at worst a turn spends 6 LLM calls (3 phases
+× 2 attempts) instead of 3, and only when the model is misbehaving.
+Two retries would just cover for a broken model.
+
+**Loud logging.** Every violation logs at ERROR with the greppable
+prefix `PROTOCOL VIOLATION` and structured fields:
+`phase, attempt, expected_tool, finish, text_chars, text_preview,
+tool_calls_count, tool_calls`. Grep is the diagnostic.
+
+**Cost.**
+
+- Best case: unchanged — 2 LLM calls for a greeting (planner +
+  synth), 1 + N + 1 for a working turn. Same as D-024 on the happy
+  path.
+- Worst case: doubled per phase where a retry fires. Bounded by the
+  hard cap of one retry per phase.
+- No new runtime dependencies. Two new virtual tools
+  (`step.finish`, `reply.commit`) live only in the phase that
+  advertises them; neither is registered on `tools.Registry`.
+- Prompt surface changed: `prompts/planner.md`,
+  `prompts/synthesizer.md`, and `prompts/persona/02-behaviour.md`
+  now describe the strict contract. The user-facing rendering rules
+  in `prompts/persona/03-output.md` are no longer load-bearing at
+  synth time — `renderReply` enforces them — but stay as guidance
+  for other contexts.
+- Go-side surface changed: `renderReply` in
+  `internal/agent/synthesizer.go` owns the fence rendering;
+  `dispatchCalls` in `internal/agent/executor.go` owns the step
+  termination branch.
+
+**Invariants preserved.**
+
+- Native tool-use only (D-001), sandboxed FS (D-003), serial worker
+  (D-005), in-process janitor (D-010), idle rotation + persistence
+  (D-011 / D-016), per-user memory layout (D-013), reporter registry
+  (D-014), dynamic scheduled jobs (D-015), prefix-cache contract
+  (D-017), workspace areas (D-019), synth's structured-input
+  contract (D-024) — all unchanged.
+- Four-phase plan → announce → execute → synth shape (D-024) —
+  unchanged.
+
+**Explicitly not built.**
+
+- **N-way retries.** One retry per phase; no exponential backoff
+  or retry-until-success loops. A model that can't hit the protocol
+  after one nudge is broken and should be replaced.
+- **Multiple `reply.commit` calls.** The schema allows multiple
+  artifacts inside one call. A model that emits two `reply.commit`
+  tool_calls is a violation; only the first is honoured.
+- **Persona seeding at boot instead of per-call.** Considered:
+  bake `prompts/persona/*.md` into a persona blob once at startup
+  rather than re-compose per phase. Deferred — `ContextBuilder`
+  already reads a static field, so the caching is one line if the
+  hot path shows up in profiles.
+
+**Don't revert** without explaining what the replacement gives back
+that the strict protocol takes away. The whole point of D-025 is
+moving format decisions from prose in a system prompt to code in
+the loop; re-introducing a "wrap text as a plan" or "accept prose
+as the step result" or "trust the model to fence code" clause is
+re-introducing the failure mode.
+
+---
+
+## D-026 — System prompt carries persona, not memory; recall is a tool call
+
+**Status:** Accepted · **Date:** 2026-07-04 · Companion to D-025.
+
+**Decision.** The system prompt every LLM call receives is a fixed,
+turn-local package:
+
+1. Persona (`prompts/persona/*.md` concatenated) — identity, tone,
+   behaviour, output rules, safety.
+2. Workspace areas (if configured) — boot-time host-file config.
+3. Turn context — integration/channel/thread/user tags.
+4. `<memory>` hint block — a fixed reminder that names the memory
+   paths and the `memory.read` / `memory.search` / `memory.list`
+   tools. **The block does not carry any memory content.**
+5. Session summary — the compressed record of the current
+   conversation, still pre-injected.
+
+Removed from the system prompt: pre-injection of `shared/INDEX.md`,
+the user's `INDEX.md`, `user.md`, and `preferences.md`. Under D-024
+these were auto-dumped into every LLM call's system prompt. Under
+D-026 the model tool-calls to fetch them when needed.
+
+**Why.** The pre-injection served two purposes: give the planner
+enough index visibility to plan sensible lookup steps, and give the
+executor an ambient reminder of what's stored. In practice it did
+neither cleanly. The system prompt grew unboundedly with each new
+INDEX entry, prefix-cache benefits shrank, and — worse — the model
+sometimes answered from the pre-injected snapshot without checking
+the actual file, which drifted stale. Making recall an explicit
+tool call makes the read auditable, keeps the prompt small, and
+forces the model to fetch fresh bytes every time.
+
+**How the model still knows what to look for.**
+
+- The persona (`prompts/persona/02-behaviour.md`) tells it: nothing
+  is in the prompt, look before denying, start at
+  `memory.read({path: "INDEX.md", scope: "user"})`.
+- The planner (`prompts/planner.md`) plans lookup steps — when the
+  request plausibly touches memory, step one is "read the user
+  index" with `tools: ["memory.read"]` or "search memory for X"
+  with `tools: ["memory.search", "memory.read"]`.
+- The `<memory>` hint block in every system prompt names the tools
+  and default scopes so the model doesn't need to guess argument
+  shapes.
+
+**What "continues the chat" across turns.** The session summary
+(compressed by the summariser after each turn, still injected) plus
+the in-memory + on-disk ring buffer of recent messages (D-016) are
+the conversational continuity. Persona defines the character;
+session state carries what's been said. Neither includes stored
+knowledge — that's fetched on demand.
+
+**Turn-count impact.** For turns that need memory recall, expect
+one or two extra tool calls (INDEX read + specific file read) inside
+the relevant step. Under D-024 those bytes were pre-injected for
+free; under D-026 they cost tool calls. Trade accepted because:
+prompt size stays bounded, cache prefixes stay stable, model
+behaviour is more auditable, and stale-snapshot bugs go away.
+
+**Trivial-input handling.** Greetings still get a one-step plan
+with empty tools; executor skips the LLM call; synth composes from
+persona alone. No change on the trivial path.
+
+**Cost.**
+
+- One field removed from `ContextBuilder` (`Memory *sandboxfs.FS`
+  is now unused there). `main.go` still passes the sandbox to the
+  `memory.*` tool pack — nothing else changes.
+- Prompt surface shrinks. Every LLM call's system prompt drops
+  the four auto-injected file bodies. Small memory footprint;
+  larger prefix-cache reuse across turns.
+- Extra tool calls per memory-touching turn. Bounded by the
+  executor's `PLAN_MAX_STEPS_PER_STEP` (default 4) and
+  `PLAN_MAX_STEPS_TOTAL` (default 12) budgets.
+
+**Invariants preserved.**
+
+- Native tool-use (D-001), sandboxed FS (D-003), serial worker
+  (D-005), idle rotation / persistence (D-011 / D-016), per-user
+  memory layout (D-013), prefix-cache contract (D-017), workspace
+  areas (D-019), strict tool-call output (D-025).
+- Section ordering (persona → workspace → context → memory hint →
+  summary → recent → new user) preserves prefix-cache reuse: the
+  system prompt no longer grows with memory content, so the KV
+  prefix is stable across turns until persona or workspace change.
+
+**Explicitly not built.**
+
+- **Persona seeded once at session start, then omitted.** LLMs are
+  stateless per call; every call needs the persona in the system
+  prompt. What the user gets that's "seeded at session start" is
+  the persona-defined character; how it's delivered on the wire is
+  every-call.
+- **Selective memory pre-injection via a size cap.** Considered:
+  auto-inject INDEX.md if it's under N bytes. Rejected — a size
+  cap re-introduces the "sometimes it's in context, sometimes not"
+  branch that made model behaviour hard to predict.
+- **Removing the session summary.** Kept. It's compressed
+  conversation state, not stored memory, and it's what makes turn-2
+  aware of turn-1 without replaying the whole ring buffer.
+
+**Don't revert** without explaining how the replacement (a) keeps
+the system prompt bounded across an unbounded-size memory tree,
+(b) makes memory reads auditable, and (c) avoids the stale-snapshot
+bug class.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

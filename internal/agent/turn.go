@@ -16,9 +16,9 @@ type Turn struct {
 	Session    *Session
 	Transcript []llm.Message
 
-	// Plan is set by the planner phase; non-nil for the rest of the
-	// turn (the planner's text-wrap fallback guarantees a plan even
-	// when the model bypasses the tool protocol).
+	// Plan is set by the planner phase. Non-nil once processTurn has
+	// entered the execute phase; a nil Plan means the planner errored
+	// out and the turn aborts before execution.
 	Plan *Plan
 
 	// PlanMessageID is the integration's message ID for the user-facing

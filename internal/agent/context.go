@@ -6,19 +6,19 @@ import (
 
 	"github.com/runyanjake/tobee/internal/integrations"
 	"github.com/runyanjake/tobee/internal/llm"
-	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scope"
 	"github.com/runyanjake/tobee/internal/workspace"
 )
 
 // ContextBuilder assembles the prompt fragments shared by every phase of
-// a turn. The agent loop calls ComposeSystem with a phase-specific persona
-// and (when running the executor or synthesizer) the current plan; the
-// data sections are identical across phases so memory, workspace, and
-// context stay consistent end-to-end.
+// a turn. The system prompt carries the persona (identity, tone, output
+// rules) and a small set of turn-local hints: workspace areas, the
+// integration/channel/user context, a memory-access reminder, and the
+// rolling session summary. Stored knowledge is NOT pre-injected — the
+// model fetches memory files on demand via memory.* tools. The session
+// ring buffer is what "continues the chat" across turns.
 type ContextBuilder struct {
-	Persona   string           // executor persona; default when no override given
-	Memory    *sandboxfs.FS    // typed filesystem for always-injected files
+	Persona   string           // persona blob (identity + behaviour + output + safety)
 	Workspace *workspace.Areas // configured host-file areas (nil = none)
 	Sessions  *SessionStore
 }
@@ -36,8 +36,7 @@ func (b *ContextBuilder) ComposeTranscript(env integrations.Envelope) []llm.Mess
 }
 
 // ComposeSystem renders the system message for one phase of a turn.
-// persona is the phase's persona text (act-loop persona or synthesizer
-// persona). The section order is the prefix-cache contract (D-017).
+// The section order is the prefix-cache contract (D-017).
 func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string) string {
 	var sb strings.Builder
 
@@ -46,9 +45,6 @@ func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string
 		sb.WriteString("\n\n")
 	}
 
-	// Workspace-areas list sits right after persona: it's the most stable
-	// section of the prompt across turns (config-time only) and so belongs
-	// at the front per D-017's prefix-cache contract.
 	if b.Workspace != nil && b.Workspace.Len() > 0 {
 		sb.WriteString("<workspace_areas>\n")
 		for _, ar := range b.Workspace.List() {
@@ -77,15 +73,8 @@ func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string
 	}
 	sb.WriteString("</context>\n\n")
 
-	if b.Memory != nil {
-		userDir := scope.FromEnvelope(env).Dir()
-		b.writeMem(&sb, "shared/INDEX.md")
-		if userDir != "" {
-			b.writeMem(&sb, userDir+"/INDEX.md")
-			b.writeMem(&sb, userDir+"/user.md")
-			b.writeMem(&sb, userDir+"/preferences.md")
-		}
-	}
+	sb.WriteString(memoryHint(scope.FromEnvelope(env).HasUser()))
+	sb.WriteString("\n\n")
 
 	if summary := b.Sessions.ReadSummary(env.Key()); summary != "" {
 		fmt.Fprintf(&sb, "<session-summary>\n%s\n</session-summary>\n\n", summary)
@@ -94,13 +83,20 @@ func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, persona string
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func (b *ContextBuilder) writeMem(sb *strings.Builder, path string) {
-	if !b.Memory.Exists(path) {
-		return
+// memoryHint is the small block that replaces the pre-injected memory
+// files. It tells the model where its stored knowledge lives and which
+// tools reach it — the content itself is fetched on demand.
+func memoryHint(hasUser bool) string {
+	var sb strings.Builder
+	sb.WriteString("<memory>\n")
+	sb.WriteString("Your stored knowledge is not in this prompt. Fetch what you need with tool calls:\n")
+	sb.WriteString("- `memory.read({path, scope})` — read a specific file. scope=\"user\" for the current user, \"shared\" for cross-user.\n")
+	sb.WriteString("- `memory.search({query, scope})` — case-insensitive substring hits across a scope (default \"both\").\n")
+	sb.WriteString("- `memory.list({dir, scope})` — enumerate files under a scope.\n")
+	sb.WriteString("Start with `memory.read({path: \"INDEX.md\", scope: \"user\"})` for the user's table of contents, or scope \"shared\" for cross-user knowledge.\n")
+	if !hasUser {
+		sb.WriteString("No user is attached to this turn; only scope=\"shared\" is available.\n")
 	}
-	body, err := b.Memory.Read(path)
-	if err != nil || body == "" {
-		return
-	}
-	fmt.Fprintf(sb, "<memory path=%q>\n%s\n</memory>\n\n", path, body)
+	sb.WriteString("</memory>")
+	return sb.String()
 }

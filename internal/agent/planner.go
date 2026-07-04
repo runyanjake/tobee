@@ -46,17 +46,22 @@ var planCommitSchema = json.RawMessage(`{
   }
 }`)
 
-// Planner commits a structured plan via plan.commit on a single LLM
-// call with tool_choice=required. If the model emits text instead
-// (model non-compliance with the tool protocol), the text is wrapped
-// as a one-step Plan whose Result is pre-populated, letting the rest
-// of the loop proceed uniformly — see Planner.Run.
+// Planner commits a structured plan via plan.commit on an LLM call with
+// tool_choice=required. Free-form text is a protocol violation: the
+// planner retries once with a stricter nudge and then fails the turn.
+// There is no text-wrap fallback — the format is enforced.
 type Planner struct {
 	client        *llm.Client
 	ctxb          *ContextBuilder
 	prompt        string // contents of prompts/planner.md
 	toolCatalogue string // <tools>…</tools> block; same render as Executor sees
 }
+
+// plannerNudge is the transcript-appended reminder used after a
+// protocol violation. Kept short — the model already saw the full
+// planner prompt; this is just the "you broke the contract, do it
+// right" note.
+const plannerNudge = "PROTOCOL VIOLATION: your previous response was not a plan.commit tool call. You must call plan.commit exactly once. Free-form text is not accepted. Retry."
 
 func NewPlanner(client *llm.Client, ctxb *ContextBuilder, reg *tools.Registry, prompt string) *Planner {
 	return &Planner{
@@ -67,9 +72,9 @@ func NewPlanner(client *llm.Client, ctxb *ContextBuilder, reg *tools.Registry, p
 	}
 }
 
-// Run executes the planning LLM call and returns a Plan. Plan is
-// always non-nil on a nil error — the text-wrap fallback ensures
-// trivial-input non-compliance still produces a usable plan.
+// Run executes the planning LLM call and returns a committed Plan. On
+// protocol violation (no plan.commit tool call) it retries once with a
+// nudge in the transcript, then fails the turn.
 func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript []llm.Message) (*Plan, error) {
 	if p == nil || p.client == nil {
 		return nil, fmt.Errorf("planner: not configured")
@@ -79,59 +84,61 @@ func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript
 	if p.toolCatalogue != "" {
 		sys += "\n\n" + p.toolCatalogue
 	}
-	msgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, transcript...)
-
-	logPrompt("agent: planner: prompt", msgs)
-	resp, err := p.client.Call(ctx, msgs, []llm.ToolSpec{{
+	toolSpec := []llm.ToolSpec{{
 		Name:        planCommitTool,
 		Description: "Commit an ordered plan for handling the current message. Use exactly once. Each step's intent is the outcome it must produce, not a tool name. Empty tools list = no work, respond-only step.",
 		InputSchema: planCommitSchema,
-	}}, llm.ToolChoiceRequired)
-	if err != nil {
-		return nil, fmt.Errorf("planner: llm: %w", err)
-	}
-	slog.Debug("agent: planner: llm response",
-		"finish", resp.Finish,
-		"text_chars", len(resp.Text),
-		"text", resp.Text,
-		"tool_calls_count", len(resp.ToolCalls),
-		"tool_calls", renderToolCalls(resp.ToolCalls))
+	}}
 
-	// Happy path: the model called plan.commit.
-	for _, tc := range resp.ToolCalls {
-		if tc.Function.Name != planCommitTool {
-			continue
+	msgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, transcript...)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		logPrompt("agent: planner: prompt", msgs)
+		resp, err := p.client.Call(ctx, msgs, toolSpec, llm.ToolChoiceRequired)
+		if err != nil {
+			return nil, fmt.Errorf("planner: llm: %w", err)
 		}
-		var args commitArgs
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			return nil, fmt.Errorf("planner: decode %s args: %w", planCommitTool, err)
+		slog.Debug("agent: planner: llm response",
+			"attempt", attempt,
+			"finish", resp.Finish,
+			"text_chars", len(resp.Text),
+			"text", resp.Text,
+			"tool_calls_count", len(resp.ToolCalls),
+			"tool_calls", renderToolCalls(resp.ToolCalls))
+
+		for _, tc := range resp.ToolCalls {
+			if tc.Function.Name != planCommitTool {
+				continue
+			}
+			var args commitArgs
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				return nil, fmt.Errorf("planner: decode %s args: %w", planCommitTool, err)
+			}
+			plan, perr := planFromCommitArgs(args)
+			if perr != nil {
+				return nil, fmt.Errorf("planner: %w", perr)
+			}
+			return plan, nil
 		}
-		plan, perr := planFromCommitArgs(args)
-		if perr != nil {
-			return nil, fmt.Errorf("planner: %w", perr)
+
+		slog.Error("agent: planner: PROTOCOL VIOLATION",
+			"attempt", attempt,
+			"expected_tool", planCommitTool,
+			"finish", resp.Finish,
+			"text_chars", len(resp.Text),
+			"text_preview", oneLine(resp.Text),
+			"tool_calls_count", len(resp.ToolCalls),
+			"tool_calls", renderToolCalls(resp.ToolCalls))
+
+		if attempt == 0 {
+			msgs = append(msgs,
+				llm.Message{Role: llm.RoleAssistant, Content: strings.TrimSpace(resp.Text)},
+				llm.Message{Role: llm.RoleUser, Content: plannerNudge},
+			)
 		}
-		return plan, nil
 	}
 
-	// Fallback: the model emitted text instead of the tool call. Wrap
-	// it as a single-step plan whose Result is the text so the rest of
-	// the loop runs uniformly. The synthesizer turns this into the
-	// final user-facing reply on the trivial path.
-	text := strings.TrimSpace(resp.Text)
-	if text == "" {
-		return nil, fmt.Errorf("planner: produced neither plan nor text")
-	}
-	slog.Warn("agent: planner: model emitted text instead of plan.commit; wrapping",
-		"text_chars", len(text))
-	return &Plan{
-		Goal: "respond to the user",
-		Steps: []Step{{
-			ID:     "s1",
-			Intent: "respond to the user",
-			Status: StepDone,
-			Result: text,
-		}},
-	}, nil
+	return nil, fmt.Errorf("planner: protocol violation: model did not call %s after 2 attempts", planCommitTool)
 }
 
 // commitArgs is the JSON shape plan.commit emits.

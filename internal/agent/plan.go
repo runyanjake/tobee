@@ -18,11 +18,11 @@ const (
 
 // Step is one unit of work the planner committed to. Intent is the
 // outcome the executor must produce. Tools is the strictly-enforced
-// set of tool names available on this step (planner-chosen). MemoryPaths
-// is an informational hint at specific files the planner believes are
-// relevant. Empty Tools is the wrap-fallback case — the executor
-// recognises a no-tools step as already-done (Result is the planner's
-// raw text from the fallback path).
+// set of tool names available on this step (planner-chosen).
+// MemoryPaths is an informational hint at specific files the planner
+// believes are relevant. Empty Tools is the respond-only case (e.g.
+// greeting): the executor skips the LLM call and lets the synthesizer
+// compose the reply from the plan alone.
 type Step struct {
 	ID          string     `json:"id"`
 	Intent      string     `json:"intent"`
@@ -34,9 +34,8 @@ type Step struct {
 	Attempts    int        `json:"attempts,omitempty"`
 }
 
-// Plan is the turn-scoped artifact the planner produces. Always
-// non-nil after the planner phase (text-wrap fallback ensures this).
-// Used both for execution control and for the user-facing announcement.
+// Plan is the turn-scoped artifact the planner produces. Used both
+// for execution control and for the user-facing announcement.
 type Plan struct {
 	Goal     string `json:"goal"`
 	Steps    []Step `json:"steps"`
@@ -72,8 +71,9 @@ func (p *Plan) Complete() bool {
 }
 
 // HasTools reports whether any step in the plan has a non-empty Tools
-// list. The wrap-fallback case (planner emitted text instead of a
-// plan.commit) produces a single no-tools step that needs no execution.
+// list. A plan with no tool-bearing steps is the respond-only case
+// (e.g. greeting): the loop skips announce + execute and goes straight
+// to synth.
 func (p *Plan) HasTools() bool {
 	if p == nil {
 		return false
