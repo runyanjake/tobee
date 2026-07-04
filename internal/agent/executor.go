@@ -129,7 +129,6 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 			ToolCalls: resp.ToolCalls,
 		}
 		t.Transcript = append(t.Transcript, asst)
-		t.Session.Append(asst)
 
 		if len(resp.ToolCalls) == 0 {
 			slog.Error("agent: executor: PROTOCOL VIOLATION",
@@ -146,7 +145,6 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 			violations++
 			nudge := llm.Message{Role: llm.RoleUser, Content: executorNudge}
 			t.Transcript = append(t.Transcript, nudge)
-			t.Session.Append(nudge)
 			continue
 		}
 
@@ -186,7 +184,6 @@ func (e *Executor) dispatchCalls(t *Turn, step *Step, calls []llm.ToolCall) (fin
 				Content:    "ok",
 			}
 			t.Transcript = append(t.Transcript, tmsg)
-			t.Session.Append(tmsg)
 			step.Result = strings.TrimSpace(args.Result)
 			step.Status = StepDone
 			return true, true
@@ -207,7 +204,6 @@ func (e *Executor) dispatchCalls(t *Turn, step *Step, calls []llm.ToolCall) (fin
 			Content:    content,
 		}
 		t.Transcript = append(t.Transcript, tmsg)
-		t.Session.Append(tmsg)
 	}
 	return false, false
 }
@@ -252,11 +248,13 @@ func (e *Executor) toolsForStep(step *Step) ([]llm.ToolSpec, error) {
 	return out, nil
 }
 
-// composeStepSystem renders the executor system message: persona +
-// data sections + plan + a <current_step> reminder scoped to the
-// running step.
+// composeStepSystem renders the executor system message: identity
+// persona + data sections + plan + a <current_step> reminder scoped
+// to the running step. The executor's role instructions live inside
+// prompts/persona/02-behaviour.md (part of the identity persona), so
+// no phase-specific instructions block is needed here.
 func (e *Executor) composeStepSystem(t *Turn, step *Step) string {
-	sys := e.ctxb.ComposeSystem(t.Env, e.ctxb.Persona)
+	sys := e.ctxb.ComposeSystem(t.Env, "")
 	if r := t.Plan.Render(); r != "" {
 		sys += "\n\n" + r
 	}

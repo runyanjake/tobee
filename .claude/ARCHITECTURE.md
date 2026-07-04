@@ -63,22 +63,22 @@ tobee/
 │  └─ tobee/
 │     └─ main.go                        # wiring only
 ├─ prompts/
-│  ├─ persona/                          # system prompt fragments, concatenated in order
+│  ├─ persona/                          # identity persona fragments, concatenated in order
 │  │  ├─ 00-identity.md
 │  │  ├─ 01-tone.md
 │  │  ├─ 02-behaviour.md
 │  │  ├─ 03-output.md
 │  │  └─ 04-safety.md
-│  └─ summarizer.md                     # prompt for the rolling summarizer
+│  ├─ planner.md                        # planner phase role prompt
+│  └─ synthesizer.md                    # synth phase role prompt
 ├─ internal/
 │  ├─ abilities/
 │  │  └─ reporter.go                    # Reporter contract + Registry (cross-subsystem introspection)
 │  ├─ agent/
 │  │  ├─ loop.go                        # serial worker; drives a turn, attaches scope to ctx
-│  │  ├─ context.go                     # ContextBuilder (shared + per-user memory)
-│  │  ├─ session.go                     # short-term history ring buffer + SummaryStore
-│  │  ├─ summarizer.go                  # post-turn rolling summary job
-│  │  └─ reply.go                       # integration-name → ReplySender table
+│  │  ├─ context.go                     # ContextBuilder (identity persona + memory hint + turn context)
+│  │  ├─ planner.go, executor.go, synthesizer.go  # phases (D-024, D-025)
+│  │  └─ reply.go                       # integration-name → ReplySender / MessageEditor / Reactor table
 │  ├─ scope/
 │  │  └─ scope.go                       # UserScope, ctx With/From, sanitized Key/Dir
 │  ├─ llm/
@@ -103,19 +103,13 @@ tobee/
 │     ├─ jobs.go                        # dynamic, model-authored jobs (cron + one-shot)
 │     ├─ jobstore.go                    # one JSON file per job under data/scheduler/jobs/
 │     ├─ jobs_reporter.go               # schedules Reporter
-│     ├─ janitor.go                     # in-process session cleanup
-│     ├─ reporter.go                    # scheduler Reporter (static ticks)
-│     └─ janitor_reporter.go            # janitor Reporter
+│     └─ reporter.go                    # scheduler Reporter (static ticks)
 ├─ data/                                # gitignored; runtime state
 │  ├─ memory/
 │  │  ├─ shared/                        # cross-user knowledge
 │  │  └─ users/<integration>/<userId>/  # per-user trees
-│  ├─ scheduler/
-│  │  └─ jobs/<id>.json                 # one persisted job per file
-│  └─ sessions/<integration>/<channel>/ # per-channel short-term state
-│     ├─ current.md                     # rolling lossy summary
-│     ├─ recent.json                    # exact ring buffer (survives restart)
-│     └─ archive/<timestamp>.md         # rotated summaries (TTL'd)
+│  └─ scheduler/
+│     └─ jobs/<id>.json                 # one persisted job per file
 └─ CLAUDE.md, .claude/                  # this documentation
 ```
 
@@ -130,12 +124,13 @@ What's built (in order it was added):
 2. LLM client speaking native OpenAI-compatible tool-use.
 3. Tool registry with JSON-Schema, timeouts, panic recovery.
 4. Memory FS (sandboxed) + `memory.*` tool pack.
-5. ContextBuilder, SessionStore, agent loop (serial worker).
-6. Post-turn rolling summarizer.
-7. Discord integration (gateway + message split + reply sender).
-8. Scheduler skeleton (no static ticks registered).
-9. Dynamic scheduled jobs: `schedule.*` tools + persistent JobManager.
-10. `workspace.*` tool pack over configured host-file areas (D-019).
+5. ContextBuilder + agent loop (serial worker) — plan → announce → execute → synth → deliver.
+6. Discord integration (gateway + message split + reply sender + reactor + message editor).
+7. Scheduler skeleton (no static ticks registered).
+8. Dynamic scheduled jobs: `schedule.*` tools + persistent JobManager.
+9. `workspace.*` tool pack over configured host-file areas (D-019).
+10. Strict tool-call protocol at every phase (D-025): plan.commit / step.finish / reply.commit.
+11. Per-message turns — sessions and summariser retired (D-027).
 
 What's not built, and why — see [DECISIONS.md](DECISIONS.md):
 

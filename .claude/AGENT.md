@@ -10,23 +10,26 @@ Every LLM-authored artifact — the plan, each step's outcome, the final
 reply — is committed via a required virtual tool call; free-form text
 is a protocol violation that fails the turn (or step). Stored memory
 is never pre-injected into the system prompt — the model fetches it
-via `memory.*` tools. See [DECISIONS.md](DECISIONS.md) D-001, D-024,
-D-025, and D-026.
+via `memory.*` tools. **Each envelope is a standalone turn: no session
+ring buffer, no rolling summary, no cross-turn history** — anything
+that must survive is written to and read from `memory.*` files. See
+[DECISIONS.md](DECISIONS.md) D-001, D-024, D-025, D-026, and D-027.
 
 ## Per-turn state: `Turn`
 
 `Turn` ([internal/agent/turn.go](../internal/agent/turn.go)) is the
-single value threaded through every phase:
+single value threaded through every phase. It carries only what one
+turn needs — no reference to persistent session state.
 
 | Field          | Set by                                       |
 |----------------|----------------------------------------------|
 | Ctx            | processTurn (with turn timeout + scope)      |
 | Env            | processTurn (from the envelope)              |
-| Session        | processTurn (loaded from SessionStore)       |
-| Transcript     | ContextBuilder; grown by Executor per step   |
+| Transcript     | ContextBuilder (just the current user msg); grown by Executor per step |
 | Plan           | Planner.Run (nil if planner protocol fails)  |
 | PlanMessageID  | processTurn (after announce, for edits)      |
 | Reply          | Synthesizer.Finalize (via reply.commit)      |
+| Reactions      | react (added on progress markers, cleared on success) |
 
 ## The phases
 
@@ -72,8 +75,10 @@ single value threaded through every phase:
    retry on protocol violation, then the turn delivers an empty reply
    (❌ reaction). See D-025.
 
-5. **Deliver.** Send the reply via `Replies.Send`, mirror into session,
-   run the (best-effort) summariser.
+5. **Deliver.** Send the reply via `Replies.Send`. Terminal reaction
+   applied here and nowhere else — success clears the progress trail,
+   failure adds ❌. No session persistence, no summariser, no
+   post-turn work.
 
 ## Plan-message editing
 
@@ -122,36 +127,43 @@ If the editor is missing or fails, status updates degrade silently
 - **Interruptible.** The turn takes a context derived from the service
   context; cancellation during shutdown stops the turn mid-phase.
 
-- **Summarizer is best-effort.** Its failure must never block a
-  reply.
+- **No sessions, no summariser.** Every envelope is a standalone turn.
+  Cross-turn state lives in memory files, not in a ring buffer or a
+  rolling summary. See D-027.
 
 ## Context building
 
 [internal/agent/context.go](../internal/agent/context.go) composes the
-initial message list for a turn. Sections, in fixed order:
+system message and the sole outgoing user message per turn. Because
+there is no cross-turn history, the shape is small and stable.
 
-| # | Section           | Source                                                  | Always shown?      |
-|---|-------------------|---------------------------------------------------------|--------------------|
-| 1 | Persona           | `prompts/persona/*.md` (concatenated)                   | Yes                |
-| 2 | Workspace areas   | boot-time `workspace.Areas` config                      | If configured      |
-| 3 | Current Context   | integration / channel / thread / user tags              | Yes                |
-| 4 | Memory hint       | fixed `<memory>` block naming paths + `memory.*` tools  | Yes                |
-| 5 | Session Summary   | `data/sessions/.../current.md`                          | If present         |
-| 6 | Recent Turns      | in-memory ring buffer (user/assistant/tool)             | Yes (if any)       |
-| 7 | Current Input     | the incoming Envelope                                   | Yes                |
+**System message** (sections, in fixed order):
+
+| # | Section              | Source                                                  | Always shown?      |
+|---|----------------------|---------------------------------------------------------|--------------------|
+| 1 | Identity persona     | `prompts/persona/*.md` (concatenated)                   | Yes                |
+| 2 | Phase instructions   | `planner.md` / `synthesizer.md` / "" for the executor   | Per phase          |
+| 3 | Workspace areas      | boot-time `workspace.Areas` config                      | If configured      |
+| 4 | Current context      | integration / channel / thread / user tags              | Yes                |
+| 5 | Memory hint          | fixed `<memory>` block naming paths + `memory.*` tools  | Yes                |
+
+**Transcript** (`ComposeTranscript`): a single `user`-role message
+carrying `env.Content`. That's the entire outgoing conversation
+alongside the system message — no ring buffer, no prior turns.
+
+**Identity persona in every phase.** Previous versions passed the
+phase prompt as if it were the persona, so the planner and synth
+phases saw no `prompts/persona/*.md` content at all. `ComposeSystem`
+now always emits `b.Persona` first, then the phase-specific block.
 
 **Memory is not pre-injected.** As of D-025, stored knowledge —
 `shared/INDEX.md`, the user's `INDEX.md`, `user.md`, `preferences.md`,
 and everything under them — is reached exclusively via the `memory.*`
-tools. Section 4 is a fixed reminder that names the paths and tools;
-the file bodies live in the sandbox, not in the system prompt. This
-keeps every LLM call's system prompt small and moves memory recall to
-an explicit, auditable tool call.
-
-The session summary (section 5) is still injected — it's the
-compressed record of the current conversation, distinct from stored
-memory. It's what "continues the chat" across turn boundaries alongside
-the ring buffer (section 6).
+tools. Section 5 is a fixed reminder that names the paths and tools;
+the file bodies live in the sandbox, not in the system prompt. Under
+D-027 this doubles as the *only* mechanism for carrying anything
+between turns: if the model wants a preference or fact to survive to
+the next message, it must call `memory.write` / `memory.append`.
 
 The user-scoped memory paths derive from `scope.FromEnvelope(env)`
 (see [DECISIONS.md](DECISIONS.md) D-013). When the envelope has no
@@ -164,64 +176,21 @@ fetch, instead of pre-injecting similarity hits or full index dumps.
 See [MEMORY.md](MEMORY.md) on safety around treating memory content
 as data rather than instructions.
 
-**Prefix-cache contract.** The section order above is deliberate. Stable
-content (persona, shared memory, user memory, summary) sits at the front
-of the system message; the recent-ring messages follow it; the new user
-content is appended last. LM Studio and most OpenAI-compatible servers
-reuse the KV prefix when the token sequence matches a prior call, so a
-busy session pays prefill cost only on the new tail. Don't reorder these
-sections without re-reading [DECISIONS.md](DECISIONS.md) D-017.
+**Prefix-cache contract.** The system-message content is now byte-stable
+across turns for a given `(integration, user)` pair — no per-turn
+summary, no growing ring buffer, only fixed instructions plus a small
+`<context>` tag. LM Studio's KV cache reuses the whole prefix; every
+turn pays prefill cost only for the new user message. Don't reorder
+these sections without re-reading D-017.
 
-## Sessions
+## Startup prompt loading
 
-A session is scoped by `(integration, channel, thread)` — see
-`Envelope.Key()` in [internal/integrations/integration.go](../internal/integrations/integration.go).
-
-Three on-disk / in-memory tiers:
-
-- **Short-term (in-memory)**: a ring buffer of the last N messages
-  (`Session.recent`, cap = `maxTurns * 2`). Includes user, assistant, and
-  tool messages — everything the model saw during that turn.
-
-- **Short-term (mirrored to disk)**: `recent.json` next to the summary,
-  rewritten atomically on every `Session.Append`. Carries the exact
-  `[]llm.Message` plus a `kind` hint (`channel` / `dm`). On
-  `SessionStore.Get`, a missing in-memory entry loads `recent.json` first
-  so a restart resumes the conversation with the same tool calls / tool
-  results / user turns the model already saw. See
-  [DECISIONS.md](DECISIONS.md) D-016.
-
-- **Long-term (file)**: a rolling compressed summary in
-  `data/sessions/<integration>/<channel>/current.md`. Rewritten after each
-  turn by the summarizer (see below).
-
-The mapping from session key to filesystem path lives in
-`SessionStore.SummaryPath` / `recentPath` — both just replace `:` with `/`.
-
-**Idle rotation.** Idleness is kind-aware: `SESSION_IDLE_TIMEOUT`
-(default 4h) governs channels, `SESSION_IDLE_TIMEOUT_DM` (default 168h)
-governs one-on-one sessions. The active timeout comes from
-`Envelope.IsDirect` (Discord sets it from `m.GuildID == ""`); the kind is
-persisted in `recent.json` so a post-restart sweep applies the right
-timeout to disk-discovered state. When a session is idle past its
-threshold, `SessionStore.Get` (lazy) and the janitor's periodic sweep
-both rotate it: `current.md` moves to `archive/<UTC-timestamp>.md`,
-`recent.json` is removed, and the in-memory entry is dropped. Archive
-files live until the janitor prunes them at `SESSION_TTL`. See
-[DECISIONS.md](DECISIONS.md) D-011 and D-016.
-
-## Summarizer
-
-[internal/agent/summarizer.go](../internal/agent/summarizer.go) runs a
-separate LLM call after each turn:
-
-- Uses [prompts/summarizer.md](../prompts/summarizer.md) as its system prompt.
-- Sent the previous summary + a flattened transcript of the ring buffer.
-- Expected to return only the updated summary text.
-- Written back to `current.md`.
-
-The summarizer extracts *facts, decisions, unresolved threads* — not prose
-recap. If it fails, the reply has already been delivered; we log and move on.
+`cmd/tobee/main.go` reads `PROMPTS_DIR/persona/*.md`, `planner.md`, and
+`synthesizer.md` at boot. `logPromptsLoaded` emits an INFO line with
+the byte counts and an ERROR (`prompts: MISSING`) when any of them
+comes back empty — a container that ships without its prompt mount is
+the running binary's most likely first-day failure mode, and the loud
+log is what makes it obvious.
 
 ## Scheduler
 

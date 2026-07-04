@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/runyanjake/tobee/internal/integrations"
-	"github.com/runyanjake/tobee/internal/llm"
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
@@ -29,13 +28,12 @@ type Config struct {
 
 // Agent is the serial worker that consumes envelopes from the bus and
 // drives each through plan → announce → execute → synth → deliver.
-// One goroutine processes envelopes sequentially.
+// One goroutine processes envelopes sequentially. Each envelope is a
+// standalone turn — no session state carries between turns.
 type Agent struct {
-	bus      *integrations.Bus
-	sessions *SessionStore
-	ctxb     *ContextBuilder
-	replies  *Replies
-	summ     *Summarizer
+	bus     *integrations.Bus
+	ctxb    *ContextBuilder
+	replies *Replies
 
 	planner *Planner
 	exec    *Executor
@@ -46,10 +44,8 @@ type Agent struct {
 
 func New(
 	bus *integrations.Bus,
-	sessions *SessionStore,
 	ctxb *ContextBuilder,
 	replies *Replies,
-	summ *Summarizer,
 	planner *Planner,
 	exec *Executor,
 	synth *Synthesizer,
@@ -59,8 +55,8 @@ func New(
 		cfg.TurnBudget = 2 * time.Minute
 	}
 	return &Agent{
-		bus: bus, sessions: sessions, ctxb: ctxb,
-		replies: replies, summ: summ,
+		bus: bus, ctxb: ctxb,
+		replies: replies,
 		planner: planner, exec: exec, synth: synth,
 		cfg: cfg,
 	}
@@ -101,8 +97,7 @@ func (a *Agent) Start(ctx context.Context) {
 //  4. Synth: composes the user-facing reply via the reply.commit tool.
 //     Its input is the structured plan + step results + original user
 //     message — not the act loop's assistant messages.
-//  5. Deliver: send the reply, mirror it into the session, run the
-//     (best-effort) summariser.
+//  5. Deliver: send the reply to the integration.
 func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	ctx, cancel := context.WithTimeout(parent, a.cfg.TurnBudget)
 	defer cancel()
@@ -115,20 +110,11 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 		"integration", env.Integration, "channel", env.Channel,
 		"user", env.User, "user_name", env.UserName, "content", env.Content)
 
-	session := a.sessions.Get(env.Key(), env.IsDirect)
 	transcript := a.ctxb.ComposeTranscript(env)
-	slog.Debug("agent: session loaded",
-		"key", session.Key, "recent_msgs", len(session.Recent()),
-		"transcript_msgs", len(transcript))
-
-	// Commit the user message before the first LLM call so a mid-turn
-	// crash leaves a recoverable record.
-	session.Append(llm.Message{Role: llm.RoleUser, Content: env.Content})
 
 	turn := &Turn{
 		Ctx:        ctx,
 		Env:        env,
-		Session:    session,
 		Transcript: transcript,
 	}
 	a.react(turn, reactReceived)
@@ -161,7 +147,6 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 					"err", sendErr, "integration", env.Integration)
 			} else {
 				turn.PlanMessageID = id
-				session.Append(llm.Message{Role: llm.RoleAssistant, Content: msg})
 			}
 		}
 	}
@@ -258,8 +243,8 @@ func (a *Agent) clearReactions(t *Turn) {
 	t.Reactions = nil
 }
 
-// deliver sends the reply (if any) and runs the post-turn summarizer.
-// Both are best-effort: a failure here must not block future turns.
+// deliver sends the reply (if any). A best-effort operation — a
+// failure here must not block future turns.
 func (a *Agent) deliver(t *Turn) {
 	if t.Reply == "" {
 		slog.Warn("agent: turn produced no reply text",
@@ -270,7 +255,6 @@ func (a *Agent) deliver(t *Turn) {
 			"integration", t.Env.Integration, "channel", t.Env.Channel,
 			"thread", t.Env.Thread, "user", t.Env.User,
 			"chars", len(t.Reply), "content", t.Reply)
-		t.Session.Append(llm.Message{Role: llm.RoleAssistant, Content: t.Reply})
 		if _, err := a.replies.Send(t.Ctx, t.Env.Integration, t.Env.Channel, t.Env.Thread, t.Reply); err != nil {
 			slog.Error("agent: deliver failed", "err", err)
 		}
@@ -287,14 +271,6 @@ func (a *Agent) deliver(t *Turn) {
 		a.react(t, reactFailed)
 	} else {
 		a.clearReactions(t)
-	}
-
-	if a.summ != nil {
-		slog.Debug("agent: phase=summarize", "key", t.Env.Key())
-		if err := a.summ.Update(t.Ctx, t.Env.Key(), t.Session.Recent()); err != nil {
-			slog.Warn("agent: summarizer failed",
-				"err", err, "key", t.Env.Key())
-		}
 	}
 
 	slog.Info("agent: turn end",

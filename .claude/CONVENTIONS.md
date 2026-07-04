@@ -46,8 +46,10 @@ Rules for working in this repo. Read before writing code.
 - **Serial worker is load-bearing.** Don't parallelise envelope
   consumption without thinking hard about memory-write races and out-of-
   order replies. See [DECISIONS.md](DECISIONS.md) D-005.
-- **The summarizer is best-effort.** Never let its failure prevent a
-  reply. Log and move on.
+- **No cross-turn state.** Each envelope is a standalone turn. Don't
+  reintroduce a session ring buffer, a rolling summariser, or any
+  channel-scoped conversation state — persistence goes through
+  `memory.*` tools instead. See D-027.
 - **Step / turn budgets exist for a reason.** Don't remove them as part
   of "making this work for one more case."
 
@@ -59,7 +61,7 @@ Rules for working in this repo. Read before writing code.
 - **Namespace tools by subsystem.** `memory.*`, `web.*`, `calendar.*`.
   Not by integration (`discord.*`). The reply path is not a tool.
 - **Tools are for things the model chooses to do.** Implicit behaviours
-  (reply delivery, session persistence) are not tools.
+  (reply delivery, reaction updates) are not tools.
 
 ## Integrations
 

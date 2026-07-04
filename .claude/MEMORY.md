@@ -6,14 +6,19 @@ editable by hand. No DB, no vector store, no SQLite.
 
 ## Taxonomy
 
-Modelled loosely on CoALA (working / episodic / semantic / procedural):
+Under D-027 every envelope is a standalone turn, so working memory
+only spans one turn's tool calls and episodic memory as a distinct
+tier is gone. What remains, modelled loosely on CoALA:
 
-| Kind        | Lives at                                   | Written by                             |
-|-------------|--------------------------------------------|----------------------------------------|
-| Working     | not persisted                              | in-memory during a turn                |
-| Episodic    | `data/sessions/<int>/<chan>/current.md`    | the summarizer after each turn         |
-| Semantic    | `data/memory/user.md`, `data/memory/facts/*.md` | LLM tool calls (`memory.write/append`) |
-| Procedural  | `data/memory/preferences.md`, `data/memory/feedback/<date>-<slug>.md` | LLM tool calls + user corrections |
+| Kind        | Lives at                                                             | Written by                             |
+|-------------|----------------------------------------------------------------------|----------------------------------------|
+| Working     | not persisted (one-turn transcript)                                  | in-memory during a turn                |
+| Semantic    | `data/memory/**/user.md`, `data/memory/**/facts/*.md`                | LLM tool calls (`memory.write/append`) |
+| Procedural  | `data/memory/**/preferences.md`, `data/memory/**/feedback/<date>-<slug>.md` | LLM tool calls + user corrections |
+
+Anything the model needs to remember across turns must be written to
+memory during the current turn — there is no ring buffer, no rolling
+summary, and no channel-scoped state to fall back on.
 
 ## File layout
 
@@ -48,24 +53,18 @@ scope return a clear error.
 Fresh clones start empty; the code handles missing files gracefully (the
 context builder simply omits absent sections).
 
-Session summaries live in a parallel tree under `data/sessions/` — see
-[AGENT.md](AGENT.md#sessions). Sessions are scoped by channel, not user,
-because group channels mix users.
+There is no `data/sessions/` tree anymore. Under D-027 sessions,
+their rolling summaries, and the janitor that swept them are all
+retired. Anything the model wants to persist across turns lives in
+`data/memory/` written via the `memory.*` tools.
 
 ## Retention
 
-- `data/memory/` — **persists forever.** Long-term memory is never auto-deleted.
-- `data/sessions/` — managed by the in-process janitor
-  ([internal/scheduler/janitor.go](../internal/scheduler/janitor.go)). Per
-  channel: `current.md` is the rolling summary, `recent.json` is the exact
-  ring buffer mirrored on every turn so warm context survives restart.
-  When a session has been idle past its threshold —
-  `SESSION_IDLE_TIMEOUT` (default 4h) for channels,
-  `SESSION_IDLE_TIMEOUT_DM` (default 168h) for DMs — `current.md` is
-  rotated to `archive/<timestamp>.md`, `recent.json` is removed, and the
-  in-memory session is reset. Archive files are deleted once their mtime
-  exceeds `SESSION_TTL` (default 7 days); empty directories are removed
-  with them. See [DECISIONS.md](DECISIONS.md) D-010 / D-011 / D-016.
+`data/memory/` **persists forever.** Long-term memory is never
+auto-deleted; the model manages it via `memory.write` / `memory.append`
+and by curating each user's `INDEX.md`. There is no janitor and no
+TTL sweep — historical `data/sessions/`, `SESSION_TTL`,
+`SESSION_IDLE_TIMEOUT`, and `SESSION_IDLE_TIMEOUT_DM` are gone.
 
 ## Tools
 

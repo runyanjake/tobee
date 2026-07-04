@@ -44,22 +44,6 @@ func main() {
 	dataDir := envOr("DATA_DIR", "data")
 	promptsDir := envOr("PROMPTS_DIR", "prompts")
 
-	sessionTTL, err := time.ParseDuration(envOr("SESSION_TTL", "168h"))
-	if err != nil {
-		slog.Error("SESSION_TTL: invalid duration", "err", err)
-		os.Exit(1)
-	}
-	sessionIdleTimeout, err := time.ParseDuration(envOr("SESSION_IDLE_TIMEOUT", "4h"))
-	if err != nil {
-		slog.Error("SESSION_IDLE_TIMEOUT: invalid duration", "err", err)
-		os.Exit(1)
-	}
-	sessionIdleTimeoutDM, err := time.ParseDuration(envOr("SESSION_IDLE_TIMEOUT_DM", "168h"))
-	if err != nil {
-		slog.Error("SESSION_IDLE_TIMEOUT_DM: invalid duration", "err", err)
-		os.Exit(1)
-	}
-
 	planMaxStepsPerStep, err := strconv.Atoi(envOr("PLAN_MAX_STEPS_PER_STEP", "4"))
 	if err != nil {
 		slog.Error("PLAN_MAX_STEPS_PER_STEP: invalid integer", "err", err)
@@ -111,23 +95,16 @@ func main() {
 	}
 	// schedule.* tools are registered after the JobManager is built below.
 
-	// --- Sessions + summarizer -------------------------------------------
-	sessions, err := agent.NewSessionStore(dataDir+"/sessions", 10, sessionIdleTimeout, sessionIdleTimeoutDM)
-	if err != nil {
-		slog.Error("sessions: init failed", "err", err)
-		os.Exit(1)
-	}
+	// --- Prompts ---------------------------------------------------------
 	persona := readPersona(promptsDir + "/persona")
 	plannerPrompt := readFile(promptsDir+"/planner.md", "")
 	synthPrompt := readFile(promptsDir+"/synthesizer.md", "")
-	summPrompt := readFile(promptsDir+"/summarizer.md", "")
-	summarizer := agent.NewSummarizer(client, summPrompt, sessions)
+	logPromptsLoaded(promptsDir, persona, plannerPrompt, synthPrompt)
 
 	// --- Context builder + reply table ------------------------------------
 	ctxb := &agent.ContextBuilder{
 		Persona:   persona,
 		Workspace: areas,
-		Sessions:  sessions,
 	}
 	replies := agent.NewReplies()
 
@@ -138,7 +115,7 @@ func main() {
 
 	// --- Event bus + agent loop ------------------------------------------
 	bus := integrations.NewBus(64)
-	loop := agent.New(bus, sessions, ctxb, replies, summarizer,
+	loop := agent.New(bus, ctxb, replies,
 		planner, executor, synthesizer,
 		agent.Config{
 			TurnBudget: 2 * time.Minute,
@@ -170,13 +147,6 @@ func main() {
 	scheduletools.Register(registry, jobs)
 	abilityReg.Register(jobs.Reporter())
 
-	// --- Janitor: prune stale session summaries --------------------------
-	// LLM-free periodic sweep. Only touches data/sessions — long-term memory
-	// under data/memory is never deleted.
-	janitor := scheduler.NewJanitor(sessions, dataDir+"/sessions",
-		sessionIdleTimeout, sessionTTL, time.Hour)
-	abilityReg.Register(janitor.Reporter())
-
 	// --- Lifecycle --------------------------------------------------------
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -193,7 +163,6 @@ func main() {
 		slog.Error("jobs: start failed", "err", err)
 		os.Exit(1)
 	}
-	janitor.Start(ctx)
 
 	slog.Info("tobee is running — press Ctrl+C to exit")
 
@@ -283,4 +252,31 @@ func readPersona(dir string) string {
 		parts = append(parts, strings.TrimSpace(string(body)))
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// logPromptsLoaded emits a startup summary of what prompt content was
+// actually loaded from PROMPTS_DIR, plus a loud ERROR if anything the
+// agent depends on came back empty. When a container is misconfigured
+// and prompts don't mount, this is the first sign — the running
+// binary otherwise looks healthy while the LLM sees no instructions.
+func logPromptsLoaded(dir, persona, planner, synth string) {
+	slog.Info("prompts: loaded",
+		"prompts_dir", dir,
+		"persona_chars", len(persona),
+		"planner_chars", len(planner),
+		"synth_chars", len(synth))
+	missing := []string{}
+	if len(persona) == 0 {
+		missing = append(missing, "persona/*.md")
+	}
+	if len(planner) == 0 {
+		missing = append(missing, "planner.md")
+	}
+	if len(synth) == 0 {
+		missing = append(missing, "synthesizer.md")
+	}
+	if len(missing) > 0 {
+		slog.Error("prompts: MISSING — agent will misbehave (check PROMPTS_DIR mount)",
+			"prompts_dir", dir, "missing", strings.Join(missing, ", "))
+	}
 }

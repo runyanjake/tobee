@@ -9,11 +9,11 @@ import (
 
 // Turn carries the per-envelope state threaded through every phase of
 // a turn (plan → announce → execute → synth). Created once at the top
-// of processTurn, mutated in place by phases.
+// of processTurn, mutated in place by phases. There is no session
+// state — each envelope is a standalone turn.
 type Turn struct {
 	Ctx        context.Context
 	Env        integrations.Envelope
-	Session    *Session
 	Transcript []llm.Message
 
 	// Plan is set by the planner phase. Non-nil once processTurn has

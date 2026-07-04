@@ -1380,6 +1380,119 @@ bug class.
 
 ---
 
+## D-027 — Per-message turns; no session ring buffer, no summariser
+
+**Status:** Accepted · **Date:** 2026-07-04 · Supersedes D-011
+(idle rotation of session summaries) and D-016 (recent-ring
+persistence). Complements D-025 / D-026.
+
+**Decision.** Each envelope is a standalone turn. There is no
+in-memory session ring buffer, no `recent.json` mirror, no rolling
+per-channel summary in `current.md`, no summariser LLM call, no
+janitor sweeping idle sessions. Deleted from the tree:
+
+- `internal/agent/session.go`, `internal/agent/session_test.go`
+- `internal/agent/summarizer.go`
+- `internal/scheduler/janitor.go`,
+  `internal/scheduler/janitor_reporter.go`,
+  `internal/scheduler/janitor_test.go`
+- `prompts/summarizer.md`
+
+`ContextBuilder.ComposeTranscript` now returns a one-element message
+list containing only the current envelope's `user` turn.
+`ContextBuilder.Persona` is emitted at the top of every phase's
+system prompt (planner, executor, synth) so tobee's identity is
+present at every LLM call.
+
+The only cross-turn persistence is `data/memory/`, reached
+exclusively via the `memory.*` tool pack — which is now the
+mechanism the model must use for anything it wants to remember.
+
+**Why.**
+
+- **Poisoned transcripts.** Real traffic produced a session ring
+  buffer full of stale plan-announcement text, prior-turn
+  `PROTOCOL VIOLATION` nudges, empty assistant messages from
+  failed retries, and (when the user re-typed a message that
+  looked stuck) the same user message duplicated across positions.
+  Every subsequent LLM call was making decisions from that garbage.
+- **The summariser was best-effort but load-bearing.** Its rolling
+  summary was the only compressed record of the conversation. When
+  it hallucinated a fact (e.g. "the French fry recipe has been
+  created and saved" *before* the recipe was written), that
+  fabrication propagated into every future turn's system prompt
+  and the model then acted as if the false state were real.
+- **Session boundaries were the wrong scope.** Sessions were
+  keyed on `(integration, channel, thread)`, which conflates
+  distinct users in a shared channel and creates cross-user
+  contamination in the ring buffer.
+- **Prefix cache never actually reused.** The system prompt grew
+  each turn (new summary + new recent-tail), so the KV cache prefix
+  changed on every call. With this change the system prompt is
+  byte-stable across turns for a given `(user)` pair.
+
+**What "context across tool calls is fine, context across turns is
+not" means concretely.**
+
+- Within one turn: the executor's per-step ReAct sub-loop builds
+  `Turn.Transcript` — user question + assistant tool_calls + tool
+  results + `step.finish`. That transcript is grown by the executor
+  and used by subsequent iterations *within the same step*. Fine.
+- Across turns: nothing. Turn N sees only the user's message at
+  turn N. Anything else it needs must come from `memory.*` tools.
+
+**Cost.**
+
+- Trivial per-turn: no long-term working memory. If the user says
+  "and make it spicy" without repeating context, the model has no
+  idea what "it" refers to. Mitigation: the model is instructed
+  (via the persona + memory hint) to write anything worth
+  remembering to memory files before ending the turn.
+- LLM calls per turn: 3 on the happy path (planner + executor +
+  synth). Was 4 (added summariser). Cheaper.
+- Persona files are now byte-stable across every LLM call for a
+  given user, so LM Studio's prefix cache actually reuses.
+- Removed env vars: `SESSION_TTL`, `SESSION_IDLE_TIMEOUT`,
+  `SESSION_IDLE_TIMEOUT_DM`. Existing configs mentioning them are
+  ignored on startup.
+- `data/sessions/` is no longer read or written. Old contents on
+  disk are inert; delete them manually if desired.
+
+**Invariants preserved.**
+
+- Native tool-use (D-001), sandboxed FS (D-003), serial worker
+  (D-005), per-user memory layout (D-013), dynamic scheduled jobs
+  (D-015), prefix-cache contract (D-017), workspace areas (D-019),
+  strict tool-call protocol (D-025), tool-fetched memory recall
+  (D-026).
+- Four-phase plan → announce → execute → synth shape (D-024).
+- Emoji reaction lifecycle: ✅/🧠/💭 progress markers, cleared on
+  success, ❌ on terminal failure (added at deliver() only).
+
+**Explicitly not built.**
+
+- **Optional session revival.** No env var to bring it back. The
+  bug class (poisoned transcripts, hallucinated summaries) is
+  structural — a flag that re-enables it is a foot-gun waiting.
+- **Automatic memory writes for every turn.** The model decides
+  what to write. If it forgets to write something worth
+  remembering, that's a prompt-tuning issue, not a runtime one.
+- **Persona seeded once at chat start.** LLMs are stateless per
+  API call; every call needs the full system prompt. The user's
+  "seed at start of chat" mental model maps to "system prompt is
+  byte-stable across every call," which D-027 achieves — you just
+  can't skip re-sending it.
+
+**Don't revert** without explaining how the replacement (a) prevents
+the summariser from hallucinating cross-turn state, (b) keeps ring
+buffers from filling with stale nudges after a failed turn, and (c)
+scopes conversation state correctly for group channels with mixed
+users. If you want continuity that survives across messages, do it
+through `memory.*` writes and reads — the whole point of D-027 is
+that the tool pack is the persistence layer.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.
