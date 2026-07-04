@@ -99,13 +99,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 			}
 			continue
 		}
-		slog.Debug("agent: synthesizer: llm response",
-			"attempt", attempt,
-			"finish", resp.Finish,
-			"text_chars", len(resp.Text),
-			"text", resp.Text,
-			"tool_calls_count", len(resp.ToolCalls),
-			"tool_calls", renderToolCalls(resp.ToolCalls))
+		logResponse("agent: synthesizer: llm response", resp, "attempt", attempt)
 
 		for _, tc := range resp.ToolCalls {
 			if tc.Function.Name != replyCommitTool {

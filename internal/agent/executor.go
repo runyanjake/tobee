@@ -121,13 +121,7 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 			llmErrors++
 			continue
 		}
-		slog.Debug("agent: executor: llm response",
-			"step", step.ID, "sub", sub,
-			"finish", resp.Finish,
-			"text_chars", len(resp.Text),
-			"text", resp.Text,
-			"tool_calls_count", len(resp.ToolCalls),
-			"tool_calls", renderToolCalls(resp.ToolCalls))
+		logResponse("agent: executor: llm response", resp, "step", step.ID, "sub", sub)
 
 		asst := llm.Message{
 			Role:      llm.RoleAssistant,

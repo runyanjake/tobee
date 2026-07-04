@@ -53,20 +53,16 @@ Produce the updated rolling summary.`, previous, transcript)
 	slog.Debug("agent: summarizer: begin",
 		"key", key, "transcript_chars", len(transcript),
 		"previous_chars", len(previous))
-	resp, err := s.client.Call(ctx, []llm.Message{
+	msgs := []llm.Message{
 		{Role: llm.RoleSystem, Content: s.prompt},
 		{Role: llm.RoleUser, Content: user},
-	}, nil, llm.ToolChoiceUnset)
+	}
+	logPrompt("agent: summarizer: prompt", msgs)
+	resp, err := s.client.Call(ctx, msgs, nil, llm.ToolChoiceUnset)
 	if err != nil {
 		return fmt.Errorf("summarizer llm: %w", err)
 	}
-	slog.Debug("agent: summarizer: llm response",
-		"key", key,
-		"finish", resp.Finish,
-		"text_chars", len(resp.Text),
-		"text", resp.Text,
-		"tool_calls_count", len(resp.ToolCalls),
-		"tool_calls", renderToolCalls(resp.ToolCalls))
+	logResponse("agent: summarizer: llm response", resp, "key", key)
 	out := strings.TrimSpace(resp.Text)
 	if out == "" {
 		slog.Debug("agent: summarizer: empty output; skipping write", "key", key)

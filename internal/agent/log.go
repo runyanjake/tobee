@@ -32,12 +32,11 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// logPrompt emits a debug log of the prompt the agent is about to send
-// to the LLM. The system prompt is reported by length only (it can be
-// several KB once memory dumps are attached); subsequent messages are
-// reported with role + length, and the tail message's content is
-// included verbatim because it usually carries the per-call ask
-// (current step reminder, replan reason, user message, etc).
+// logPrompt emits a debug log of the prompt the agent is about to
+// send to the LLM. One summary line with counts + per-role sizes, then
+// one line per message with the full content (and tool_calls / tool
+// metadata when present) so the exact conversation sent to the model
+// is auditable in the console at LOG_LEVEL=DEBUG.
 func logPrompt(msg string, msgs []llm.Message) {
 	if len(msgs) == 0 {
 		slog.Debug(msg, "messages", 0)
@@ -54,11 +53,49 @@ func logPrompt(msg string, msgs []llm.Message) {
 		}
 		fmt.Fprintf(&roles, "%s:%d", m.Role, len(m.Content))
 	}
-	tail := msgs[len(msgs)-1]
 	slog.Debug(msg,
 		"messages", len(msgs),
 		"system_chars", systemChars,
-		"roles", roles.String(),
-		"tail_role", tail.Role,
-		"tail", tail.Content)
+		"roles", roles.String())
+
+	for i, m := range msgs {
+		attrs := []any{
+			"index", i,
+			"of", len(msgs),
+			"role", string(m.Role),
+			"content_chars", len(m.Content),
+			"content", m.Content,
+		}
+		if m.Name != "" {
+			attrs = append(attrs, "name", m.Name)
+		}
+		if m.ToolCallID != "" {
+			attrs = append(attrs, "tool_call_id", m.ToolCallID)
+		}
+		if len(m.ToolCalls) > 0 {
+			attrs = append(attrs,
+				"tool_calls_count", len(m.ToolCalls),
+				"tool_calls", renderToolCalls(m.ToolCalls))
+		}
+		slog.Debug(msg+": msg", attrs...)
+	}
+}
+
+// logResponse emits a debug log of an LLM response. Mirrors logPrompt's
+// verbosity — full text + all tool calls at DEBUG so a session's
+// prompt/response pair is reconstructable from the console log.
+func logResponse(msg string, resp *llm.Response, extra ...any) {
+	if resp == nil {
+		slog.Debug(msg, append([]any{"nil", true}, extra...)...)
+		return
+	}
+	attrs := []any{
+		"finish", resp.Finish,
+		"text_chars", len(resp.Text),
+		"text", resp.Text,
+		"tool_calls_count", len(resp.ToolCalls),
+		"tool_calls", renderToolCalls(resp.ToolCalls),
+	}
+	attrs = append(attrs, extra...)
+	slog.Debug(msg, attrs...)
 }

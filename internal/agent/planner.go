@@ -107,13 +107,7 @@ func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript
 			}
 			continue
 		}
-		slog.Debug("agent: planner: llm response",
-			"attempt", attempt,
-			"finish", resp.Finish,
-			"text_chars", len(resp.Text),
-			"text", resp.Text,
-			"tool_calls_count", len(resp.ToolCalls),
-			"tool_calls", renderToolCalls(resp.ToolCalls))
+		logResponse("agent: planner: llm response", resp, "attempt", attempt)
 
 		for _, tc := range resp.ToolCalls {
 			if tc.Function.Name != planCommitTool {
