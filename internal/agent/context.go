@@ -19,7 +19,7 @@ import (
 // areas, per-turn <context> tags, and the memory-tools primer. The
 // user's message is the only transcript sent alongside.
 type ContextBuilder struct {
-	Persona   string           // identity persona blob (prompts/persona/*.md concatenated)
+	Persona   string           // system prompt blob (prompts/system/*.md concatenated)
 	Workspace *workspace.Areas // configured host-file areas (nil = none)
 }
 

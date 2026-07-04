@@ -63,12 +63,13 @@ tobee/
 │  └─ tobee/
 │     └─ main.go                        # wiring only
 ├─ prompts/
-│  ├─ persona/                          # identity persona fragments, concatenated in order
+│  ├─ system/                           # system prompt fragments, concatenated in order
 │  │  ├─ 00-identity.md
 │  │  ├─ 01-tone.md
 │  │  ├─ 02-behaviour.md
 │  │  ├─ 03-output.md
-│  │  └─ 04-safety.md
+│  │  ├─ 04-safety.md
+│  │  └─ 05-tools.md                    # static tool catalogue (D-028)
 │  ├─ planner.md                        # planner phase role prompt
 │  └─ synthesizer.md                    # synth phase role prompt
 ├─ internal/

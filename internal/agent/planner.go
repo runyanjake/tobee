@@ -9,7 +9,6 @@ import (
 
 	"github.com/runyanjake/tobee/internal/integrations"
 	"github.com/runyanjake/tobee/internal/llm"
-	"github.com/runyanjake/tobee/internal/tools"
 )
 
 const planCommitTool = "plan.commit"
@@ -49,12 +48,14 @@ var planCommitSchema = json.RawMessage(`{
 // Planner commits a structured plan via plan.commit on an LLM call with
 // tool_choice=required. Free-form text is a protocol violation: the
 // planner retries once with a stricter nudge and then fails the turn.
-// There is no text-wrap fallback — the format is enforced.
+// There is no text-wrap fallback — the format is enforced. The tool
+// catalogue the model reads to pick step tools lives in
+// prompts/system/*.md (D-028); the planner does not synthesise it at
+// runtime.
 type Planner struct {
-	client        *llm.Client
-	ctxb          *ContextBuilder
-	prompt        string // contents of prompts/planner.md
-	toolCatalogue string // <tools>…</tools> block; same render as Executor sees
+	client *llm.Client
+	ctxb   *ContextBuilder
+	prompt string // contents of prompts/planner.md
 }
 
 // plannerNudge is the transcript-appended reminder used after a
@@ -63,12 +64,11 @@ type Planner struct {
 // right" note.
 const plannerNudge = "PROTOCOL VIOLATION: your previous response was not a plan.commit tool call. You must call plan.commit exactly once. Free-form text is not accepted. Retry."
 
-func NewPlanner(client *llm.Client, ctxb *ContextBuilder, reg *tools.Registry, prompt string) *Planner {
+func NewPlanner(client *llm.Client, ctxb *ContextBuilder, prompt string) *Planner {
 	return &Planner{
-		client:        client,
-		ctxb:          ctxb,
-		prompt:        prompt,
-		toolCatalogue: renderToolCatalogue(reg),
+		client: client,
+		ctxb:   ctxb,
+		prompt: prompt,
 	}
 }
 
@@ -83,9 +83,6 @@ func (p *Planner) Run(ctx context.Context, env integrations.Envelope, transcript
 	}
 
 	sys := p.ctxb.ComposeSystem(env, p.prompt)
-	if p.toolCatalogue != "" {
-		sys += "\n\n" + p.toolCatalogue
-	}
 	toolSpec := []llm.ToolSpec{{
 		Name:        planCommitTool,
 		Description: "Commit an ordered plan for handling the current message. Use exactly once. Each step's intent is the outcome it must produce, not a tool name. Empty tools list = no work, respond-only step.",
@@ -177,32 +174,6 @@ func planFromCommitArgs(args commitArgs) (*Plan, error) {
 	}
 	plan.assignIDs()
 	return plan, nil
-}
-
-// renderToolCatalogue produces the <tools> block injected into the
-// planner's system prompt. Lists executor-callable tools by name +
-// one-line description so the planner can plan steps that use them.
-func renderToolCatalogue(reg *tools.Registry) string {
-	if reg == nil {
-		return ""
-	}
-	specs := reg.Specs()
-	if len(specs) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString("<tools>\n")
-	sb.WriteString("These are the tools the executor can call when working a step. List exactly the tools each step might plausibly need.\n")
-	for _, s := range specs {
-		desc := oneLine(s.Description)
-		if desc == "" {
-			fmt.Fprintf(&sb, "- %s\n", s.Name)
-		} else {
-			fmt.Fprintf(&sb, "- %s — %s\n", s.Name, desc)
-		}
-	}
-	sb.WriteString("</tools>")
-	return sb.String()
 }
 
 func trimStrings(in []string) []string {

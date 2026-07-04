@@ -248,11 +248,11 @@ func (e *Executor) toolsForStep(step *Step) ([]llm.ToolSpec, error) {
 	return out, nil
 }
 
-// composeStepSystem renders the executor system message: identity
-// persona + data sections + plan + a <current_step> reminder scoped
+// composeStepSystem renders the executor system message: system
+// prompt + data sections + plan + a <current_step> reminder scoped
 // to the running step. The executor's role instructions live inside
-// prompts/persona/02-behaviour.md (part of the identity persona), so
-// no phase-specific instructions block is needed here.
+// prompts/system/02-behaviour.md (part of the loaded system prompt),
+// so no phase-specific instructions block is needed here.
 func (e *Executor) composeStepSystem(t *Turn, step *Step) string {
 	sys := e.ctxb.ComposeSystem(t.Env, "")
 	if r := t.Plan.Render(); r != "" {

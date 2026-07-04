@@ -141,7 +141,7 @@ there is no cross-turn history, the shape is small and stable.
 
 | # | Section              | Source                                                  | Always shown?      |
 |---|----------------------|---------------------------------------------------------|--------------------|
-| 1 | Identity persona     | `prompts/persona/*.md` (concatenated)                   | Yes                |
+| 1 | System prompt        | `prompts/system/*.md` (concatenated: identity + tone + behaviour + output + safety + tools) | Yes |
 | 2 | Phase instructions   | `planner.md` / `synthesizer.md` / "" for the executor   | Per phase          |
 | 3 | Workspace areas      | boot-time `workspace.Areas` config                      | If configured      |
 | 4 | Current context      | integration / channel / thread / user tags              | Yes                |
@@ -151,10 +151,19 @@ there is no cross-turn history, the shape is small and stable.
 carrying `env.Content`. That's the entire outgoing conversation
 alongside the system message — no ring buffer, no prior turns.
 
-**Identity persona in every phase.** Previous versions passed the
-phase prompt as if it were the persona, so the planner and synth
-phases saw no `prompts/persona/*.md` content at all. `ComposeSystem`
-now always emits `b.Persona` first, then the phase-specific block.
+**System prompt in every phase.** Previous versions passed the phase
+prompt as if it were the persona, so the planner and synth phases
+saw no `prompts/system/*.md` content at all. `ComposeSystem` now
+always emits `b.Persona` (the concatenated `prompts/system/*.md`
+blob) first, then the phase-specific block.
+
+**Tool catalogue is a static file, not a runtime render.** Under
+D-028, the `<tools>` catalogue the planner reads to pick step tools
+lives in `prompts/system/05-tools.md` alongside the persona
+fragments. There is no `renderToolCatalogue` walking
+`tools.Registry` at request time — one file, edited by hand when
+tools are added or removed. The `tools=[…]` API parameter is still
+what actually enforces which tools each LLM call can invoke.
 
 **Memory is not pre-injected.** As of D-025, stored knowledge —
 `shared/INDEX.md`, the user's `INDEX.md`, `user.md`, `preferences.md`,
@@ -185,11 +194,13 @@ these sections without re-reading D-017.
 
 ## Startup prompt loading
 
-`cmd/tobee/main.go` reads `PROMPTS_DIR/persona/*.md`, `planner.md`, and
-`synthesizer.md` at boot. `logPromptsLoaded` emits an INFO line with
-the byte counts and an ERROR (`prompts: MISSING`) when any of them
-comes back empty — a container that ships without its prompt mount is
-the running binary's most likely first-day failure mode, and the loud
+`cmd/tobee/main.go` reads `PROMPTS_DIR/system/*.md`, `planner.md`, and
+`synthesizer.md` at boot via `readSystemPrompt` and `readFile`.
+`logPromptsLoaded` emits an INFO line with the byte counts
+(`system_chars`, `planner_chars`, `synth_chars`) and a loud ERROR
+(`prompts: MISSING — agent will misbehave`) when any of them comes
+back empty — a container that ships without its prompts is the
+running binary's most likely first-day failure mode, and the loud
 log is what makes it obvious.
 
 ## Scheduler

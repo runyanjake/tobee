@@ -96,20 +96,23 @@ func main() {
 	// schedule.* tools are registered after the JobManager is built below.
 
 	// --- Prompts ---------------------------------------------------------
-	persona := readPersona(promptsDir + "/persona")
+	// prompts/system/*.md is the system prompt: identity + tone +
+	// behaviour + output + safety + tools catalogue. Loaded once at
+	// boot, emitted at the top of every phase's system message.
+	systemPrompt := readSystemPrompt(promptsDir + "/system")
 	plannerPrompt := readFile(promptsDir+"/planner.md", "")
 	synthPrompt := readFile(promptsDir+"/synthesizer.md", "")
-	logPromptsLoaded(promptsDir, persona, plannerPrompt, synthPrompt)
+	logPromptsLoaded(promptsDir, systemPrompt, plannerPrompt, synthPrompt)
 
 	// --- Context builder + reply table ------------------------------------
 	ctxb := &agent.ContextBuilder{
-		Persona:   persona,
+		Persona:   systemPrompt,
 		Workspace: areas,
 	}
 	replies := agent.NewReplies()
 
 	// --- Planner / executor / synthesizer -------------------------------
-	planner := agent.NewPlanner(client, ctxb, registry, plannerPrompt)
+	planner := agent.NewPlanner(client, ctxb, plannerPrompt)
 	executor := agent.NewExecutor(client, registry, ctxb, planMaxStepsPerStep, planMaxStepsTotal)
 	synthesizer := agent.NewSynthesizer(client, ctxb, synthPrompt)
 
@@ -232,13 +235,14 @@ func readFile(path, fallback string) string {
 	return string(data)
 }
 
-// readPersona loads every *.md file in dir, sorted lexicographically, and
-// joins their contents with blank lines. The numeric prefix on each filename
-// (00-, 01-, …) is the load-order contract — see DECISIONS.md D-012/D-018.
-func readPersona(dir string) string {
+// readSystemPrompt loads every *.md file in dir, sorted lexicographically,
+// and joins their contents with blank lines. The numeric prefix on each
+// filename (00-, 01-, …) is the load-order contract — see DECISIONS.md
+// D-012 / D-018 / D-028.
+func readSystemPrompt(dir string) string {
 	matches, err := filepath.Glob(filepath.Join(dir, "*.md"))
 	if err != nil || len(matches) == 0 {
-		slog.Warn("prompt: persona load failed; using empty persona", "dir", dir, "err", err)
+		slog.Warn("prompt: system-prompt load failed; using empty system prompt", "dir", dir, "err", err)
 		return ""
 	}
 	sort.Strings(matches)
@@ -246,7 +250,7 @@ func readPersona(dir string) string {
 	for _, p := range matches {
 		body, err := os.ReadFile(p)
 		if err != nil {
-			slog.Warn("prompt: persona fragment unreadable; skipping", "path", p, "err", err)
+			slog.Warn("prompt: system fragment unreadable; skipping", "path", p, "err", err)
 			continue
 		}
 		parts = append(parts, strings.TrimSpace(string(body)))
@@ -259,15 +263,15 @@ func readPersona(dir string) string {
 // agent depends on came back empty. When a container is misconfigured
 // and prompts don't mount, this is the first sign — the running
 // binary otherwise looks healthy while the LLM sees no instructions.
-func logPromptsLoaded(dir, persona, planner, synth string) {
+func logPromptsLoaded(dir, system, planner, synth string) {
 	slog.Info("prompts: loaded",
 		"prompts_dir", dir,
-		"persona_chars", len(persona),
+		"system_chars", len(system),
 		"planner_chars", len(planner),
 		"synth_chars", len(synth))
 	missing := []string{}
-	if len(persona) == 0 {
-		missing = append(missing, "persona/*.md")
+	if len(system) == 0 {
+		missing = append(missing, "system/*.md")
 	}
 	if len(planner) == 0 {
 		missing = append(missing, "planner.md")

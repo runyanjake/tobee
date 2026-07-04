@@ -1493,6 +1493,101 @@ that the tool pack is the persistence layer.
 
 ---
 
+## D-028 — `prompts/persona/` → `prompts/system/`; tools catalogue becomes a static file
+
+**Status:** Accepted · **Date:** 2026-07-04 · Extends D-018
+(persona-file layout) with the folder rename and the static tools
+file.
+
+**Decision.**
+
+1. Rename `prompts/persona/` → `prompts/system/`. The folder holds
+   the *system prompt* the LLM sees on every phase call — identity,
+   tone, behaviour, output rules, safety, and now the tools
+   catalogue. Calling it "persona" understated its scope. All five
+   original fragments (`00-identity.md` … `04-safety.md`) move
+   unchanged.
+2. Add `prompts/system/05-tools.md`. Describes every registered tool
+   in prose — memory, status, scheduling, workspace (when
+   configured), plus the phase-terminating virtual tools
+   (`plan.commit`, `step.finish`, `reply.commit`). Sorted last by
+   the numeric-prefix load-order contract so it follows the
+   behavioural fragments.
+3. Delete `renderToolCatalogue` from `internal/agent/planner.go`
+   and the `toolCatalogue` field from `Planner`. The `<tools>` block
+   the planner previously synthesised at request time from
+   `tools.Registry` is gone — the same catalogue prose now lives
+   statically in `05-tools.md` and rides in via the system-prompt
+   blob.
+4. `NewPlanner` no longer takes a `*tools.Registry` argument.
+5. `main.go`'s `readPersona` renamed to `readSystemPrompt`. Its
+   startup log field `persona_chars` renamed to `system_chars`;
+   the "missing" list uses `system/*.md`.
+
+**Why.**
+
+- **Naming honesty.** The folder was already carrying behaviour,
+  output rules, and safety instructions — none of which are
+  "persona" in the tone-only sense. Calling the whole thing the
+  system prompt (which is what it *is* on the wire) removes the
+  cognitive rounding.
+- **One source of truth for tools.** The runtime catalogue was
+  derived from `tools.Registry` and only shown to the planner. The
+  executor's per-step `tools=[]` API parameter enforced the real
+  constraint. Two derived-from-code sources risked drift and made
+  the executor/synth phases blind to the toolkit even though the
+  same LLM was reading it three times per turn. A single hand-edited
+  file that's part of the system prompt every phase reads keeps the
+  description consistent, is discoverable by anyone editing prompts,
+  and stops the planner from being the only phase that "knows" what
+  tools exist.
+- **The tools=[] param is still the enforcer.** Removing the runtime
+  render does not weaken security or correctness — the API param
+  determines what the model can actually call. The system-prompt
+  prose is only guidance.
+
+**Cost / drift risk.**
+
+- If someone adds a new tool to `tools.Registry` without editing
+  `05-tools.md`, the model won't see it described. It will still be
+  advertised through `tools=[]` when the planner grants it, so a
+  clever LLM might still find it — but the intent of D-028 is that
+  the tools file is the canonical description. New tool → new
+  bullet. Enforcing this by convention, not by a lint.
+- Editing `05-tools.md` is a prompt change and requires a
+  rebuild-and-restart in prod (the bind mount is gone as of the
+  previous commit). Acceptable — tool additions are rare and
+  intentional.
+
+**Invariants preserved.**
+
+- Numeric-prefix load-order contract (D-018): filenames sort
+  lexicographically; the numbers make the order explicit.
+- Every phase sees the same system prompt (D-025 / D-026 / D-027).
+- Docker/compose deployment: the folder rename is directory-level,
+  so `COPY prompts ./prompts` in the Dockerfile and the dev compose
+  bind mount both keep working with no change.
+
+**Explicitly not built.**
+
+- **Renaming `ContextBuilder.Persona` → `ContextBuilder.System`.**
+  The field name still fits — it holds the persona/system blob.
+  Renaming ripples through every phase file for no runtime gain.
+- **A CI check that fails when `05-tools.md` diverges from
+  `tools.Registry`.** Would catch drift, but adds harness cost.
+  Revisit if drift bugs actually appear.
+- **Loading `05-tools.md` as its own file separate from the persona
+  concatenation.** The whole point of the rename is that everything
+  in `prompts/system/*.md` is one system-prompt blob. A separate
+  slot would rebuild the "N files, N branches" complexity D-018
+  killed.
+
+**Don't revert** without explaining where the tool catalogue would
+live instead, and how the planner (and every other phase) would see
+it without paying the render cost per call.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.
