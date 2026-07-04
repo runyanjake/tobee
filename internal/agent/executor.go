@@ -16,34 +16,35 @@ var stepFinishSchema = json.RawMessage(`{
   "type": "object",
   "required": ["result"],
   "properties": {
-    "result": {"type": "string", "description": "One or two sentences stating the outcome of this step, in the exact form the synthesizer will consume. State the answer, not the procedure."}
+    "result": {"type": "string", "description": "One or two sentences stating the outcome of this step, in the exact form the synthesizer will consume. State the answer, not the procedure."},
+    "finished": {"type": "boolean", "description": "Set to true only if the entire user request is now satisfied by the work done so far — the executor will skip any remaining plan steps and jump straight to the synth phase. Set to false (or omit) otherwise."}
   }
 }`)
 
 // stepFinishArgs is the JSON shape step.finish emits.
 type stepFinishArgs struct {
-	Result string `json:"result"`
+	Result   string `json:"result"`
+	Finished bool   `json:"finished"`
 }
 
 // executorNudge is the reminder appended to the transcript after a
 // protocol violation inside a step.
 const executorNudge = "PROTOCOL VIOLATION: your previous response was neither a tool call nor a step.finish call. You must call exactly one tool per turn. When the step's outcome is known, call step.finish with the result. Free-form text is not accepted. Retry."
 
-// Executor runs one Step at a time through a ReAct sub-loop. The
-// planner pre-commits the plan; the executor focuses each step on its
-// declared intent and tool set plus the virtual step.finish tool. The
-// only legal terminations are step.finish (success) or the step budget
-// (failure). Free-form text is a protocol violation: retried once,
-// then fails the step.
+// Executor drives one Step at a time through a ReAct sub-loop that
+// runs against the shared Conversation. All registered tools are
+// advertised on every step's LLM call — D-029 removed per-step tool
+// scoping — plus the virtual step.finish tool. Free-form text is a
+// protocol violation: retried once, then fails the step.
 type Executor struct {
 	client      *llm.Client
 	tools       *tools.Registry
-	ctxb        *ContextBuilder
+	states      *StateTemplates
 	maxPerStep  int
 	totalBudget int
 }
 
-func NewExecutor(client *llm.Client, reg *tools.Registry, ctxb *ContextBuilder, maxPerStep, totalBudget int) *Executor {
+func NewExecutor(client *llm.Client, reg *tools.Registry, states *StateTemplates, maxPerStep, totalBudget int) *Executor {
 	if maxPerStep <= 0 {
 		maxPerStep = 4
 	}
@@ -53,56 +54,55 @@ func NewExecutor(client *llm.Client, reg *tools.Registry, ctxb *ContextBuilder, 
 	return &Executor{
 		client:      client,
 		tools:       reg,
-		ctxb:        ctxb,
+		states:      states,
 		maxPerStep:  maxPerStep,
 		totalBudget: totalBudget,
 	}
 }
 
-// RunStep executes one Step. Mutates step in place (Status, Result,
-// Error, Attempts) and grows t.Transcript with every assistant + tool
-// message. Returns true when the step ended cleanly via step.finish.
-//
-// A step with no declared Tools is a legitimate respond-only step
-// (e.g. greeting): no LLM call, no Result, marked done immediately.
-// The synthesizer handles composing the reply from the plan alone.
-func (e *Executor) RunStep(t *Turn, step *Step) bool {
+// RunStep appends the rendered execute_step user message to the
+// conversation, then runs the ReAct sub-loop against the shared
+// Conversation. Mutates step in place (Status, Result, Error,
+// Finished, Attempts). Returns true when the step ended cleanly via
+// step.finish; the loop should exit early to synth when step.Finished
+// is true.
+func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool {
 	step.Status = StepRunning
 	step.Attempts++
 
-	if len(step.Tools) == 0 {
-		step.Status = StepDone
-		return true
-	}
-
-	toolSpecs, terr := e.toolsForStep(step)
-	if terr != nil {
-		step.Error = terr.Error()
+	toolSpecs := e.toolSpecs()
+	userMsg, err := e.states.Render("execute_step", StateData{
+		Step:           step,
+		StepNumber:     stepNumber,
+		StepTotal:      stepTotal,
+		Plan:           t.Conversation.Plan,
+		AvailableTools: e.toolNames(),
+	})
+	if err != nil {
+		step.Error = fmt.Sprintf("render execute_step: %v", err)
 		step.Status = StepFailed
 		return false
 	}
+	t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: userMsg})
 
 	violations := 0
 	llmErrors := 0
 	for sub := 0; sub < e.maxPerStep; sub++ {
-		if t.Plan.StepsRun >= e.totalBudget {
+		if t.Conversation.Plan.StepsRun >= e.totalBudget {
 			step.Error = "turn step-budget exhausted"
 			step.Status = StepFailed
 			slog.Warn("agent: executor: total step budget exhausted",
-				"step", step.ID, "steps_run", t.Plan.StepsRun, "total_budget", e.totalBudget)
+				"step", step.ID, "steps_run", t.Conversation.Plan.StepsRun, "total_budget", e.totalBudget)
 			return false
 		}
-		t.Plan.StepsRun++
+		t.Conversation.Plan.StepsRun++
 
 		slog.Debug("agent: executor: iteration",
-			"step", step.ID, "sub", sub, "steps_run", t.Plan.StepsRun,
-			"transcript_msgs", len(t.Transcript))
+			"step", step.ID, "sub", sub, "steps_run", t.Conversation.Plan.StepsRun,
+			"conv_msgs", len(t.Conversation.Messages))
 
-		sys := e.composeStepSystem(t, step)
-		callMsgs := append([]llm.Message{{Role: llm.RoleSystem, Content: sys}}, t.Transcript...)
-
-		logPrompt("agent: executor: prompt", callMsgs)
-		resp, err := e.client.Call(t.Ctx, callMsgs, toolSpecs, llm.ToolChoiceRequired)
+		logPrompt("agent: executor: prompt", t.Conversation.Messages)
+		resp, err := e.client.Call(t.Ctx, t.Conversation.Messages, toolSpecs, llm.ToolChoiceRequired)
 		if err != nil {
 			slog.Error("agent: executor: LLM ERROR",
 				"step", step.ID, "sub", sub, "llm_error", llmErrors, "err", err,
@@ -128,7 +128,7 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 			Content:   resp.Text,
 			ToolCalls: resp.ToolCalls,
 		}
-		t.Transcript = append(t.Transcript, asst)
+		t.Conversation.Append(asst)
 
 		if len(resp.ToolCalls) == 0 {
 			slog.Error("agent: executor: PROTOCOL VIOLATION",
@@ -143,14 +143,12 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 				return false
 			}
 			violations++
-			nudge := llm.Message{Role: llm.RoleUser, Content: executorNudge}
-			t.Transcript = append(t.Transcript, nudge)
+			t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: executorNudge})
 			continue
 		}
 
-		finished, done := e.dispatchCalls(t, step, resp.ToolCalls)
-		if done {
-			return finished
+		if e.dispatchCalls(t, step, resp.ToolCalls) {
+			return step.Status == StepDone
 		}
 	}
 
@@ -162,11 +160,10 @@ func (e *Executor) RunStep(t *Turn, step *Step) bool {
 }
 
 // dispatchCalls runs every tool_call in the assistant response,
-// appending tool-role messages for each. If any call is step.finish,
-// the step is marked done with its result and dispatchCalls returns
-// (true, true). Otherwise returns (false, false) and the sub-loop
-// continues.
-func (e *Executor) dispatchCalls(t *Turn, step *Step, calls []llm.ToolCall) (finished bool, done bool) {
+// appending tool-role messages for each. Returns true when a
+// step.finish call was consumed (step is now terminal); false when
+// more iterations are needed.
+func (e *Executor) dispatchCalls(t *Turn, step *Step, calls []llm.ToolCall) bool {
 	for _, tc := range calls {
 		if tc.Function.Name == stepFinishTool {
 			var args stepFinishArgs
@@ -175,18 +172,21 @@ func (e *Executor) dispatchCalls(t *Turn, step *Step, calls []llm.ToolCall) (fin
 					"step", step.ID, "err", err, "args", tc.Function.Arguments)
 				step.Error = fmt.Sprintf("step.finish decode: %v", err)
 				step.Status = StepFailed
-				return false, true
+				return true
 			}
-			tmsg := llm.Message{
+			t.Conversation.Append(llm.Message{
 				Role:       llm.RoleTool,
 				ToolCallID: tc.ID,
 				Name:       tc.Function.Name,
 				Content:    "ok",
-			}
-			t.Transcript = append(t.Transcript, tmsg)
+			})
 			step.Result = strings.TrimSpace(args.Result)
+			step.Finished = args.Finished
 			step.Status = StepDone
-			return true, true
+			if args.Finished {
+				t.Conversation.Finished = true
+			}
+			return true
 		}
 
 		out, cerr := e.tools.Call(t.Ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
@@ -197,76 +197,38 @@ func (e *Executor) dispatchCalls(t *Turn, step *Step, calls []llm.ToolCall) (fin
 		} else {
 			slog.Debug("agent: tool ok", "tool", tc.Function.Name)
 		}
-		tmsg := llm.Message{
+		t.Conversation.Append(llm.Message{
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
 			Name:       tc.Function.Name,
 			Content:    content,
-		}
-		t.Transcript = append(t.Transcript, tmsg)
+		})
 	}
-	return false, false
+	return false
 }
 
-// toolsForStep returns the tool specs advertised to the LLM for this
-// step: the planner-listed tools that exist in the registry, plus the
-// virtual step.finish tool that terminates the step.
-func (e *Executor) toolsForStep(step *Step) ([]llm.ToolSpec, error) {
+// toolSpecs returns every registered tool plus the virtual step.finish
+// tool. Same set advertised on every step's LLM call — D-029 dropped
+// per-step scoping.
+func (e *Executor) toolSpecs() []llm.ToolSpec {
 	all := e.tools.Specs()
-	wanted := make(map[string]bool, len(step.Tools))
-	for _, t := range step.Tools {
-		wanted[t] = true
-	}
-	out := make([]llm.ToolSpec, 0, len(step.Tools)+1)
-	for _, s := range all {
-		if wanted[s.Name] {
-			out = append(out, s)
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("planner listed no known tools: %v", step.Tools)
-	}
-	if len(out) < len(step.Tools) {
-		have := make(map[string]bool, len(out))
-		for _, s := range out {
-			have[s.Name] = true
-		}
-		missing := make([]string, 0)
-		for _, t := range step.Tools {
-			if !have[t] {
-				missing = append(missing, t)
-			}
-		}
-		slog.Warn("agent: executor dropped unknown planner tools",
-			"step", step.ID, "missing", missing)
-	}
+	out := make([]llm.ToolSpec, 0, len(all)+1)
+	out = append(out, all...)
 	out = append(out, llm.ToolSpec{
 		Name:        stepFinishTool,
-		Description: "Terminate the current step. `result` is the outcome text (one or two sentences) that the synthesizer will consume. Call this exactly once when the step's outcome is known.",
+		Description: "Terminate the current step. `result` is the outcome text (one or two sentences) the synthesizer will consume. Set `finished: true` only if the entire user request is now satisfied — the executor will skip any remaining plan steps and jump to synth.",
 		InputSchema: stepFinishSchema,
 	})
-	return out, nil
+	return out
 }
 
-// composeStepSystem renders the executor system message: system
-// prompt + data sections + plan + a <current_step> reminder scoped
-// to the running step. The executor's role instructions live inside
-// prompts/system/02-behaviour.md (part of the loaded system prompt),
-// so no phase-specific instructions block is needed here.
-func (e *Executor) composeStepSystem(t *Turn, step *Step) string {
-	sys := e.ctxb.ComposeSystem(t.Env, "")
-	if r := t.Plan.Render(); r != "" {
-		sys += "\n\n" + r
+// toolNames returns just the names of the registered tools, for the
+// state template's {{.AvailableTools}} field.
+func (e *Executor) toolNames() []string {
+	specs := e.tools.Specs()
+	out := make([]string, 0, len(specs))
+	for _, s := range specs {
+		out = append(out, s.Name)
 	}
-	sys += fmt.Sprintf(`
-
-<current_step id="%s">
-You are executing step %s of %d: %s
-
-Every turn must be exactly one tool call. Call a real tool to make
-progress; call `+"`step.finish`"+` with the `+"`result`"+` field when the step's
-outcome is known. Free-form text without a tool call is a protocol
-violation.
-</current_step>`, step.ID, step.ID, len(t.Plan.Steps), step.Intent)
-	return sys
+	return out
 }

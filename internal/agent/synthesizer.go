@@ -43,34 +43,35 @@ type replyCommitArgs struct {
 
 const synthNudge = "PROTOCOL VIOLATION: your previous response was not a reply.commit tool call. You must call reply.commit exactly once with the reply's spoken text and any artifacts. Free-form text is not accepted. Retry."
 
-// Synthesizer composes the user-facing reply at the end of every turn
-// via the reply.commit virtual tool. The Discord message is rendered
-// in Go from the tool's structured output — spoken text plus zero or
-// more fenced artifacts — so the message shape is deterministic and
-// does not depend on the model formatting prose correctly.
+// Synthesizer runs against the shared Conversation to produce the
+// user-facing reply. Appends the rendered synthesize state template
+// as a user message, then requires reply.commit with
+// tool_choice=required. The Discord message text is composed in Go by
+// renderReply from the structured output — spoken + fenced artifacts.
 type Synthesizer struct {
 	client *llm.Client
-	ctxb   *ContextBuilder
-	prompt string // contents of prompts/synthesizer.md
+	states *StateTemplates
 }
 
-func NewSynthesizer(client *llm.Client, ctxb *ContextBuilder, prompt string) *Synthesizer {
-	return &Synthesizer{client: client, ctxb: ctxb, prompt: prompt}
+func NewSynthesizer(client *llm.Client, states *StateTemplates) *Synthesizer {
+	return &Synthesizer{client: client, states: states}
 }
 
-// Finalize runs the synthesis LLM call and returns the rendered reply.
-// On protocol violation (no reply.commit call) it retries once with a
-// nudge and then fails the turn.
+// Finalize appends the synth state message to the conversation, runs
+// the LLM call, and returns the rendered reply. On protocol violation
+// it retries once with a nudge and then fails.
 func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 	if s == nil || s.client == nil {
 		return "", fmt.Errorf("synthesizer: not configured")
 	}
 
-	sys := s.ctxb.ComposeSystem(t.Env, s.prompt)
-	if r := t.Plan.Render(); r != "" {
-		sys += "\n\n" + r
+	userMsg, err := s.states.Render("synthesize", StateData{
+		Plan: t.Conversation.Plan,
+	})
+	if err != nil {
+		return "", fmt.Errorf("synthesizer: render synthesize state: %w", err)
 	}
-	sys += "\n\n<synthesize>\nThe work above is complete. Call reply.commit exactly once to render the user's final reply. No other tools. Do not plan, announce, ask questions, or say 'I will'.\n</synthesize>"
+	t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: userMsg})
 
 	toolSpec := []llm.ToolSpec{{
 		Name:        replyCommitTool,
@@ -78,18 +79,12 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		InputSchema: replyCommitSchema,
 	}}
 
-	userTurn := llm.Message{Role: llm.RoleUser, Content: t.Env.Content}
-	msgs := []llm.Message{
-		{Role: llm.RoleSystem, Content: sys},
-		userTurn,
-	}
-
-	slog.Debug("agent: synthesizer: begin", "plan_steps", len(t.Plan.Steps))
+	slog.Debug("agent: synthesizer: begin", "plan_steps", len(t.Conversation.Plan.Steps))
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		logPrompt("agent: synthesizer: prompt", msgs)
-		resp, err := s.client.Call(t.Ctx, msgs, toolSpec, llm.ToolChoiceRequired)
+		logPrompt("agent: synthesizer: prompt", t.Conversation.Messages)
+		resp, err := s.client.Call(t.Ctx, t.Conversation.Messages, toolSpec, llm.ToolChoiceRequired)
 		if err != nil {
 			slog.Error("agent: synthesizer: LLM ERROR",
 				"attempt", attempt, "err", err, "ctx_err", t.Ctx.Err())
@@ -101,6 +96,13 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		}
 		logResponse("agent: synthesizer: llm response", resp, "attempt", attempt)
 
+		asst := llm.Message{
+			Role:      llm.RoleAssistant,
+			Content:   resp.Text,
+			ToolCalls: resp.ToolCalls,
+		}
+		t.Conversation.Append(asst)
+
 		for _, tc := range resp.ToolCalls {
 			if tc.Function.Name != replyCommitTool {
 				continue
@@ -109,6 +111,12 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 				return "", fmt.Errorf("synthesizer: decode %s args: %w", replyCommitTool, err)
 			}
+			t.Conversation.Append(llm.Message{
+				Role:       llm.RoleTool,
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+				Content:    "ok",
+			})
 			return renderReply(args), nil
 		}
 
@@ -123,10 +131,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		lastErr = fmt.Errorf("protocol violation: no %s call", replyCommitTool)
 
 		if attempt == 0 {
-			msgs = append(msgs,
-				llm.Message{Role: llm.RoleAssistant, Content: strings.TrimSpace(resp.Text)},
-				llm.Message{Role: llm.RoleUser, Content: synthNudge},
-			)
+			t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: synthNudge})
 		}
 	}
 

@@ -1588,6 +1588,160 @@ it without paying the render cost per call.
 
 ---
 
+## D-029 — One Conversation per request; state-template phase transitions
+
+**Status:** Accepted · **Date:** 2026-07-04 · Supersedes the
+"three separate LLM chats per turn" shape of D-024. Keeps D-025's
+strict tool-call protocol at every phase and D-027's per-message
+boundary. Complements D-026 (memory-via-tools) and D-028 (folder
+rename + static tools file).
+
+**Decision.** A single Discord message → a single `Conversation`
+that lives from receipt through delivery. All three phases (planner,
+executor per step, synth) append to the same growing `Messages` list;
+the system prompt is sent once, at `Messages[0]`, and never resent
+as a new chat.
+
+Concrete shape of one request's conversation:
+
+```
+0  system   prompts/system/*.md + <workspace_areas> + <context> + <memory>
+1  user     render(prompts/state/plan.md, {UserInput})
+2  asst     plan.commit({goal, steps})              tools=[plan.commit], tool_choice=required
+3  tool     ok (ack for plan.commit)
+
+4  user     render(prompts/state/execute_step.md, {Step 1 of N, ...})
+5  asst     tool_call (e.g. memory.read)            tools=all registered + step.finish, tool_choice=required
+6  tool     result
+...
+k  asst     step.finish({result, finished})
+k+1 tool    ok
+
+... repeat 4..k+1 for each remaining step (unless finished=true) ...
+
+N   user    render(prompts/state/synthesize.md)
+N+1 asst    reply.commit({spoken, artifacts})       tools=[reply.commit], tool_choice=required
+N+2 tool    ok
+```
+
+Per LM Studio call, `tools=[…]` still changes per phase (only
+`plan.commit` on message 2; the full registry + `step.finish` during
+execute; only `reply.commit` on the synth call). What changes vs
+D-024 is the *conversation* is one continuous list, not three fresh
+ones.
+
+**Prompt file layout.**
+
+- `prompts/system/*.md` — the system prompt, unchanged. Loaded once.
+- `prompts/state/plan.md` — user-message template rendered at
+  planning time.
+- `prompts/state/execute_step.md` — rendered before each executor
+  step.
+- `prompts/state/synthesize.md` — rendered before the synth call.
+- `prompts/planner.md` and `prompts/synthesizer.md` — **retired.**
+  Their operative prose moved into the state templates.
+
+Templates use Go `text/template` with a small `FuncMap` (`join`).
+The renderer is `internal/agent/state.go::StateTemplates`.
+
+**Code shape.**
+
+- `Conversation` ([internal/agent/conversation.go](../internal/agent/conversation.go))
+  holds `Messages []llm.Message`, `Plan *Plan`, `StepCursor int`,
+  `SurfacedKnowledge []string` (stub), `Finished bool`.
+- `Turn` owns a `*Conversation` and the per-envelope state
+  (message ID, plan-message ID, reactions).
+- `Planner`, `Executor`, `Synthesizer` all take a `*StateTemplates`
+  and share the same `Conversation` via `Turn`.
+- Per-step tool scoping (D-024's `Step.Tools` field) — **removed.**
+  Every step's LLM call advertises the full `tools.Registry` + the
+  virtual `step.finish` tool. The planner emits `plan.commit` with
+  `{goal, steps: [{intent}]}` only.
+- `step.finish` schema gained a `finished` boolean. When any step
+  sets it, `Conversation.Finished` flips and the loop skips
+  remaining steps (marked `⏭️` `StepSkipped`). If the last planned
+  step completes without `finished: true`, a `WARN` is logged as
+  the correctness surface.
+
+**Why.**
+
+- **The old planner was blind.** In D-024's shape, the planner
+  committed a plan without being able to call tools — so the LLM
+  planned in the abstract. Real traffic showed it committing plans
+  like `[find recipe, format recipe, save recipe]` with empty
+  per-step tool grants, which meant the executor skipped every
+  step and nothing was actually done. Under D-029, the planner
+  still commits a structured plan up front, but every subsequent
+  step runs in the *same conversation* and can actually call
+  tools with full memory of what the plan intended.
+- **Three fresh system prompts per turn was expensive and
+  duplicative.** A ~13KB system prompt was sent once per phase.
+  Under D-029, LM Studio's KV cache actually reuses the prefix
+  because the system message is byte-stable at position 0 for the
+  entire request; every LLM call inside the same turn pays
+  prefill cost only for the new tail.
+- **State templates are editable prompts, not Go string literals.**
+  Adding a new phase-transition instruction is a template edit
+  and a rebuild, not a `fmt.Sprintf` in Go code.
+
+**Cost / risk.**
+
+- **Self-talk risk.** The synth now sees the full ReAct transcript
+  (executor's assistant messages + tool results). D-023's revert
+  was precisely because synth continued the transcript instead of
+  rendering. Mitigation: `prompts/state/synthesize.md` frames the
+  request as "the work is done; render, don't continue" and
+  `reply.commit` is forced via `tool_choice=required`. If self-talk
+  resurfaces in practice, fall back to synth-sees-only-plan (D-024's
+  approach) as a follow-up decision.
+- **Growing per-call payload.** Every LLM call sends the whole
+  growing conversation. Bounded by budgets: `PLAN_MAX_STEPS_TOTAL`
+  (default 12) × per-step tool calls × per-message tokens. Not a
+  concern at current scale.
+- **State template maintenance.** Prompts drift from what the
+  code does if either changes without the other. Same maintenance
+  burden as any prompt/code contract — spread across four files
+  (`system/*.md` blob + three state templates).
+
+**Invariants preserved.**
+
+- Native tool-use (D-001), sandboxed FS (D-003), serial worker
+  (D-005), per-user memory layout (D-013), prefix-cache contract
+  (D-017), workspace areas (D-019), strict tool-call output
+  (D-025), memory-via-tools (D-026), per-message turn (D-027),
+  static tools catalogue file (D-028) — all unchanged.
+- Plan announcement + in-place edits (D-024) — unchanged. The
+  `plan.RenderAnnouncement` / `plan.RenderStatus` behaviour and
+  the emoji lifecycle are preserved. A new `⏭️` marker was added
+  for steps skipped by `finished: true`.
+- Emoji reaction lifecycle: ✅/🧠/💭 progress, ❌ terminal at
+  deliver only.
+
+**Explicitly not built.**
+
+- **Synth sees a slim structured input.** D-024's approach. Kept
+  as a fallback if self-talk resurfaces.
+- **Streamed tool results back to the user.** Progress today is
+  the plan-message edits + reactions.
+- **Auto-summarising the conversation mid-turn.** Adds complexity
+  we don't need at 12-iteration budgets.
+- **Removing the planner phase entirely.** A pure ReAct loop
+  without an up-front plan was considered — it would remove
+  `plan.commit` and let the executor decide steps on the fly.
+  Deferred: the plan announcement is a strong UX signal for
+  multi-step tasks, and the plan gives synth a structured record
+  of intent.
+- **Populating `Conversation.SurfacedKnowledge`.** Stub kept on
+  the struct so the future web-search / file-search integration
+  has a place to write. Empty today.
+
+**Don't revert** without explaining how you'd (a) prevent the
+planner from committing plans with no actionable tool grants, and
+(b) recover the prefix-cache reuse that fell out of one system
+message at position 0.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

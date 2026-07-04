@@ -27,9 +27,9 @@ type Config struct {
 }
 
 // Agent is the serial worker that consumes envelopes from the bus and
-// drives each through plan → announce → execute → synth → deliver.
-// One goroutine processes envelopes sequentially. Each envelope is a
-// standalone turn — no session state carries between turns.
+// drives each through plan → announce → execute → synth → deliver as
+// one continuous conversation (D-029). One goroutine processes
+// envelopes sequentially; there is no cross-envelope state.
 type Agent struct {
 	bus     *integrations.Bus
 	ctxb    *ContextBuilder
@@ -81,23 +81,19 @@ func (a *Agent) Start(ctx context.Context) {
 	}()
 }
 
-// processTurn drives one envelope through:
+// processTurn drives one envelope through a single conversation:
 //
-//  1. Plan (Planner.Run): commits a typed Plan via the plan.commit
-//     tool with tool_choice=required. Protocol violations are retried
-//     once, then abort the turn.
-//  2. Announce: the plan is rendered as a Discord message with per-step
-//     emoji statuses and sent. The returned message ID is stored on
-//     the Turn so subsequent step transitions edit this same message.
-//     Skipped when the plan has no tool-bearing steps.
-//  3. Execute: for each step in order, RunStep does the per-step ReAct
-//     sub-loop. The model must call a real tool or the virtual
-//     step.finish tool; free-form text is a protocol violation.
-//     No-tools steps (respond-only, e.g. greetings) are no-ops.
-//  4. Synth: composes the user-facing reply via the reply.commit tool.
-//     Its input is the structured plan + step results + original user
-//     message — not the act loop's assistant messages.
-//  5. Deliver: send the reply to the integration.
+//  1. Seed the Conversation with the system message and append the
+//     rendered plan-state user message. Planner.Run calls plan.commit
+//     and returns a Plan on Turn.Conversation.
+//  2. Announce the plan as a Discord message (edited in place as
+//     steps run).
+//  3. For each step: append the rendered execute_step user message,
+//     run the ReAct sub-loop against the same Conversation. If any
+//     step.finish sets finished=true, remaining steps are skipped.
+//  4. Append the synthesize state message; Synthesizer.Finalize
+//     returns the rendered reply.
+//  5. Deliver: send the reply, resolve reactions, done.
 func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	ctx, cancel := context.WithTimeout(parent, a.cfg.TurnBudget)
 	defer cancel()
@@ -110,19 +106,19 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 		"integration", env.Integration, "channel", env.Channel,
 		"user", env.User, "user_name", env.UserName, "content", env.Content)
 
-	transcript := a.ctxb.ComposeTranscript(env)
+	systemPrompt := a.ctxb.ComposeSystem(env)
+	conv := NewConversation(systemPrompt)
 
 	turn := &Turn{
-		Ctx:        ctx,
-		Env:        env,
-		Transcript: transcript,
+		Ctx:          ctx,
+		Env:          env,
+		Conversation: conv,
 	}
 	a.react(turn, reactReceived)
 
 	// --- Phase 1: plan -------------------------------------------------
 	a.react(turn, reactPlanning)
-	plan, err := a.planner.Run(ctx, env, transcript)
-	if err != nil {
+	if err := a.planner.Run(ctx, conv, env.Content); err != nil {
 		slog.Error("agent: planner failed; aborting turn",
 			"err", err,
 			"integration", env.Integration, "channel", env.Channel, "user", env.User,
@@ -130,54 +126,65 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 		a.deliver(turn)
 		return
 	}
-	turn.Plan = plan
+	plan := conv.Plan
 	slog.Info("agent: plan committed",
-		"goal", plan.Goal, "steps", len(plan.Steps), "has_tools", plan.HasTools())
+		"goal", plan.Goal, "steps", len(plan.Steps))
 
 	// --- Phase 2: announce --------------------------------------------
-	// Send the plan message and capture its ID for in-place edits.
-	// Only announce when there's real work to show: a plan of pure
-	// respond-only steps (e.g. greetings) gives the user nothing useful
-	// in an announcement, so we skip it.
-	if plan.HasTools() {
-		if msg := plan.RenderAnnouncement(); msg != "" {
-			id, sendErr := a.replies.Send(ctx, env.Integration, env.Channel, env.Thread, msg)
-			if sendErr != nil {
-				slog.Warn("agent: announce failed; continuing without status updates",
-					"err", sendErr, "integration", env.Integration)
-			} else {
-				turn.PlanMessageID = id
-			}
+	if msg := plan.RenderAnnouncement(); msg != "" {
+		id, sendErr := a.replies.Send(ctx, env.Integration, env.Channel, env.Thread, msg)
+		if sendErr != nil {
+			slog.Warn("agent: announce failed; continuing without status updates",
+				"err", sendErr, "integration", env.Integration)
+		} else {
+			turn.PlanMessageID = id
 		}
 	}
 
 	// --- Phase 3: execute ---------------------------------------------
-	if plan.HasTools() {
-		a.react(turn, reactExecuting)
-	}
-	for !plan.Complete() {
+	a.react(turn, reactExecuting)
+	stepTotal := len(plan.Steps)
+	for i := range plan.Steps {
 		if ctx.Err() != nil {
 			slog.Warn("agent: turn ctx expired during execution")
 			break
 		}
-		step := plan.Next()
-		if step == nil {
-			break
-		}
+		step := &plan.Steps[i]
+		conv.StepCursor = i
 
-		// Mark the step running and push that state to the user.
 		step.Status = StepRunning
 		a.updatePlanMessage(turn)
 
 		slog.Debug("agent: step begin",
-			"id", step.ID, "intent", step.Intent, "tools", step.Tools)
-		ok := a.exec.RunStep(turn, step)
+			"id", step.ID, "intent", step.Intent, "num", i+1, "of", stepTotal)
+		ok := a.exec.RunStep(turn, i+1, stepTotal, step)
 		if ok {
-			slog.Info("agent: step done", "id", step.ID)
+			slog.Info("agent: step done", "id", step.ID, "finished", step.Finished)
 		} else {
 			slog.Warn("agent: step failed", "id", step.ID, "err", step.Error)
 		}
 		a.updatePlanMessage(turn)
+
+		if conv.Finished {
+			slog.Info("agent: LLM signalled finished=true; skipping remaining steps",
+				"at_step", step.ID, "remaining", stepTotal-(i+1))
+			for j := i + 1; j < stepTotal; j++ {
+				plan.Steps[j].Status = StepSkipped
+			}
+			a.updatePlanMessage(turn)
+			break
+		}
+	}
+
+	// Correctness surface: if the plan ran to the last step but no
+	// step ever set finished=true, log the mismatch. Not fatal — synth
+	// still runs.
+	if !conv.Finished && plan.Complete() && stepTotal > 0 {
+		lastStatus := plan.Steps[stepTotal-1].Status
+		if lastStatus == StepDone {
+			slog.Warn("agent: last step done without finished=true attestation",
+				"last_step", plan.Steps[stepTotal-1].ID)
+		}
 	}
 
 	// --- Phase 4: synthesise ------------------------------------------
@@ -204,7 +211,11 @@ func (a *Agent) updatePlanMessage(t *Turn) {
 	if t.PlanMessageID == "" {
 		return
 	}
-	msg := t.Plan.RenderStatus()
+	plan := t.Plan()
+	if plan == nil {
+		return
+	}
+	msg := plan.RenderStatus()
 	if msg == "" {
 		return
 	}

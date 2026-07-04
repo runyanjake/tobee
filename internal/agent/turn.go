@@ -4,22 +4,17 @@ import (
 	"context"
 
 	"github.com/runyanjake/tobee/internal/integrations"
-	"github.com/runyanjake/tobee/internal/llm"
 )
 
 // Turn carries the per-envelope state threaded through every phase of
-// a turn (plan → announce → execute → synth). Created once at the top
-// of processTurn, mutated in place by phases. There is no session
-// state — each envelope is a standalone turn.
+// a turn (plan → announce → execute → synth → deliver). Created once at
+// the top of processTurn, mutated in place by phases. There is no
+// session state — each envelope is a standalone turn — and the
+// conversation the LLM sees lives on Turn.Conversation.
 type Turn struct {
-	Ctx        context.Context
-	Env        integrations.Envelope
-	Transcript []llm.Message
-
-	// Plan is set by the planner phase. Non-nil once processTurn has
-	// entered the execute phase; a nil Plan means the planner errored
-	// out and the turn aborts before execution.
-	Plan *Plan
+	Ctx          context.Context
+	Env          integrations.Envelope
+	Conversation *Conversation
 
 	// PlanMessageID is the integration's message ID for the user-facing
 	// plan announcement. Set when the announcement is sent; used by
@@ -37,4 +32,13 @@ type Turn struct {
 	// turn deliver clears them; on failure it adds a failure marker and
 	// leaves the trail.
 	Reactions []string
+}
+
+// Plan returns the plan from the conversation once the planner phase
+// has committed it, or nil if it hasn't.
+func (t *Turn) Plan() *Plan {
+	if t == nil || t.Conversation == nil {
+		return nil
+	}
+	return t.Conversation.Plan
 }

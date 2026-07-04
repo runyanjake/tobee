@@ -5,51 +5,29 @@ import (
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/integrations"
-	"github.com/runyanjake/tobee/internal/llm"
 	"github.com/runyanjake/tobee/internal/scope"
 	"github.com/runyanjake/tobee/internal/workspace"
 )
 
-// ContextBuilder assembles the prompt fragments shared by every phase of
-// a turn. Every LLM call is a fresh, standalone turn — there is no
-// cross-turn conversation history and no session summary. The system
-// prompt is stable across turns (same bytes → prefix cache hit) and
-// carries: identity persona (b.Persona), phase-specific role prompt
-// (planner.md, synthesizer.md, or "" for the executor), workspace
-// areas, per-turn <context> tags, and the memory-tools primer. The
-// user's message is the only transcript sent alongside.
+// ContextBuilder builds the one system message that seeds every
+// per-request Conversation (D-029). The chat runs one continuous
+// conversation from planner through synth — the system prompt is sent
+// once at Messages[0], not re-sent per phase. Phase-specific
+// instructions ride in as user-role state templates (prompts/state/).
 type ContextBuilder struct {
 	Persona   string           // system prompt blob (prompts/system/*.md concatenated)
 	Workspace *workspace.Areas // configured host-file areas (nil = none)
 }
 
-// ComposeTranscript returns the message list sent alongside the system
-// prompt for a turn. Only the current user message — no ring buffer,
-// no prior turns. Context across tool calls within a turn is handled
-// by the executor's per-step transcript; context across turns lives in
-// memory files (fetched via memory.* tools), not in the chat.
-func (b *ContextBuilder) ComposeTranscript(env integrations.Envelope) []llm.Message {
-	return []llm.Message{{
-		Role:    llm.RoleUser,
-		Content: env.Content,
-	}}
-}
-
-// ComposeSystem renders the system message for one phase of a turn.
-// The identity persona (b.Persona) always leads so every phase — planner,
-// executor, synth — sees tobee's identity. Then the phase-specific role
-// prompt (planner.md, synthesizer.md, or "" for the executor which uses
-// the persona directly) follows.
-func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, phaseInstructions string) string {
+// ComposeSystem renders the system message once per request. Contains
+// the loaded system prompt, the workspace-areas list (if any), a small
+// per-turn context tag, and the memory-tools hint. This message sits
+// at Messages[0] for the whole request.
+func (b *ContextBuilder) ComposeSystem(env integrations.Envelope) string {
 	var sb strings.Builder
 
 	if b.Persona != "" {
 		sb.WriteString(b.Persona)
-		sb.WriteString("\n\n")
-	}
-
-	if phaseInstructions != "" {
-		sb.WriteString(phaseInstructions)
 		sb.WriteString("\n\n")
 	}
 
@@ -87,9 +65,7 @@ func (b *ContextBuilder) ComposeSystem(env integrations.Envelope, phaseInstructi
 }
 
 // memoryHint is the small block that names the memory paths and tools.
-// The model tool-calls memory.* to fetch actual content on demand; the
-// block itself carries no memory bytes and is byte-stable across turns
-// (only branches on whether a user is attached to the envelope).
+// The model tool-calls memory.* to fetch actual content on demand.
 func memoryHint(hasUser bool) string {
 	var sb strings.Builder
 	sb.WriteString("<memory>\n")

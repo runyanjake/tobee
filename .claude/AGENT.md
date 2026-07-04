@@ -2,78 +2,87 @@
 
 The agent loop lives in [internal/agent/](../internal/agent/). One worker
 goroutine consumes Envelopes from the bus and drives each through a
-linear sequence: **plan → announce → execute → synth → deliver**. The
-plan is a typed artifact; each step is a per-step ReAct sub-loop; the
-synthesiser composes the final user-facing reply from the structured
-plan + step results, not from the act loop's raw assistant messages.
-Every LLM-authored artifact — the plan, each step's outcome, the final
-reply — is committed via a required virtual tool call; free-form text
-is a protocol violation that fails the turn (or step). Stored memory
-is never pre-injected into the system prompt — the model fetches it
-via `memory.*` tools. **Each envelope is a standalone turn: no session
-ring buffer, no rolling summary, no cross-turn history** — anything
-that must survive is written to and read from `memory.*` files. See
-[DECISIONS.md](DECISIONS.md) D-001, D-024, D-025, D-026, and D-027.
+single continuous conversation: **plan → announce → execute → synth →
+deliver**. Under D-029 this is **one chat per request** — a
+`Conversation` object is created when the message arrives, gets a
+single system prompt at position 0, and every phase appends to the
+same `Messages` list. The planner, executor, and synth phases each
+inject a user-role state template rendered from `prompts/state/*.md`
+that carries the phase-specific instructions.
 
-## Per-turn state: `Turn`
+Every LLM-authored artifact — the plan, each step's outcome, the
+final reply — is committed via a required virtual tool call
+(`plan.commit`, `step.finish`, `reply.commit`); free-form text is a
+protocol violation that fails the turn (or step). Stored memory is
+never pre-injected into the system prompt — the model fetches it via
+`memory.*` tools. Each envelope is a standalone turn: no session ring
+buffer, no rolling summary, no cross-turn history — anything that
+must survive is written to and read from `memory.*` files. See
+[DECISIONS.md](DECISIONS.md) D-001, D-024, D-025, D-026, D-027,
+D-028, and D-029.
+
+## Per-turn state: `Turn` + `Conversation`
 
 `Turn` ([internal/agent/turn.go](../internal/agent/turn.go)) is the
-single value threaded through every phase. It carries only what one
-turn needs — no reference to persistent session state.
+outer envelope-scoped state. It holds a pointer to `Conversation`
+([internal/agent/conversation.go](../internal/agent/conversation.go)),
+which owns the growing message list all phases share.
 
-| Field          | Set by                                       |
-|----------------|----------------------------------------------|
-| Ctx            | processTurn (with turn timeout + scope)      |
-| Env            | processTurn (from the envelope)              |
-| Transcript     | ContextBuilder (just the current user msg); grown by Executor per step |
-| Plan           | Planner.Run (nil if planner protocol fails)  |
-| PlanMessageID  | processTurn (after announce, for edits)      |
-| Reply          | Synthesizer.Finalize (via reply.commit)      |
-| Reactions      | react (added on progress markers, cleared on success) |
+| Field                        | Set by                                       |
+|------------------------------|----------------------------------------------|
+| `Turn.Ctx`                   | processTurn (with turn timeout + scope)      |
+| `Turn.Env`                   | processTurn (from the envelope)              |
+| `Turn.Conversation`          | processTurn (seeded with the system message) |
+| `Turn.PlanMessageID`         | processTurn (after announce, for edits)     |
+| `Turn.Reply`                 | Synthesizer.Finalize (via reply.commit)      |
+| `Turn.Reactions`             | react (added on progress, cleared on success)|
+| `Conversation.Messages`      | seeded by NewConversation; appended by every phase |
+| `Conversation.Plan`          | Planner.Run                                   |
+| `Conversation.StepCursor`    | executor loop                                 |
+| `Conversation.Finished`      | step.finish with `finished: true` sets this  |
+| `Conversation.SurfacedKnowledge` | stub for future web/file search integration |
 
-## The phases
+## The phases (one conversation)
 
 1. **Plan** ([internal/agent/planner.go](../internal/agent/planner.go)).
-   LLM call with [prompts/planner.md](../prompts/planner.md) and the
-   `plan.commit` virtual tool. `tool_choice=required`. The model
-   commits an ordered `Plan` (goal + `Step`s, each with intent + tool
-   scope). If the model emits text instead of `plan.commit`, the
-   planner logs `PROTOCOL VIOLATION` at ERROR, appends a nudge to the
-   transcript, and retries once. A second violation aborts the turn
-   (no reply, ❌ reaction). `plan.commit` is advertised only on this
-   call; never registered on `tools.Registry`. See D-025.
+   The rendered `prompts/state/plan.md` is appended as a user message
+   to the fresh conversation, then the LLM call advertises the
+   `plan.commit` virtual tool with `tool_choice=required`. The model
+   commits an ordered `Plan` (goal + `Step`s with intent only —
+   D-029 removed per-step `tools` and `memory_paths`). Protocol
+   violations are retried once with a nudge; a second violation aborts
+   the turn (❌ reaction). See D-025.
 
 2. **Announce.** The plan is rendered with per-step emoji statuses
-   (⏳/🔄/✅/❌) and sent via `Replies.Send`. The platform message ID
-   is captured on `Turn.PlanMessageID`. A respond-only plan (no
-   tool-bearing steps, e.g. a greeting) skips announcement — there's
-   nothing useful to show.
+   (⏳/🔄/✅/❌/⏭️) and sent via `Replies.Send`. The platform message
+   ID is captured on `Turn.PlanMessageID` and edited in place as
+   steps run.
 
 3. **Execute** ([internal/agent/executor.go](../internal/agent/executor.go)).
-   For each step in order: mark step running, edit the plan message
-   via `Replies.Edit`, run `Executor.RunStep` (per-step ReAct sub-loop
-   bounded by `PLAN_MAX_STEPS_PER_STEP`, default 4, and turn-total
-   `PLAN_MAX_STEPS_TOTAL`, default 12), then edit the plan message
-   again with done/failed status. Each iteration runs with
-   `tool_choice=required` and advertises the planner-granted tools
-   plus the virtual `step.finish({result})` tool. `step.finish` is
-   the only legal termination for a tool-bearing step; free-form text
-   is a protocol violation that costs one retry and then fails the
-   step. A step with no declared Tools is respond-only (e.g.
-   greeting): no LLM call, empty Result, marked done immediately —
-   synth composes the reply from plan + persona. See D-025.
+   For each step: append the rendered `prompts/state/execute_step.md`
+   as a user message to the *same conversation*, then run the ReAct
+   sub-loop against `Conversation.Messages`. Each iteration advertises
+   the full `tools.Registry` plus the virtual `step.finish({result,
+   finished})` tool with `tool_choice=required`. `step.finish` is the
+   only legal termination; free-form text is a protocol violation
+   (one retry, then failed). When `finished: true` is set on any
+   `step.finish` call, `Conversation.Finished` flips true and the
+   loop skips remaining steps (marked ⏭️). Bounds:
+   `PLAN_MAX_STEPS_PER_STEP` (default 4), `PLAN_MAX_STEPS_TOTAL`
+   (default 12). See D-025 / D-029.
 
 4. **Synthesise** ([internal/agent/synthesizer.go](../internal/agent/synthesizer.go)).
-   LLM call with [prompts/synthesizer.md](../prompts/synthesizer.md)
-   advertising only the `reply.commit({spoken, artifacts})` virtual
-   tool. `tool_choice=required`. The Discord message is composed in
-   Go by `renderReply` — `spoken` on top, each artifact as a
-   triple-fenced block with an optional `lang` hint. Prose fences
-   are never model-authored. Input is `persona + plan-as-typed-artifact
-   + original user message`; the act loop's assistant messages are
-   deliberately omitted (fix for the "self-talk" failure mode). One
-   retry on protocol violation, then the turn delivers an empty reply
-   (❌ reaction). See D-025.
+   The rendered `prompts/state/synthesize.md` is appended as a user
+   message, then the LLM call advertises only `reply.commit({spoken,
+   artifacts})` with `tool_choice=required`. Because this runs on the
+   same conversation, the synth *does* see the executor's assistant
+   messages and tool results — the "self-talk" failure mode is
+   mitigated by the strict `state/synthesize.md` framing ("do not
+   continue the transcript, do not summarise, do not ask a
+   follow-up") plus forced `reply.commit`. `renderReply` composes the
+   Discord message in Go: `spoken` on top, each artifact as a
+   triple-fenced block with an optional `lang` hint. One retry on
+   protocol violation, then the turn delivers empty (❌).
 
 5. **Deliver.** Send the reply via `Replies.Send`. Terminal reaction
    applied here and nowhere else — success clears the progress trail,
@@ -99,11 +108,12 @@ If the editor is missing or fails, status updates degrade silently
   `tool_calls`; we never parse the text body for a JSON envelope.
   Load-bearing.
 
-- **Plan is a typed artifact.** Goal + ordered steps + per-step result.
-  Used both for execution control (executor scopes tools per step) and
-  for user comms (announcement + edits) and for synthesis (single
-  structured input). The model's free-text output during the act loop
-  is scratchpad — it never reaches the synthesiser.
+- **Plan is a typed artifact.** Goal + ordered steps + per-step
+  result. Used for execution control (executor iterates through
+  steps), user comms (announcement + edits), and prompt data (state
+  templates render `{{.Plan}}` and `{{.Step}}`). D-029 removed the
+  per-step `tools` scoping — every step advertises every registered
+  tool.
 
 - **Strict tool-call protocol at every phase.** `plan.commit`,
   `step.finish`, and `reply.commit` are the only legal LLM outputs
@@ -112,11 +122,14 @@ If the editor is missing or fails, status updates degrade silently
   nudge, then fails the turn (or step). No text-wrap fallback, no
   free-form terminal text, no model-authored fences. See D-025.
 
-- **Synthesiser sees only structured input.** Persona + plan +
-  original user message. No act-loop assistant messages. This
-  eliminates the "self-talk" failure mode where the synth saw a
-  conversational tail and continued it instead of rendering a final
-  reply.
+- **Synthesiser sees the full conversation.** Under D-029 the synth
+  runs on the same growing `Conversation` as the executor. The
+  "self-talk" failure mode (D-023) is instead mitigated by the strict
+  `prompts/state/synthesize.md` framing plus forced `reply.commit`
+  with `tool_choice=required`. If self-talk resurfaces in practice,
+  the fallback is to build synth's messages as a slim `[system,
+  original_user, step_results]` set — same shape as D-024. Not
+  implemented today.
 
 - **Budgets.** `Config.TurnBudget` (default 2 min, wall-clock) is the
   outer ceiling. `Config.MaxReplans` (default 3) caps replan calls.
@@ -133,37 +146,37 @@ If the editor is missing or fails, status updates degrade silently
 
 ## Context building
 
-[internal/agent/context.go](../internal/agent/context.go) composes the
-system message and the sole outgoing user message per turn. Because
-there is no cross-turn history, the shape is small and stable.
+[internal/agent/context.go](../internal/agent/context.go) composes
+**one** system message per request. It sits at `Conversation.Messages[0]`
+and is not resent — the same conversation grows through every phase.
 
-**System message** (sections, in fixed order):
+**System message** (built once):
 
 | # | Section              | Source                                                  | Always shown?      |
 |---|----------------------|---------------------------------------------------------|--------------------|
 | 1 | System prompt        | `prompts/system/*.md` (concatenated: identity + tone + behaviour + output + safety + tools) | Yes |
-| 2 | Phase instructions   | `planner.md` / `synthesizer.md` / "" for the executor   | Per phase          |
-| 3 | Workspace areas      | boot-time `workspace.Areas` config                      | If configured      |
-| 4 | Current context      | integration / channel / thread / user tags              | Yes                |
-| 5 | Memory hint          | fixed `<memory>` block naming paths + `memory.*` tools  | Yes                |
+| 2 | Workspace areas      | boot-time `workspace.Areas` config                      | If configured      |
+| 3 | Current context      | integration / channel / thread / user tags              | Yes                |
+| 4 | Memory hint          | fixed `<memory>` block naming paths + `memory.*` tools  | Yes                |
 
-**Transcript** (`ComposeTranscript`): a single `user`-role message
-carrying `env.Content`. That's the entire outgoing conversation
-alongside the system message — no ring buffer, no prior turns.
+**Phase-transition messages** are user-role, rendered from
+`prompts/state/*.md` at the moment they're appended:
 
-**System prompt in every phase.** Previous versions passed the phase
-prompt as if it were the persona, so the planner and synth phases
-saw no `prompts/system/*.md` content at all. `ComposeSystem` now
-always emits `b.Persona` (the concatenated `prompts/system/*.md`
-blob) first, then the phase-specific block.
+| Template               | Rendered by     | Data available in template |
+|------------------------|-----------------|-----------------------------|
+| `state/plan.md`        | Planner.Run     | `.UserInput`                |
+| `state/execute_step.md`| Executor.RunStep| `.Step`, `.StepNumber`, `.StepTotal`, `.Plan`, `.AvailableTools` |
+| `state/synthesize.md`  | Synthesizer     | `.Plan`                     |
 
-**Tool catalogue is a static file, not a runtime render.** Under
-D-028, the `<tools>` catalogue the planner reads to pick step tools
-lives in `prompts/system/05-tools.md` alongside the persona
-fragments. There is no `renderToolCatalogue` walking
-`tools.Registry` at request time — one file, edited by hand when
-tools are added or removed. The `tools=[…]` API parameter is still
-what actually enforces which tools each LLM call can invoke.
+Templates use Go `text/template`. Register a `FuncMap` in
+`internal/agent/state.go` if you need extra template functions
+(`join` is provided; add more as needed).
+
+**Tool catalogue is a static file.** Under D-028, the `<tools>`
+catalogue lives in `prompts/system/05-tools.md`. There is no
+`renderToolCatalogue` walking `tools.Registry` at request time. The
+`tools=[…]` API parameter is still what enforces which tools each
+LLM call can invoke.
 
 **Memory is not pre-injected.** As of D-025, stored knowledge —
 `shared/INDEX.md`, the user's `INDEX.md`, `user.md`, `preferences.md`,
@@ -194,14 +207,19 @@ these sections without re-reading D-017.
 
 ## Startup prompt loading
 
-`cmd/tobee/main.go` reads `PROMPTS_DIR/system/*.md`, `planner.md`, and
-`synthesizer.md` at boot via `readSystemPrompt` and `readFile`.
-`logPromptsLoaded` emits an INFO line with the byte counts
-(`system_chars`, `planner_chars`, `synth_chars`) and a loud ERROR
-(`prompts: MISSING — agent will misbehave`) when any of them comes
-back empty — a container that ships without its prompts is the
-running binary's most likely first-day failure mode, and the loud
-log is what makes it obvious.
+`cmd/tobee/main.go` reads at boot:
+
+- `PROMPTS_DIR/system/*.md` via `readSystemPrompt` — concatenated into
+  the system-message blob.
+- `PROMPTS_DIR/state/*.md` via `agent.LoadStateTemplates` — parsed as
+  `text/template` and cached by base name.
+
+`logPromptsLoaded` emits an INFO line with `system_chars` and the
+loaded template names, and a loud ERROR (`prompts: MISSING`) when the
+system prompt is empty or any of the required state templates
+(`plan`, `execute_step`, `synthesize`) is missing. A container that
+ships without prompts silently misbehaves otherwise; the loud log is
+what makes it obvious.
 
 ## Scheduler
 

@@ -63,22 +63,26 @@ tobee/
 │  └─ tobee/
 │     └─ main.go                        # wiring only
 ├─ prompts/
-│  ├─ system/                           # system prompt fragments, concatenated in order
+│  ├─ system/                           # system prompt fragments, concatenated (D-028)
 │  │  ├─ 00-identity.md
 │  │  ├─ 01-tone.md
 │  │  ├─ 02-behaviour.md
 │  │  ├─ 03-output.md
 │  │  ├─ 04-safety.md
-│  │  └─ 05-tools.md                    # static tool catalogue (D-028)
-│  ├─ planner.md                        # planner phase role prompt
-│  └─ synthesizer.md                    # synth phase role prompt
+│  │  └─ 05-tools.md                    # static tool catalogue
+│  └─ state/                            # phase-transition user-message templates (D-029)
+│     ├─ plan.md                        # rendered before planner LLM call
+│     ├─ execute_step.md                # rendered before each executor step
+│     └─ synthesize.md                  # rendered before synth LLM call
 ├─ internal/
 │  ├─ abilities/
 │  │  └─ reporter.go                    # Reporter contract + Registry (cross-subsystem introspection)
 │  ├─ agent/
-│  │  ├─ loop.go                        # serial worker; drives a turn, attaches scope to ctx
-│  │  ├─ context.go                     # ContextBuilder (identity persona + memory hint + turn context)
-│  │  ├─ planner.go, executor.go, synthesizer.go  # phases (D-024, D-025)
+│  │  ├─ loop.go                        # serial worker; drives one Conversation per turn (D-029)
+│  │  ├─ conversation.go                # Conversation struct — growing Messages + Plan + SurfacedKnowledge
+│  │  ├─ context.go                     # ContextBuilder (builds the single system message per request)
+│  │  ├─ state.go                       # StateTemplates loader/renderer (text/template)
+│  │  ├─ planner.go, executor.go, synthesizer.go  # phases share one Conversation
 │  │  └─ reply.go                       # integration-name → ReplySender / MessageEditor / Reactor table
 │  ├─ scope/
 │  │  └─ scope.go                       # UserScope, ctx With/From, sanitized Key/Dir
@@ -132,6 +136,7 @@ What's built (in order it was added):
 9. `workspace.*` tool pack over configured host-file areas (D-019).
 10. Strict tool-call protocol at every phase (D-025): plan.commit / step.finish / reply.commit.
 11. Per-message turns — sessions and summariser retired (D-027).
+12. Single Conversation per request; state-template phase transitions (D-029).
 
 What's not built, and why — see [DECISIONS.md](DECISIONS.md):
 

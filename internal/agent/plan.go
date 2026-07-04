@@ -14,24 +14,25 @@ const (
 	StepRunning StepStatus = "running"
 	StepDone    StepStatus = "done"
 	StepFailed  StepStatus = "failed"
+	StepSkipped StepStatus = "skipped" // set when an earlier step's finished=true short-circuits
 )
 
 // Step is one unit of work the planner committed to. Intent is the
-// outcome the executor must produce. Tools is the strictly-enforced
-// set of tool names available on this step (planner-chosen).
-// MemoryPaths is an informational hint at specific files the planner
-// believes are relevant. Empty Tools is the respond-only case (e.g.
-// greeting): the executor skips the LLM call and lets the synthesizer
-// compose the reply from the plan alone.
+// outcome the executor must produce (state the result, not the
+// procedure). All registered tools are available on every step — plans
+// no longer scope tools per step (D-029).
 type Step struct {
-	ID          string     `json:"id"`
-	Intent      string     `json:"intent"`
-	Tools       []string   `json:"tools,omitempty"`
-	MemoryPaths []string   `json:"memory_paths,omitempty"`
-	Status      StepStatus `json:"status"`
-	Result      string     `json:"result,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	Attempts    int        `json:"attempts,omitempty"`
+	ID       string     `json:"id"`
+	Intent   string     `json:"intent"`
+	Status   StepStatus `json:"status"`
+	Result   string     `json:"result,omitempty"`
+	Error    string     `json:"error,omitempty"`
+	Attempts int        `json:"attempts,omitempty"`
+	// Finished records the `finished` boolean the LLM passed to
+	// step.finish. When true, the executor short-circuits any
+	// remaining steps and jumps to synth — the LLM is attesting that
+	// the whole user request is satisfied by what has run so far.
+	Finished bool `json:"finished,omitempty"`
 }
 
 // Plan is the turn-scoped artifact the planner produces. Used both
@@ -70,27 +71,12 @@ func (p *Plan) Complete() bool {
 	return true
 }
 
-// HasTools reports whether any step in the plan has a non-empty Tools
-// list. A plan with no tool-bearing steps is the respond-only case
-// (e.g. greeting): the loop skips announce + execute and goes straight
-// to synth.
-func (p *Plan) HasTools() bool {
-	if p == nil {
-		return false
-	}
-	for _, s := range p.Steps {
-		if len(s.Tools) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 const (
 	statusEmojiPending = "⏳"
 	statusEmojiRunning = "🔄"
 	statusEmojiDone    = "✅"
 	statusEmojiFailed  = "❌"
+	statusEmojiSkipped = "⏭️"
 )
 
 // emoji returns the unicode marker for a step's current status.
@@ -102,6 +88,8 @@ func (s *Step) emoji() string {
 		return statusEmojiDone
 	case StepFailed:
 		return statusEmojiFailed
+	case StepSkipped:
+		return statusEmojiSkipped
 	default:
 		return statusEmojiPending
 	}
@@ -139,10 +127,9 @@ func (p *Plan) renderUserMessage() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// Render returns the <plan> block injected into LLM prompts where the
-// plan is part of the context (executor's per-step system prompt,
-// synthesizer's input). The structured JSON form so the model can
-// reason over goal, ordering, statuses, and per-step results.
+// Render returns the <plan> block for injection into LLM prompts where
+// the plan is part of the context. The structured JSON form so the
+// model can reason over goal, ordering, statuses, and per-step results.
 func (p *Plan) Render() string {
 	if p == nil || len(p.Steps) == 0 {
 		return ""

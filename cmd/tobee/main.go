@@ -96,13 +96,18 @@ func main() {
 	// schedule.* tools are registered after the JobManager is built below.
 
 	// --- Prompts ---------------------------------------------------------
-	// prompts/system/*.md is the system prompt: identity + tone +
-	// behaviour + output + safety + tools catalogue. Loaded once at
-	// boot, emitted at the top of every phase's system message.
+	// prompts/system/*.md is the single system prompt (identity + tone +
+	// behaviour + output + safety + tools catalogue). Loaded once, sits
+	// at Messages[0] of every per-request Conversation (D-029).
+	// prompts/state/*.md are the phase-transition user-message templates
+	// rendered on the fly with the current conversation state.
 	systemPrompt := readSystemPrompt(promptsDir + "/system")
-	plannerPrompt := readFile(promptsDir+"/planner.md", "")
-	synthPrompt := readFile(promptsDir+"/synthesizer.md", "")
-	logPromptsLoaded(promptsDir, systemPrompt, plannerPrompt, synthPrompt)
+	states, err := agent.LoadStateTemplates(promptsDir + "/state")
+	if err != nil {
+		slog.Error("prompts: state templates failed", "err", err)
+		os.Exit(1)
+	}
+	logPromptsLoaded(promptsDir, systemPrompt, states.Names())
 
 	// --- Context builder + reply table ------------------------------------
 	ctxb := &agent.ContextBuilder{
@@ -112,9 +117,9 @@ func main() {
 	replies := agent.NewReplies()
 
 	// --- Planner / executor / synthesizer -------------------------------
-	planner := agent.NewPlanner(client, ctxb, plannerPrompt)
-	executor := agent.NewExecutor(client, registry, ctxb, planMaxStepsPerStep, planMaxStepsTotal)
-	synthesizer := agent.NewSynthesizer(client, ctxb, synthPrompt)
+	planner := agent.NewPlanner(client, states)
+	executor := agent.NewExecutor(client, registry, states, planMaxStepsPerStep, planMaxStepsTotal)
+	synthesizer := agent.NewSynthesizer(client, states)
 
 	// --- Event bus + agent loop ------------------------------------------
 	bus := integrations.NewBus(64)
@@ -263,21 +268,24 @@ func readSystemPrompt(dir string) string {
 // agent depends on came back empty. When a container is misconfigured
 // and prompts don't mount, this is the first sign — the running
 // binary otherwise looks healthy while the LLM sees no instructions.
-func logPromptsLoaded(dir, system, planner, synth string) {
+func logPromptsLoaded(dir, system string, stateNames []string) {
 	slog.Info("prompts: loaded",
 		"prompts_dir", dir,
 		"system_chars", len(system),
-		"planner_chars", len(planner),
-		"synth_chars", len(synth))
+		"state_templates", strings.Join(stateNames, ", "))
 	missing := []string{}
 	if len(system) == 0 {
 		missing = append(missing, "system/*.md")
 	}
-	if len(planner) == 0 {
-		missing = append(missing, "planner.md")
+	required := []string{"plan", "execute_step", "synthesize"}
+	have := make(map[string]bool, len(stateNames))
+	for _, n := range stateNames {
+		have[n] = true
 	}
-	if len(synth) == 0 {
-		missing = append(missing, "synthesizer.md")
+	for _, r := range required {
+		if !have[r] {
+			missing = append(missing, "state/"+r+".md")
+		}
 	}
 	if len(missing) > 0 {
 		slog.Error("prompts: MISSING — agent will misbehave (check PROMPTS_DIR mount)",
