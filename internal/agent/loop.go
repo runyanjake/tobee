@@ -190,12 +190,24 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	// --- Phase 4: synthesise ------------------------------------------
 	if ctx.Err() == nil {
 		out, serr := a.synth.Finalize(turn)
-		if serr != nil {
+		switch {
+		case serr == nil:
+			turn.Reply = strings.TrimSpace(out)
+
+		// A tool already rendered the answer, so a dead synthesiser is
+		// no reason to send the user nothing. The prose lead-in is the
+		// only thing lost. Code owns these blocks (D-030), which is
+		// exactly what makes delivering them here safe.
+		case len(turn.Verbatim) > 0:
+			turn.Reply = strings.TrimSpace(renderReply(replyCommitArgs{}, turn.Verbatim))
+			slog.Warn("agent: synthesizer failed; delivering verbatim tool output instead",
+				"err", serr, "blocks", len(turn.Verbatim),
+				"integration", env.Integration, "channel", env.Channel, "user", env.User)
+
+		default:
 			slog.Error("agent: synthesizer failed; aborting reply",
 				"err", serr,
 				"integration", env.Integration, "channel", env.Channel, "user", env.User)
-		} else {
-			turn.Reply = strings.TrimSpace(out)
 		}
 	}
 

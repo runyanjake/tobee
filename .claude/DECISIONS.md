@@ -1850,6 +1850,84 @@ avoids re-introducing an upfront classifier.
 
 ---
 
+## D-031 — Salvage text-encoded tool calls; never lose a rendered answer
+
+**Status:** Accepted · **Date:** 2026-07-19 · Amends D-025 (strict
+tool-call protocol) and extends D-030.
+
+**Decision.** Two failure-path changes, no change to the happy path:
+
+1. When a phase gets `finish="stop"` with zero tool calls, and the
+   message text is *exactly* one `name({…})` call naming an expected
+   tool with a parseable JSON object argument, treat it as that tool
+   call. Strictly anchored: trailing prose, wrong case, a non-object
+   argument, or an unlisted name all fail to parse.
+2. When the synthesiser fails outright but tools produced verbatim
+   output, deliver that output instead of sending nothing. When a step
+   fails protocol but produced verbatim output, mark it done — the
+   outcome exists.
+
+**Why.** On 2026-07-19 a status turn produced *no reply at all*. The
+model called `status.summary` correctly, the output was captured, and
+then it stopped using the tool-call channel — emitting, as message
+text, with `tool_choice="required"` set:
+
+    reply.commit({"spoken":"In the last hour, I've seen 2 new messages on Discord.","artifacts":[]})
+
+Twice, on both synth attempts. It knew the tool and the arguments; only
+the transport was wrong. The turn ended `chars=0` with a ❌ in the plan
+message, while the rendered answer sat unused in `Turn.Verbatim`.
+
+This is D-023's finding recurring at a later phase: `tool_choice` is
+advisory to this model, and degrades as the conversation grows. D-025
+responded to that class of problem by tightening the protocol. Tighter
+did not help — the model cannot comply, so strictness converts a
+recoverable turn into a dead one. Accepting a well-formed call that
+arrived on the wrong channel is a transport fix, not the free-form
+fallback D-025 forbade.
+
+**Why the parser is anchored.** The same turn also produced:
+
+    Got it. Discord has been active recently, seeing 2 inbound messages
+    in the last hour. … Step.finish called with the result: "Discord has
+    been active, with 2 new messages in the past hour."
+
+That must not parse, and does not. It is the model *narrating* a call
+it never made, with a result it invented — salvaging it would launder
+a hallucination into a committed tool result. Prose that describes a
+call is not a call. The test suite pins both strings from this log:
+the first must salvage, the second must not.
+
+**Why the delivery fallback.** D-030 moved verbatim blocks into code so
+the model could not reword them. The same ownership means a dead
+synthesiser is no reason to send the user nothing — the only thing lost
+is a prose lead-in. Sending the block is strictly better than sending
+an empty message.
+
+**Cost.**
+
+- A salvage attempt on every zero-tool-call response — string work, no
+  extra LLM call. It runs before the violation nudge, so a successful
+  salvage also saves the retry round-trip.
+- `internal/agent/salvage.go` plus tests.
+- A step can now end `done` without `step.finish`, so `step.Result`
+  is populated from the verbatim block instead of a model sentence.
+
+**Explicitly not built.**
+
+- **Loose extraction from prose.** Regex-hunting a JSON blob inside a
+  sentence would have salvaged the fabricated `Step.finish` above.
+  Anchored-or-nothing is the whole safety property.
+- **Dropping `tool_choice="required"`.** It costs nothing and works on
+  better models. Keep sending it; just stop depending on it.
+- **A smaller/other model.** The real fix may be a model that honours
+  the tool-call contract. This keeps the current one usable meanwhile.
+
+**Don't revert** without explaining how a turn survives a model that
+stops emitting native tool calls mid-conversation.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.

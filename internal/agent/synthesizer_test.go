@@ -73,6 +73,20 @@ func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 	}
 }
 
+// When the synthesiser dies, the loop falls back to whatever the tools
+// already rendered. On 2026-07-19 that path did not exist and the user
+// received an empty message despite status.summary having succeeded.
+func TestRenderReplyVerbatimOnlyIsDeliverable(t *testing.T) {
+	const body = "Discord is connected and saw 2 inbound messages in the window."
+	got := renderReply(replyCommitArgs{}, []VerbatimBlock{{Tool: "status.summary", Body: body}})
+	if got != body {
+		t.Fatalf("renderReply() = %q, want %q", got, body)
+	}
+	if got == "" {
+		t.Fatal("empty reply would be dropped by deliver")
+	}
+}
+
 func TestAddVerbatim(t *testing.T) {
 	var turn Turn
 
