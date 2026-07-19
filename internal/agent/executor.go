@@ -70,10 +70,6 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 	step.Status = StepRunning
 	step.Attempts++
 
-	// Watched so a step that rendered the user's answer isn't reported
-	// as failed just because the model then fumbled step.finish.
-	verbatimAtStart := len(t.Verbatim)
-
 	toolSpecs := e.toolSpecs()
 	userMsg, err := e.states.RenderPhase("execute_step", StateData{
 		Step:           step,
@@ -134,16 +130,7 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 		}
 		t.Conversation.Append(asst)
 
-		calls := resp.ToolCalls
-		if len(calls) == 0 && resp.Text != "" {
-			if tc, ok := salvageToolCall(resp.Text, e.salvageable()); ok {
-				slog.Warn("agent: executor: salvaged text-encoded tool call",
-					"step", step.ID, "sub", sub, "tool", tc.Function.Name)
-				calls = []llm.ToolCall{tc}
-			}
-		}
-
-		if len(calls) == 0 {
+		if len(resp.ToolCalls) == 0 {
 			slog.Error("agent: executor: PROTOCOL VIOLATION",
 				"step", step.ID, "sub", sub, "violation", violations,
 				"expected_tool_or", stepFinishTool,
@@ -151,40 +138,23 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 				"text_chars", len(resp.Text),
 				"text_preview", oneLine(resp.Text))
 			if violations >= 1 {
-				return e.giveUp(t, step, verbatimAtStart,
-					"protocol violation: model emitted text without a tool call across retries")
+				step.Error = "protocol violation: model emitted text without a tool call across retries"
+				step.Status = StepFailed
+				return false
 			}
 			violations++
 			t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: executorNudge})
 			continue
 		}
 
-		if e.dispatchCalls(t, step, calls) {
+		if e.dispatchCalls(t, step, resp.ToolCalls) {
 			return step.Status == StepDone
 		}
 	}
 
-	return e.giveUp(t, step, verbatimAtStart,
-		fmt.Sprintf("step did not call %s within %d iterations", stepFinishTool, e.maxPerStep))
-}
-
-// giveUp ends a step the model never closed properly. When the step
-// nonetheless produced verbatim output, the outcome exists and the
-// delivery code will send it — report the step done rather than
-// failing it, so the plan announcement doesn't show ❌ next to work
-// the user is about to read the results of.
-func (e *Executor) giveUp(t *Turn, step *Step, verbatimAtStart int, reason string) bool {
-	if len(t.Verbatim) > verbatimAtStart {
-		produced := t.Verbatim[verbatimAtStart:]
-		step.Result = produced[len(produced)-1].Body
-		step.Status = StepDone
-		slog.Warn("agent: executor: step closed on verbatim output despite protocol failure",
-			"step", step.ID, "reason", reason, "blocks", len(produced))
-		return true
-	}
 	step.Status = StepFailed
 	if step.Error == "" {
-		step.Error = reason
+		step.Error = fmt.Sprintf("step did not call %s within %d iterations", stepFinishTool, e.maxPerStep)
 	}
 	return false
 }
@@ -254,13 +224,6 @@ func (e *Executor) toolSpecs() []llm.ToolSpec {
 		InputSchema: stepFinishSchema,
 	})
 	return out
-}
-
-// salvageable is the set of tool names a text-encoded call may name:
-// every registered tool plus step.finish. Restricting the set means a
-// model narrating about some other system cannot conjure a call.
-func (e *Executor) salvageable() []string {
-	return append(e.toolNames(), stepFinishTool)
 }
 
 // toolNames returns just the names of the registered tools, for the

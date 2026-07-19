@@ -56,11 +56,17 @@ func main() {
 	}
 
 	// --- LLM client -------------------------------------------------------
+	aiTemp, err := strconv.ParseFloat(envOr("AI_TEMPERATURE", fmt.Sprint(llm.DefaultTemperature)), 64)
+	if err != nil {
+		slog.Error("AI_TEMPERATURE: invalid float", "err", err)
+		os.Exit(1)
+	}
 	client := llm.NewClient(aiURL, aiModel, llm.Options{
-		Temperature: 0.7,
+		Temperature: &aiTemp,
 		MaxTokens:   2048,
 		Timeout:     10 * time.Minute,
 	})
+	slog.Info("llm: configured", "url", aiURL, "model", aiModel, "temperature", aiTemp)
 
 	// --- Memory filesystem ------------------------------------------------
 	memFS, err := sandboxfs.NewFS(dataDir+"/memory", 64*1024)

@@ -104,16 +104,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		}
 		t.Conversation.Append(asst)
 
-		calls := resp.ToolCalls
-		if len(calls) == 0 && resp.Text != "" {
-			if tc, ok := salvageToolCall(resp.Text, []string{replyCommitTool}); ok {
-				slog.Warn("agent: synthesizer: salvaged text-encoded tool call",
-					"attempt", attempt, "tool", tc.Function.Name)
-				calls = []llm.ToolCall{tc}
-			}
-		}
-
-		for _, tc := range calls {
+		for _, tc := range resp.ToolCalls {
 			if tc.Function.Name != replyCommitTool {
 				continue
 			}

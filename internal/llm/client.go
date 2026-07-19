@@ -21,9 +21,20 @@ type Client struct {
 	http        *http.Client
 }
 
-// Options configures a Client. Zero values mean "use sensible defaults".
+// DefaultTemperature is low because every phase of a turn is a
+// protocol-strict tool call, not prose. Sampling at 0.7 is what a chat
+// UI wants; here each sampled token is a chance to start a sentence
+// where a tool call belonged. Tobee's voice comes from the persona,
+// not from decoder noise.
+const DefaultTemperature = 0.1
+
+// Options configures a Client. Zero values mean "use sensible defaults",
+// except Temperature — see the field.
 type Options struct {
-	Temperature float64
+	// Temperature is a pointer so that 0 is expressible. Greedy
+	// decoding is the right setting for a tool-calling loop and was
+	// previously unreachable: a zero value silently became 0.7.
+	Temperature *float64
 	MaxTokens   int
 	Timeout     time.Duration
 }
@@ -32,12 +43,12 @@ func NewClient(baseURL, model string, opts Options) *Client {
 	c := &Client{
 		baseURL:     baseURL,
 		model:       model,
-		temperature: opts.Temperature,
+		temperature: DefaultTemperature,
 		maxTokens:   opts.MaxTokens,
 		http:        &http.Client{Timeout: opts.Timeout},
 	}
-	if c.temperature == 0 {
-		c.temperature = 0.7
+	if opts.Temperature != nil {
+		c.temperature = *opts.Temperature
 	}
 	if c.maxTokens == 0 {
 		c.maxTokens = 2048
