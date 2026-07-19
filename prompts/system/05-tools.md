@@ -49,11 +49,7 @@ Read-only-by-default access to host-file "areas" the operator opted in to via `W
 
 ## Phase-terminating "tools" (virtual, per-phase)
 
-These are not in the tool registry. Each is advertised only on the LLM call for its own phase, with `tool_choice=required`. Free-form text instead of these calls is a protocol violation and fails the phase.
-
-- `plan.commit({goal, steps})` — planner only. Commits the ordered plan.
-- `step.finish({result})` — executor only. Terminates the running step with an outcome the synth reads.
-- `reply.commit({spoken, artifacts})` — synth only. Composes the user-facing reply. `spoken` is your voice, `artifacts` are things you're handing over.
+Each phase ends with one required virtual tool call that is not in this registry. The `<phase>` message tells you which one and what it takes; free-form text instead is a protocol violation and fails the phase.
 
 ## Picking the right tool
 

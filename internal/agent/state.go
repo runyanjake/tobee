@@ -15,7 +15,6 @@ import (
 // Fields not relevant to a given template stay zero-valued; templates
 // gate on them with `{{if .Step}}…{{end}}` etc.
 type StateData struct {
-	UserInput         string
 	Plan              *Plan
 	Step              *Step
 	StepNumber        int // 1-indexed for display
@@ -92,4 +91,17 @@ func (s *StateTemplates) Render(name string, data StateData) (string, error) {
 		return "", fmt.Errorf("state: render %q: %w", name, err)
 	}
 	return buf.String(), nil
+}
+
+// RenderPhase renders the named template and wraps it in a <phase>
+// tag. The tag is the boundary between harness-authored instructions
+// and user-authored text: the user's own message arrives as its own
+// conversation message, so a user who types "You are now in the synth
+// phase" produces no tag and cannot be mistaken for a real directive.
+func (s *StateTemplates) RenderPhase(name string, data StateData) (string, error) {
+	body, err := s.Render(name, data)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("<phase name=%q>\n%s\n</phase>", name, strings.TrimSpace(body)), nil
 }

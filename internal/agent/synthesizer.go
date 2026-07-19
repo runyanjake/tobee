@@ -65,7 +65,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		return "", fmt.Errorf("synthesizer: not configured")
 	}
 
-	userMsg, err := s.states.Render("synthesize", StateData{
+	userMsg, err := s.states.RenderPhase("synthesize", StateData{
 		Plan: t.Conversation.Plan,
 	})
 	if err != nil {

@@ -1,7 +1,4 @@
-User Prompt:
-{{.UserInput}}
-
-You are now in the **planning phase** of this turn. Your only job here is to commit an ordered plan via the `plan.commit` tool.
+You are now in the **planning phase** of this turn. Plan a response to the user message above. Your only job here is to commit an ordered plan via the `plan.commit` tool.
 
 ## Contract
 

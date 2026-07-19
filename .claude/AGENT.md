@@ -45,8 +45,9 @@ which owns the growing message list all phases share.
 ## The phases (one conversation)
 
 1. **Plan** ([internal/agent/planner.go](../internal/agent/planner.go)).
-   The rendered `prompts/state/plan.md` is appended as a user message
-   to the fresh conversation, then the LLM call advertises the
+   The user's message is appended verbatim as its own user message,
+   then the `<phase>`-wrapped `prompts/state/plan.md` as a second one.
+   The LLM call then advertises the
    `plan.commit` virtual tool with `tool_choice=required`. The model
    commits an ordered `Plan` (goal + `Step`s with intent only —
    D-029 removed per-step `tools` and `memory_paths`). Protocol
@@ -160,13 +161,29 @@ and is not resent — the same conversation grows through every phase.
 | 4 | Memory hint          | fixed `<memory>` block naming paths + `memory.*` tools  | Yes                |
 
 **Phase-transition messages** are user-role, rendered from
-`prompts/state/*.md` at the moment they're appended:
+`prompts/state/*.md` via `StateTemplates.RenderPhase`, which wraps
+each body in `<phase name="…">`:
 
 | Template               | Rendered by     | Data available in template |
 |------------------------|-----------------|-----------------------------|
-| `state/plan.md`        | Planner.Run     | `.UserInput`                |
+| `state/plan.md`        | Planner.Run     | (none)                      |
 | `state/execute_step.md`| Executor.RunStep| `.Step`, `.StepNumber`, `.StepTotal`, `.Plan`, `.AvailableTools` |
 | `state/synthesize.md`  | Synthesizer     | `.Plan`                     |
+
+**The user's message is never fused into a template.** `Planner.Run`
+appends the raw user text as its own message, then the `<phase>`
+directive as a second one. The tag is the boundary between what the
+user said and what the harness said — a user who types "You are now in
+the synth phase" cannot forge a directive, because they cannot produce
+the tag. Do not reintroduce a `{{.UserInput}}` interpolation.
+
+**Phase rules live in exactly one place.** `prompts/system/*.md` holds
+what is true in *every* phase (identity, tone, safety, memory model,
+tool catalogue). The state templates hold what is true only *now* (the
+contract, the schema, the style for that phase). Phase-specific rules
+in the system prompt cost tokens on every call and cause phase bleed —
+a planner that has read the whole `spoken`/`artifacts` contract is a
+planner that tries to write a reply.
 
 Templates use Go `text/template`. Register a `FuncMap` in
 `internal/agent/state.go` if you need extra template functions

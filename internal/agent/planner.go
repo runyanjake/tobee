@@ -64,11 +64,16 @@ func (p *Planner) Run(ctx context.Context, conv *Conversation, userInput string)
 		return fmt.Errorf("planner: not configured")
 	}
 
-	userMsg, err := p.states.Render("plan", StateData{UserInput: userInput})
+	// The user's own words are their own message; the phase directive
+	// is a separate, tagged one. Never fuse them — the model must be
+	// able to tell what the user said from what the harness said.
+	conv.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
+
+	phaseMsg, err := p.states.RenderPhase("plan", StateData{})
 	if err != nil {
 		return fmt.Errorf("planner: render plan state: %w", err)
 	}
-	conv.Append(llm.Message{Role: llm.RoleUser, Content: userMsg})
+	conv.Append(llm.Message{Role: llm.RoleUser, Content: phaseMsg})
 
 	toolSpec := []llm.ToolSpec{{
 		Name:        planCommitTool,

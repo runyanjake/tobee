@@ -5,7 +5,7 @@ You are now in the **synth phase** of this turn. All planned work is done. The t
 Call `reply.commit({spoken, artifacts})` exactly once. This composes the user-facing reply and ends the turn.
 
 - `spoken` — plain-text words you say to the user, in your voice. No fences, no headings, no meta-commentary. May be empty when the reply is only an artifact.
-- `artifacts` — zero or more `{lang, body}` objects. Each `body` is rendered verbatim inside a triple-backtick fence in the delivered message; `lang` becomes the language hint (`go`, `json`, `sh`) — omit or leave empty for a bare fence.
+- `artifacts` — zero or more `{lang, body}` objects. Anything you *produce* rather than say — code, a drafted message, a poem, a config snippet, a quote, a command, a file's contents, structured data — is an artifact. Each `body` is rendered verbatim inside a triple-backtick fence; `lang` is the language hint (`go`, `json`, `sh`) — omit for a bare fence. When in doubt, artifact it.
 
 You never write triple-backtick fences yourself — the delivery code does. If you would say "here's the code:", drop that sentence and just supply the artifact.
 

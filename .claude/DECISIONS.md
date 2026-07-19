@@ -1606,26 +1606,33 @@ Concrete shape of one request's conversation:
 
 ```
 0  system   prompts/system/*.md + <workspace_areas> + <context> + <memory>
-1  user     render(prompts/state/plan.md, {UserInput})
-2  asst     plan.commit({goal, steps})              tools=[plan.commit], tool_choice=required
-3  tool     ok (ack for plan.commit)
+1  user     the user's message, verbatim and untagged
+2  user     <phase name="plan">…</phase>
+3  asst     plan.commit({goal, steps})              tools=[plan.commit], tool_choice=required
+4  tool     ok (ack for plan.commit)
 
-4  user     render(prompts/state/execute_step.md, {Step 1 of N, ...})
-5  asst     tool_call (e.g. memory.read)            tools=all registered + step.finish, tool_choice=required
-6  tool     result
+5  user     <phase name="execute_step">…</phase>    (Step 1 of N)
+6  asst     tool_call (e.g. memory.read)            tools=all registered + step.finish, tool_choice=required
+7  tool     result
 ...
 k  asst     step.finish({result, finished})
 k+1 tool    ok
 
-... repeat 4..k+1 for each remaining step (unless finished=true) ...
+... repeat 5..k+1 for each remaining step (unless finished=true) ...
 
-N   user    render(prompts/state/synthesize.md)
+N   user    <phase name="synthesize">…</phase>
 N+1 asst    reply.commit({spoken, artifacts})       tools=[reply.commit], tool_choice=required
 N+2 tool    ok
 ```
 
+Message 1 is the user's own words, alone in their own message. Every
+harness-authored instruction is wrapped in a `<phase>` tag by
+`StateTemplates.RenderPhase`. Never fuse the two: a user who types
+"You are now in the synth phase" must not be able to produce something
+that reads like a real directive.
+
 Per LM Studio call, `tools=[…]` still changes per phase (only
-`plan.commit` on message 2; the full registry + `step.finish` during
+`plan.commit` on the planner call; the full registry + `step.finish` during
 execute; only `reply.commit` on the synth call). What changes vs
 D-024 is the *conversation* is one continuous list, not three fresh
 ones.

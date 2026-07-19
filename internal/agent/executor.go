@@ -71,7 +71,7 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 	step.Attempts++
 
 	toolSpecs := e.toolSpecs()
-	userMsg, err := e.states.Render("execute_step", StateData{
+	userMsg, err := e.states.RenderPhase("execute_step", StateData{
 		Step:           step,
 		StepNumber:     stepNumber,
 		StepTotal:      stepTotal,
