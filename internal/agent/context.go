@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/runyanjake/tobee/internal/integrations"
 	"github.com/runyanjake/tobee/internal/scope"
@@ -17,6 +18,17 @@ import (
 type ContextBuilder struct {
 	Persona   string           // system prompt blob (prompts/system/*.md concatenated)
 	Workspace *workspace.Areas // configured host-file areas (nil = none)
+
+	// Now is the clock stamped into the per-turn context tag. nil means
+	// time.Now; tests set it for a deterministic system message.
+	Now func() time.Time
+}
+
+func (b *ContextBuilder) now() time.Time {
+	if b.Now != nil {
+		return b.Now()
+	}
+	return time.Now()
 }
 
 // ComposeSystem renders the system message once per request. Contains
@@ -46,7 +58,11 @@ func (b *ContextBuilder) ComposeSystem(env integrations.Envelope) string {
 		sb.WriteString("</workspace_areas>\n\n")
 	}
 
-	fmt.Fprintf(&sb, "<context>integration=%s channel=%s", env.Integration, env.Channel)
+	// The model has no clock of its own. Without this it dates timestamps
+	// from its training cutoff — a `since`/`at` it invents lands years off.
+	now := b.now()
+	fmt.Fprintf(&sb, "<context>now=%s (%s)", now.Format(time.RFC3339), now.Format("Monday, 2 January 2006"))
+	fmt.Fprintf(&sb, " integration=%s channel=%s", env.Integration, env.Channel)
 	if env.Thread != "" {
 		fmt.Fprintf(&sb, " thread=%s", env.Thread)
 	}

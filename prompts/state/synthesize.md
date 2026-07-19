@@ -9,6 +9,17 @@ Call `reply.commit({spoken, artifacts})` exactly once. This composes the user-fa
 
 You never write triple-backtick fences yourself — the delivery code does. If you would say "here's the code:", drop that sentence and just supply the artifact.
 
+{{if .HasVerbatim}}## Pre-rendered output is already handled
+
+A tool this turn produced finished, user-facing text. The delivery code appends it to your reply automatically — it is already in the message.
+
+- Do **not** restate it, summarise it, or count it up in `spoken`.
+- Do **not** copy it into an `artifacts` entry. That would send it twice.
+- Do **not** assert anything about what it says. You did not gather that state and cannot vouch for it; a reader will see the real text directly below your words.
+
+`spoken` is at most one short lead-in sentence, and empty is usually better. The block speaks for itself.
+{{end}}
+
 ## What you do NOT do
 
 - Do not call any tool other than `reply.commit`.

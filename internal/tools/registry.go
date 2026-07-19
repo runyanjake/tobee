@@ -24,6 +24,13 @@ type Spec struct {
 	InputSchema json.RawMessage // JSON Schema for Arguments
 	Timeout     time.Duration   // 0 means 30s default
 	Handler     Handler
+
+	// Verbatim marks a tool whose output is already the user-facing
+	// answer, rendered deterministically by the tool itself. The agent
+	// attaches that output to the reply in code; the model never gets
+	// the chance to reword it. Asking a model to copy text is not a
+	// guarantee — enforcing it here is (D-030).
+	Verbatim bool
 }
 
 // Registry is the agent's central catalogue of callable tools.
@@ -94,6 +101,14 @@ func (r *Registry) Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// IsVerbatim reports whether the named tool's output is final
+// user-facing text. Unknown names report false.
+func (r *Registry) IsVerbatim(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.specs[name].Verbatim
 }
 
 // Call executes a registered tool by name. Wraps the handler with a timeout

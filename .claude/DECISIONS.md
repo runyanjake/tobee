@@ -315,7 +315,9 @@ Never call them with the root dir from a user-scoped path.
 
 ## D-014 — Reporter registry for cross-subsystem introspection
 
-**Status:** Accepted · **Date:** 2026-06-26
+**Status:** Accepted · **Date:** 2026-06-26 · Amended by D-021 — the
+JSON-shaped return described below is gone; reporters render their own
+text. The registry contract stands.
 
 **Decision.** Subsystems that hold state worth surfacing (scheduler,
 janitor, integrations) implement an `abilities.Reporter` and register on
@@ -761,9 +763,18 @@ summaries (`RenderSummary`). The `ReportData` struct and the
 `json.RawMessage` Doing/Done/Waiting buckets are gone.
 
 Tool descriptions explicitly instruct the model to relay the output
-verbatim, and [prompts/planner.md](../prompts/planner.md) routes
-status questions to the appropriate tool (with status no longer
-qualifying for the trivial-reply path).
+verbatim. Routing and relay live in the prompts:
+[prompts/system/05-tools.md](../prompts/system/05-tools.md) points status
+questions at the status tools,
+[prompts/state/execute_step.md](../prompts/state/execute_step.md) requires
+the rendered text be carried into `step.finish({result})` intact, and
+[prompts/state/synthesize.md](../prompts/state/synthesize.md) requires it
+be relayed unchanged — as `spoken` when it is a single paragraph, as an
+artifact when it carries headings.
+
+Verbatim relay only holds if *every* link in that chain preserves the
+text. A `result` that says "checked the status" has already destroyed it,
+and synth cannot recover what it never received.
 
 **Why.** D-014's JSON-then-summarise path produced sporadic phrasing:
 the same underlying state turned into a different reply each turn,
@@ -1746,6 +1757,96 @@ The renderer is `internal/agent/state.go::StateTemplates`.
 planner from committing plans with no actionable tool grants, and
 (b) recover the prefix-cache reuse that fell out of one system
 message at position 0.
+
+---
+
+## D-030 — Verbatim output is a registry property, not an instruction
+
+**Status:** Accepted · **Date:** 2026-07-19 · Amends D-021 (keeps its
+goal, replaces its mechanism) and reverses the regressions D-023 and
+D-024 accepted against it. Restores D-022's direct-dispatch intent
+without D-022's triage classifier.
+
+**Decision.** Four changes, all aimed at one invariant: *deterministic
+text a tool renders reaches the user unmodified.*
+
+1. `tools.Spec` gains `Verbatim bool`. `status.summary` and
+   `status.report` set it. The executor captures flagged tool output
+   onto `Turn.Verbatim`, and `renderReply` appends those blocks to the
+   reply **in code**. The model never has the opportunity to reword
+   them. Single-line output goes in bare; multi-line output is fenced.
+2. The synth template branches on `.HasVerbatim` and tells the model
+   the content is already handled — contribute a lead-in at most, and
+   make no claims about what the block says.
+3. "Relay verbatim" prose is deleted from the tool descriptions and
+   `05-tools.md`. An instruction that duplicates an enforced invariant
+   is prompt budget spent implying the model has a choice it doesn't.
+4. `ContextBuilder` stamps `now=<RFC3339>` into the `<context>` tag,
+   and `status.*` take a relative `window` duration instead of an
+   absolute `since` instant.
+
+**Why.** D-023 accepted status rewording with a stated revisit
+condition — "if the rewording materially loses information." On a live
+turn (2026-07-19) it did, twice in one sentence:
+
+    tool:  "Discord is connected and saw 1 inbound message in the window."
+    model: "Discord checked and found 1 inbound message in the last hour.
+            Summary: No pending tasks or messages beyond that."
+
+"In the last hour" was false — a hallucinated `since` of
+`2023-10-05T18:00:00Z` had made it a three-year window. "No pending
+tasks or messages" was invented from the scheduler reporter's silence;
+no reporter claimed it. That is D-014's original failure mode
+("dropping sections, inventing reassurances") returning intact, and it
+is worse than a formatting nit: the model asserted system state it had
+not observed.
+
+The deeper lesson is D-023's own. Triage failed because
+`tool_choice: "required"` bounced off the local model — prose and flags
+did not bind it. "Relay verbatim" is the same category of instruction
+and failed the same way: the synthesiser had the exact text in the
+transcript and paraphrased anyway. **An invariant you care about cannot
+live in the prompt.** Industry practice agrees — deterministic content
+reaches users out-of-band (attachments, cards, embedded resources), not
+by asking a model to copy text.
+
+Framing it as a registry property rather than a status feature keeps it
+additive: any future pre-rendering ability inherits the guarantee by
+setting one field, which is the same argument that justified the
+Reporter registry in D-014.
+
+**Why not re-add `phaseStatusDispatch`.** It needed an upfront
+classifier to know the turn was a status turn, and that classifier is
+what broke. The routing decision already happens correctly — the model
+picks `status.summary` off the menu unprompted — just later, at
+tool-call time. Dispatching on the *tool* needs no classifier, no
+forcing function, and no extra LLM call.
+
+**Cost.**
+
+- One bool on `Spec`, one slice on `Turn`, one branch in `renderReply`.
+- No extra LLM calls. Synth still runs, so the persona survives — the
+  A1 variant (skip synth, deliver raw) was rejected because the reply
+  would lose the voice on exactly the queries users ask most casually.
+- The model still sees verbatim output in the transcript as a tool
+  result, so it can reason about it; it just cannot restate it.
+- Duplicate suppression is by exact body match, so a tool called twice
+  with different windows legitimately emits two blocks.
+
+**Explicitly not built.**
+
+- **Structured reply channel (Discord embeds).** The platform-native
+  answer, but the reply path is `string`-typed through every
+  integration. Widening it buys formatting polish on one ability at
+  the cost of touching every sender. Revisit when a second ability
+  wants rich output.
+- **Verbatim on memory/workspace reads.** File contents are input to
+  reasoning, not the answer; flagging them would dump raw files into
+  replies.
+
+**Don't revert** without explaining how the replacement (a) guarantees
+rendered text survives a model that ignores instructions, and (b)
+avoids re-introducing an upfront classifier.
 
 ---
 

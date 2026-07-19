@@ -196,6 +196,10 @@ func (e *Executor) dispatchCalls(t *Turn, step *Step, calls []llm.ToolCall) bool
 			content = fmt.Sprintf("error: %v", cerr)
 		} else {
 			slog.Debug("agent: tool ok", "tool", tc.Function.Name)
+			if e.tools.IsVerbatim(tc.Function.Name) {
+				t.AddVerbatim(tc.Function.Name, out)
+				slog.Debug("agent: verbatim captured", "tool", tc.Function.Name, "chars", len(out))
+			}
 		}
 		t.Conversation.Append(llm.Message{
 			Role:       llm.RoleTool,

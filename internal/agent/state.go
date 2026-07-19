@@ -21,6 +21,12 @@ type StateData struct {
 	StepTotal         int
 	AvailableTools    []string
 	SurfacedKnowledge []string // stub for future web / file search integration
+
+	// HasVerbatim is true when a tool this turn produced pre-rendered
+	// user-facing output that the delivery code will append to the
+	// reply. The synth template branches on it to stop the model
+	// restating content it is not responsible for.
+	HasVerbatim bool
 }
 
 // StateTemplates loads prompts/state/*.md at boot and renders any

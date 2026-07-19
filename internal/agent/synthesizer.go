@@ -66,7 +66,8 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 	}
 
 	userMsg, err := s.states.RenderPhase("synthesize", StateData{
-		Plan: t.Conversation.Plan,
+		Plan:        t.Conversation.Plan,
+		HasVerbatim: len(t.Verbatim) > 0,
 	})
 	if err != nil {
 		return "", fmt.Errorf("synthesizer: render synthesize state: %w", err)
@@ -117,7 +118,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 				Name:       tc.Function.Name,
 				Content:    "ok",
 			})
-			return renderReply(args), nil
+			return renderReply(args, t.Verbatim), nil
 		}
 
 		slog.Error("agent: synthesizer: PROTOCOL VIOLATION",
@@ -140,9 +141,15 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 
 // renderReply composes the final Discord message from the structured
 // reply.commit output: spoken text on top, each artifact as a fenced
-// block with an optional language hint. Empty spoken + empty artifacts
-// yields an empty string, which the deliver step logs as a failure.
-func renderReply(args replyCommitArgs) string {
+// block with an optional language hint, then any verbatim tool output
+// appended by code. Empty spoken + empty artifacts + no verbatim yields
+// an empty string, which the deliver step logs as a failure.
+//
+// Verbatim blocks are appended here rather than passed through the
+// model. Single-line output (status.summary) reads as prose and goes in
+// bare; multi-line output (status.report, with its `## subsystem`
+// headings) is fenced so Discord renders it as written.
+func renderReply(args replyCommitArgs, verbatim []VerbatimBlock) string {
 	var sb strings.Builder
 	spoken := strings.TrimSpace(args.Spoken)
 	if spoken != "" {
@@ -161,6 +168,18 @@ func renderReply(args replyCommitArgs) string {
 		sb.WriteByte('\n')
 		sb.WriteString(body)
 		sb.WriteString("\n```")
+	}
+	for _, v := range verbatim {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		if strings.Contains(v.Body, "\n") {
+			sb.WriteString("```\n")
+			sb.WriteString(v.Body)
+			sb.WriteString("\n```")
+		} else {
+			sb.WriteString(v.Body)
+		}
 	}
 	return sb.String()
 }

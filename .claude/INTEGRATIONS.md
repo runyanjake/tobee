@@ -158,7 +158,13 @@ Each Reporter formats its own state into two views:
   `""` when the subsystem is idle so the joined summary stays tight.
 
 Both strings are emitted to the user verbatim, so the same state must
-always yield the same text. Anything (subsystem, integration, future
+always yield the same text. "Verbatim" is enforced, not requested: the
+status tools set `tools.Spec.Verbatim`, and the agent appends their
+output to the reply in code rather than routing it through the model
+(D-030). Write these strings as the finished, user-facing answer —
+nothing downstream will tidy them up.
+
+Anything (subsystem, integration, future
 ability) can implement the interface and register on the shared
 `abilities.Registry` in `cmd/tobee/main.go`. The status tools call
 `RenderReport` / `RenderSummary` on the registry, which composes the
