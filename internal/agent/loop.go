@@ -130,6 +130,18 @@ func (a *Agent) processTurn(parent context.Context, env integrations.Envelope) {
 	slog.Info("agent: plan committed",
 		"goal", plan.Goal, "steps", len(plan.Steps))
 
+	// Fast path (D-032): the planner answered outright, so there is
+	// nothing to announce, execute, or synthesise. One LLM call, one
+	// message. Anything needing a tool commits steps instead and falls
+	// through to the full pipeline below.
+	if plan.DirectReply != "" {
+		slog.Info("agent: direct reply; skipping announce, execute, synth",
+			"chars", len(plan.DirectReply))
+		turn.Reply = plan.DirectReply
+		a.deliver(turn)
+		return
+	}
+
 	// --- Phase 2: announce --------------------------------------------
 	if msg := plan.RenderAnnouncement(); msg != "" {
 		id, sendErr := a.replies.Send(ctx, env.Integration, env.Channel, env.Thread, msg)

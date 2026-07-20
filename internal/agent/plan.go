@@ -38,9 +38,13 @@ type Step struct {
 // Plan is the turn-scoped artifact the planner produces. Used both
 // for execution control and for the user-facing announcement.
 type Plan struct {
-	Goal     string `json:"goal"`
-	Steps    []Step `json:"steps"`
-	StepsRun int    `json:"-"` // total executor LLM iterations across all steps
+	Goal  string `json:"goal"`
+	Steps []Step `json:"steps"`
+	// DirectReply is the planner's own answer, set only when Steps is
+	// empty. The loop delivers it verbatim and skips execute and synth
+	// (D-032). Never populated alongside steps.
+	DirectReply string `json:"direct_reply,omitempty"`
+	StepsRun    int    `json:"-"` // total executor LLM iterations across all steps
 }
 
 // Next returns a pointer to the next pending step, or nil if none

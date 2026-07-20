@@ -17,14 +17,17 @@ const planCommitTool = "plan.commit"
 // longer carry `tools` or `memory_paths` — every step has every
 // registered tool available. Status, IDs, and run counts are owned by
 // the loop, not the model.
+//
+// Empty `steps` plus a `direct_reply` is the fast path (D-032).
 var planCommitSchema = json.RawMessage(`{
   "type": "object",
   "required": ["goal", "steps"],
   "properties": {
     "goal": {"type": "string", "description": "One-sentence statement of the user's goal."},
+    "direct_reply": {"type": "string", "description": "The complete answer to the user, when answering needs no tools and no steps. Set this and leave steps empty."},
     "steps": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "items": {
         "type": "object",
         "required": ["intent"],
@@ -148,17 +151,21 @@ func (p *Planner) Run(ctx context.Context, conv *Conversation, userInput string)
 
 // commitArgs is the JSON shape plan.commit emits.
 type commitArgs struct {
-	Goal  string `json:"goal"`
-	Steps []struct {
+	Goal        string `json:"goal"`
+	DirectReply string `json:"direct_reply"`
+	Steps       []struct {
 		Intent string `json:"intent"`
 	} `json:"steps"`
 }
 
 // planFromCommitArgs builds a *Plan from the decoded JSON, trimming
-// intents and skipping empty steps. Returns an error if no usable
-// steps remain.
+// intents and skipping empty steps. Zero steps is legal only on the
+// fast path, where direct_reply carries the answer instead (D-032).
 func planFromCommitArgs(args commitArgs) (*Plan, error) {
-	plan := &Plan{Goal: strings.TrimSpace(args.Goal)}
+	plan := &Plan{
+		Goal:        strings.TrimSpace(args.Goal),
+		DirectReply: strings.TrimSpace(args.DirectReply),
+	}
 	for _, s := range args.Steps {
 		intent := strings.TrimSpace(s.Intent)
 		if intent == "" {
@@ -170,8 +177,14 @@ func planFromCommitArgs(args commitArgs) (*Plan, error) {
 		})
 	}
 	if len(plan.Steps) == 0 {
-		return nil, fmt.Errorf("zero usable steps")
+		if plan.DirectReply == "" {
+			return nil, fmt.Errorf("zero usable steps and no direct_reply")
+		}
+		return plan, nil
 	}
+	// Steps and a pre-baked answer are mutually exclusive: a plan that
+	// needs execution must not ship a reply written before it ran.
+	plan.DirectReply = ""
 	plan.assignIDs()
 	return plan, nil
 }

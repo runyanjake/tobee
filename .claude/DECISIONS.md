@@ -1850,6 +1850,83 @@ avoids re-introducing an upfront classifier.
 
 ---
 
+## D-032 — The planner may answer directly; zero steps is the fast path
+
+**Decision.** `plan.commit` gains a `direct_reply` field and `steps`
+drops to `minItems: 0`. A plan with zero steps and a non-empty
+`direct_reply` is legal: the loop sets it as the reply, delivers, and
+returns — no announcement, no execute, no synth. Steps and
+`direct_reply` are mutually exclusive; `planFromCommitArgs` clears
+`direct_reply` whenever steps survive trimming, and errors when
+neither is present.
+
+Supersedes the part of D-024 that made announce → execute → synth
+unconditional, and the `plan.md` rule "a plan with zero steps is a
+protocol violation. Even a greeting or a one-line answer gets a single
+'respond to the user' step." The rest of D-024 stands: when steps
+exist, the four phases run exactly as before.
+
+**Why.**
+
+- **Every trivial message cost three LLM calls and two Discord
+  messages.** "what day is it today" produced a `Working on:` header,
+  a numbered checklist, and a separate reply. The checklist is noise
+  on a turn with nothing to check.
+- **The one-step plan was a failure amplifier.** A forced "respond to
+  the user" step still runs the full ReAct sub-loop with every tool
+  bound and `tool_choice=required`. The model must call a tool to say
+  hello, so it either picks an irrelevant one or emits text and trips
+  the protocol violation in `executor.go`. Observed: a greeting turn
+  rendered ❌ against the step *and* delivered an unrelated synth reply
+  about creating an INDEX.md file, because the plan message and the
+  reply are independent messages and a failed step does not suppress
+  synth.
+- **The mandate produced assertion-shaped steps.** Requiring a step
+  for every answer is what pressures the planner into intents like
+  "State that tobee is ready," which `plan.md` already had to argue
+  against separately. Removing the mandate removes the pressure at its
+  source.
+
+**This is not the D-023 triage phase, and not a classifier.**
+
+D-023's triage was a *separate LLM call before planning* that labelled
+the turn, and D-030 explicitly warns against re-introducing an upfront
+classifier. This adds no call. The planner already runs on every turn
+and already decides the shape of the work; it now has one more way to
+express "the shape is: just answer." The routing decision rides along
+inside a call that was happening regardless.
+
+**Cost.**
+
+- Simple turn: 3 LLM calls → 1, and 2 Discord messages → 1.
+- Tool-bearing turn: unchanged.
+- The planner can now answer from its own knowledge, so a
+  misclassification is a *wrong answer* rather than a noisy one. This
+  is the real risk of the change. Mitigated in `plan.md` by telling
+  the planner to prefer steps when in doubt, and by enumerating
+  retrieval-shaped topics (runtime state, memory, schedule, workspace)
+  as always-steps. Not mitigated in code — nothing structurally
+  prevents the model from confidently answering a question it should
+  have looked up.
+
+**Explicitly not built.**
+
+- **A cheap pre-classifier call.** Rejected as above: it adds a
+  round-trip to every turn, including complex ones, to save calls on
+  simple ones.
+- **Suppressing the announcement for one-step plans.** Considered as
+  a smaller diff. Rejected because it still pays all three LLM calls
+  and still forces the model to satisfy a synthetic step.
+- **A `direct_reply` length cap.** No evidence yet that the planner
+  over-uses the fast path; a cap would be a guess.
+
+**Don't revert** without explaining how the replacement (a) keeps a
+greeting from costing three LLM calls and rendering a checklist, and
+(b) avoids forcing the model to call a tool in order to answer a
+question that needs none.
+
+---
+
 ## Open questions
 
 Not yet decided. Flag if you have an opinion.
