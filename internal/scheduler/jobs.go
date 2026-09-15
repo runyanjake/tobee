@@ -79,7 +79,7 @@ func NewJobManager(bus *integrations.Bus, store *JobStore) *JobManager {
 // Start loads persisted jobs, schedules the survivors, launches the cron
 // dispatcher, and registers a shutdown watcher on ctx. One-shot jobs whose
 // At time has already passed are dropped from disk (misfire policy: skip,
-// see DECISIONS.md).
+// see .claude/DESIGN.md D-015).
 func (m *JobManager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.started {

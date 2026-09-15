@@ -17,7 +17,7 @@ pipeline {
     DISCORD_WEBHOOK = credentials('discord-pws-builds-channel-webhook')
 
     // Non-secret instance config. Edit here to retarget the deploy.
-    // AI_MODEL must support native tool-use (see .claude/DECISIONS.md D-001).
+    // AI_MODEL must support native tool-use (see .claude/DESIGN.md D-001).
     AI_MODEL          = 'qwen2.5:7b'
     DISCORD_CHANNEL_ID = '1479309607724650649'
   }

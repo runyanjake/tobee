@@ -1,9 +1,7 @@
 # AGENTS.md
 
-This repo's agent-facing instructions live in [CLAUDE.md](CLAUDE.md) and
-the [.claude/](.claude/) directory. Both Claude Code and other tools that
-read `AGENTS.md` should follow what's there.
+This repo's agent-facing instructions live in [.claude/](.claude/). Claude Code and any other tool that reads `AGENTS.md` should follow them.
 
-- Entry point: [cmd/tobee/main.go](cmd/tobee/main.go)
-- Conventions: [.claude/CONVENTIONS.md](.claude/CONVENTIONS.md) — read before writing code
-- Decisions: [.claude/DECISIONS.md](.claude/DECISIONS.md) — read before proposing design changes
+- Entry point: [.claude/CLAUDE.md](.claude/CLAUDE.md). Stack, commands, and guardrails; read before writing code.
+- Design and decisions: [.claude/DESIGN.md](.claude/DESIGN.md). Read before proposing design changes.
+- Code entry point: [cmd/tobee/main.go](cmd/tobee/main.go)

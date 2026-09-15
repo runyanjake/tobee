@@ -248,7 +248,7 @@ func readFile(path, fallback string) string {
 
 // readSystemPrompt loads every *.md file in dir, sorted lexicographically,
 // and joins their contents with blank lines. The numeric prefix on each
-// filename (00-, 01-, …) is the load-order contract — see DECISIONS.md
+// filename (00-, 01-, …) is the load-order contract — see .claude/DESIGN.md
 // D-012 / D-018 / D-028.
 func readSystemPrompt(dir string) string {
 	matches, err := filepath.Glob(filepath.Join(dir, "*.md"))
