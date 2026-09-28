@@ -17,7 +17,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | 2026-07-02 | `d1a3864`, `c0bb476` | Progress reactions; generated content in code blocks. |
 | 2026-07-04 | `54e72ca` … `13ccc7a` | Strict tool-call protocol and no pre-loaded memory (D-025, D-026). LLM error retries. Per-message turns: sessions, summarizer, and janitor deleted (D-027). Prompts baked into the prod image. `prompts/persona` → `prompts/system` plus static tools catalogue (D-028). One `Conversation` per request with state templates (D-029). |
 | 2026-07-19 | `a974c76` … `1f2f5c5` | User text split from `<phase>` directives. Verbatim enforced in code, clock stamp, relative status `window` (D-030). Salvage parser added (D-031) then reverted. Temperature default 0.7 → 0.1, now configurable. Planner `direct_reply` fast path (D-032). |
-| 2026-09-28 | branch `mcp-platform` | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. Prompts cut to about a quarter of their size, with every `tool({args})` example removed. `llm.Model` interface; the OpenAI-compatible provider uses schema-constrained structured output instead of `tool_choice`, which Ollama ignores (D-041). MCP resources: memory and workspace files as `memory://` / `workspace://` URIs read through `resources_read`; the system prompt comes from pinned resources (D-042). Fixed a cross-user path traversal in the memory tools. |
+| 2026-09-28 | branch `mcp-platform` | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. Prompts cut to about a quarter of their size, with every `tool({args})` example removed. `llm.Model` interface; the OpenAI-compatible provider uses schema-constrained structured output instead of `tool_choice`, which Ollama ignores (D-041). MCP resources: memory and workspace files as `memory://` / `workspace://` URIs read through `resources_read`; the system prompt comes from pinned resources (D-042). Fixed a cross-user path traversal in the memory tools. Fixed plan/execute/synthesize phases replaced by one agent loop with `reply` and `plan` tools (D-043); tool categories from MCP annotations (D-044); send tools refuse the current conversation (a greeting had been answered twice). |
 
 ## Major Refactors & Migrations
 
@@ -31,6 +31,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
   7. one conversation (D-029)
   8. direct-reply fast path (D-032)
   9. serial runtime over a task queue, with `PlanExecute` as one `Strategy` (D-034, D-037)
+  10. one tool-calling agent loop with `reply` and `plan` as tools (D-043)
 - **Conversation state:** rolling summary, then saved ring buffer (D-016), then none (D-027), then none except parked questions (D-036).
 - **Tools:** `tools.Registry` plus Go tool packs, then MCP servers behind `mcphost.Host` (D-033). `internal/tools/{memory,workspace,schedule,status}` → `internal/servers/*`; `internal/tools/datedname` → `internal/datedname`. `prompts/system/05-tools.md` catalogue → `prompts/servers/<name>.md` instructions.
 - **Input and output:** `integrations.Bus` (drop-on-full channel) and `Envelope` → `ingest.Engine`, `taskqueue.Queue`, and `event.Event` (D-034). `agent.Replies` → `delivery.Router` (D-035). `internal/integrations/discord` → `internal/connectors/discord`. The idle static tick `Scheduler` was deleted; `JobManager` is an ingest source.
@@ -57,6 +58,9 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | D-024 (partial) | Text-wrap planner fallback; synthesis given only the plan; per-step tool scopes; mandatory steps for every turn | D-025, D-029, D-029, D-032 |
 | D-026 (partial) | Session summary still pre-loaded | D-027 |
 | D-031 | Salvage parser for tool calls written as text | Reverted in `3e818f9`; entry removed from the log |
+| D-024 | Tool-using turns run plan → announce → execute → synthesize | D-043 |
+| D-032 | Planner may commit `direct_reply` with zero steps | D-043. Replying directly is just calling `reply` first. |
+| D-029 (partial) | Per-phase state templates (`plan`, `execute_step`, `synthesize`) | D-043. One `turn` directive. |
 | D-001 (partial) | Native OpenAI `tools` with `tool_choice=required` | D-041. Calls are still structured, now via `response_format: json_schema`. |
 | D-004 | No vector search, reflection cron, or MCP | MCP: D-033. Vector search and reflection remain non-goals in [GOALS.md](GOALS.md#non-goals--out-of-scope). |
 | D-009 | Replies go through the `Replies` table, not a `send.*` tool | D-035. The reply to the origin is still code; other sends are tools. |
@@ -70,13 +74,13 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 ## Known Limitations
 
 - **Protocol violations were `tool_choice` being ignored.** Found 2026-09-28: Ollama's OpenAI endpoint has no `tool_choice` field, so `required` was never enforced. D-041 replaces it with constrained decoding. Checked against LM Studio (Qwen3 27B: a greeting got a direct reply, a lookup made a real tool call, zero violations). Prod Ollama with `qwen2.5:7b` is not yet verified; see [GOALS.md](GOALS.md#current-operational-priorities).
-- **Synthesis continuation risk.** Synthesis runs on the full transcript, so the model may keep talking instead of presenting results. It's held back by `synthesize.md` wording plus the forced `reply_commit`.
 - **Date stamping conflicts with canonical memory files.**
   - `datedname.Apply` rewrites every `memory_write` / `memory_append` / `workspace_write` path to `YYYY.MM.DD-<kebab>.<ext>`.
   - The prompts tell the model to read and maintain `INDEX.md`, `user.md`, and `preferences.md`. The tools can never create or update those exact names.
   - Appends on a later day go to a new file.
   - A name that already has a date gets a second one.
-- **Direct-reply misroutes.** The planner can answer from its own knowledge instead of looking something up. Only prompt wording guards against this (D-032).
+- **Premature replies.** The model can call `reply` from its own knowledge instead of looking something up. Only the `turn` directive guards against this (D-043).
+- **Planning is optional.** The model decides whether to call `plan`; a small model may skip it on multi-step work.
 - **Serial throughput.** One turn at a time, up to 2m each. A full queue (256) rejects new events with an ERROR log, and the sender is not notified.
 - **At-least-once tasks.** A crash mid-turn replays the task on boot, which can repeat a reply or a side effect. A task is dropped after 2 attempts.
 - **No cross-turn context** beyond parked questions. Follow-ups that depend on the previous message fail unless the model saved something to memory (D-027).
@@ -132,9 +136,9 @@ No tests cover:
 
 ## Active / Unmerged Work
 
-- **`synth-slim-context-violations`** (local, `9b07674`, 2026-07-19, not merged):
+- **`synth-slim-context-violations`** (obsolete since D-043: there is no synthesizer) (local, `9b07674`, 2026-07-19, not merged):
   - The synthesizer builds its own `[system, user request, directive]` messages.
   - Protocol violations become countable.
   - Addresses the "synth re-emits `step.finish.result` as text" failure.
 - **`simple-continuation-fast-path`** (local, `9c3cb68`): same content as `1f2f5c5` on `main`. Safe to delete after confirming.
-- TODO: Decide whether to merge `synth-slim-context-violations`. It predates the MCP platform and needs a rebase (virtual tools are now `step_finish` / `reply_commit`). If merged, record the new synthesizer input contract as D-040.
+- TODO: Delete the local `synth-slim-context-violations` branch; its synthesizer no longer exists.

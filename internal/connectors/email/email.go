@@ -14,6 +14,7 @@ import (
 	"github.com/runyanjake/tobee/internal/event"
 	"github.com/runyanjake/tobee/internal/ingest"
 	"github.com/runyanjake/tobee/internal/mcpserver"
+	"github.com/runyanjake/tobee/internal/scope"
 )
 
 const Name = "email"
@@ -156,7 +157,8 @@ func (m *Mailbox) Server(instructions string) *mcpserver.Server {
 			},
 			"required": ["to", "subject", "body"]
 		}`),
-		Handler: func(_ context.Context, args json.RawMessage) (string, error) {
+		OpenWorld: true,
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var in struct {
 				To      string `json:"to"`
 				Subject string `json:"subject"`
@@ -164,6 +166,10 @@ func (m *Mailbox) Server(instructions string) *mcpserver.Server {
 			}
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", fmt.Errorf("invalid args: %w", err)
+			}
+			// The reply to the current sender is sent in code (D-035).
+			if sc, ok := scope.From(ctx); ok && sc.Connector == Name && sc.Channel == normalize(in.To) {
+				return "", fmt.Errorf("that is the current sender; your reply is delivered automatically, so call reply instead")
 			}
 			id, err := m.send(strings.TrimSpace(in.To), strings.TrimSpace(in.Subject), in.Body, "")
 			if err != nil {

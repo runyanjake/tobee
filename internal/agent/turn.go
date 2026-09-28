@@ -19,7 +19,9 @@ type Turn struct {
 	Event        event.Event
 	Conversation *Conversation
 
-	// PlanMessageID is the announcement to edit as step statuses change.
+	// Plan is set once the model calls the plan tool; PlanMessageID is its
+	// progress message, edited as the model updates it.
+	Plan          *Plan
 	PlanMessageID string
 
 	Reply string
@@ -53,14 +55,6 @@ func (t *Turn) AddVerbatim(tool, body string) {
 		}
 	}
 	t.Verbatim = append(t.Verbatim, VerbatimBlock{Tool: tool, Body: body})
-}
-
-// Plan is nil until the planner commits.
-func (t *Turn) Plan() *Plan {
-	if t == nil || t.Conversation == nil {
-		return nil
-	}
-	return t.Conversation.Plan
 }
 
 // Request is the user's words as their own message (D-029); a resume replays request, question, answer.

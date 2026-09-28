@@ -2,13 +2,9 @@ package agent
 
 import "github.com/runyanjake/tobee/internal/llm"
 
-// Conversation is one task's chat, shared by every phase; the whole list is resent on each stateless call.
+// Conversation is one task's chat; the whole list is resent on each stateless call.
 type Conversation struct {
-	Messages          []llm.Message
-	Plan              *Plan
-	StepCursor        int
-	SurfacedKnowledge []string // stub for future web/file search; always empty today
-	Finished          bool     // set when step_finish or user_ask ends the whole turn
+	Messages []llm.Message
 
 	logged int // Messages already written to the debug log (see logNewMessages)
 }

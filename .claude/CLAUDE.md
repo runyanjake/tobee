@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-tobee is a self-hosted personal AI assistant, written in Go as one long-running process. It is an MCP host. Input comes from pluggable ingest sources (Discord, email, its own scheduled jobs, MCP resource notifications) through a durable task queue. A single serial runtime runs each task through a reasoning strategy (today: plan → execute → synthesize) against an LLM behind the `llm.Model` interface, where every call is a schema-constrained choice of one tool. Every tool, built-in or third-party, is served by an MCP server. The reply goes back to where the event came from. Everything it remembers is plain text under `data/`. There is no database, no vector store, and no chat history carried between turns; only a parked clarifying question survives a turn.
+tobee is a self-hosted personal AI assistant, written in Go as one long-running process. It is an MCP host. Input comes from pluggable ingest sources (Discord, email, its own scheduled jobs, MCP resource notifications) through a durable task queue. A single serial runtime runs each task through a reasoning strategy (today: a tool-calling agent loop that ends when the model calls `reply`) against an LLM behind the `llm.Model` interface, where every call is a schema-constrained choice of one tool. Every tool, built-in or third-party, is served by an MCP server. The reply goes back to where the event came from. Everything it remembers is plain text under `data/`. There is no database, no vector store, and no chat history carried between turns; only a parked clarifying question survives a turn.
 
 ## Tech Stack & Tooling
 
@@ -28,7 +28,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
 | `internal/event/` | `Event`, `Address`, `Actor`, resume keys. Shared by every layer. |
 | `internal/ingest/` | `Source` interface and `Engine`: supervision, dedup, allowlists. |
 | `internal/taskqueue/` | Durable task queue and parked tasks under `data/tasks/`. |
-| `internal/agent/` | `Runtime`, `Strategy`, `PlanExecute` (planner / executor / synthesizer), context builder, state templates. |
+| `internal/agent/` | `Runtime`, `Strategy`, `Loop` (the ReAct agent loop with `reply` and `plan` tools), context builder, state templates. |
 | `internal/mcphost/` | MCP host: sessions, catalog, trust, `MCP_SERVER_*` config, resource-subscription source. |
 | `internal/mcpserver/` | Builder for built-in MCP servers (scope from `_meta`, error results, tobee metadata). |
 | `internal/servers/` | Built-in MCP servers: `memory/`, `workspace/`, `schedule/`, `status/`, `user/`, `resources/` (the read path), `system/` (pinned prompts). |
@@ -44,7 +44,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
 | `internal/telemetry/` | Log categories and correlation (D-040). |
 | `prompts/system/` | System prompt fragments, served as pinned resources by the `system` server in filename order (D-042). |
 | `prompts/servers/` | MCP `instructions` for each built-in server, one file per server name. |
-| `prompts/state/` | Per-phase directive templates (`plan`, `execute_step`, `synthesize`). |
+| `prompts/state/` | `turn.md`: the one directive appended after the user's message. |
 | `static/images/` | Cat photos. Not referenced by code. |
 | `data/` | Runtime state (gitignored): `memory/`, `scheduler/jobs/`, `tasks/`. |
 | `.claude/` | This knowledge base. |
@@ -111,8 +111,10 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Tasks are processed one at a time on purpose (D-005). Don't parallelize consumption.
 - No chat history carries across turns (D-027). Don't reintroduce session buffers or summarizers. Persistence goes through `memory_*`. The only exception is a parked task, which holds the request and the question, never a transcript (D-036).
 - New reasoning schemes implement `agent.Strategy` and are selected by `AGENT_STRATEGY` (D-037). The runtime owns scope, budget, delivery, and parking; a strategy only fills `Turn.Reply` or `Turn.Await`.
-- Keep the turn budget and the per-step / total step budgets. Don't raise or remove them to make one case work.
-- Every model call goes through `llm.Model.Decide`: the model picks exactly one of the offered tools. Phases offer virtual tools (`plan_commit`, `step_finish`, `reply_commit`); the executor also offers the MCP catalog. Never call a provider directly, and keep request shape, output mode, and wire quirks inside `internal/llm/<provider>` (D-041).
+- Keep the turn budget and `AGENT_MAX_STEPS`. Don't raise or remove them to make one case work.
+- Every model call goes through `llm.Model.Decide`: the model picks exactly one of the offered tools. The loop offers the MCP catalog plus its own `reply` and `plan`. Never call a provider directly, and keep request shape, output mode, and wire quirks inside `internal/llm/<provider>` (D-041).
+- Keep the turn a single loop (D-043). Don't reintroduce fixed phases (a planning call, per-step executors, a synthesis pass); structure the model needs is a tool it can choose, like `plan`.
+- Give every built-in tool honest annotations: `ReadOnly` for reads, `OpenWorld` for anything reaching people or outside systems. Categories are derived from them and only group the menu (D-044).
 - Output that isn't a valid choice is never appended to the conversation; the phase appends its nudge and retries once.
 - Anything that must be shown to the user word for word is enforced in code (`mcpserver.Tool.Verbatim` → `tobee/verbatim`), never by prompt instruction (D-030).
 - Never merge the user's text into a phase template. Directives go in `<phase>` tags (D-029).
@@ -131,7 +133,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 ### Prompts & config
 
 - Prompt text lives in `prompts/`, not in Go string literals. Existing exceptions:
-  - protocol nudges and virtual-tool schemas in `planner.go`, `executor.go`, `synthesizer.go`
+  - protocol nudges and the `reply` / `plan` schemas in `loop.go`, `reply.go`, `plan.go`
   - tool `Description` fields
   - the tool menu the provider appends to each request (`internal/llm/openai/schema.go`)
   - the `<servers>` / `<context>` scaffolding in `context.go`
@@ -149,7 +151,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-043**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-045**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

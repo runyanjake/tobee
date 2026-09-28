@@ -177,7 +177,7 @@ func main() {
 
 	// --- Agent ----------------------------------------------------------------
 	ctxb := &agent.ContextBuilder{Host: host}
-	strategy := newStrategy(envOr("AGENT_STRATEGY", "plan_execute"), model, host, states, out)
+	strategy := newStrategy(envOr("AGENT_STRATEGY", "react"), model, host, states, out)
 	runtime := agent.NewRuntime(queue, ctxb, out, strategy, agent.Config{
 		TurnBudget: mustDuration("AGENT_TURN_BUDGET", 2*time.Minute),
 	})
@@ -223,16 +223,10 @@ func newModel(name string) llm.Model {
 // newStrategy builds the reasoning strategy named by AGENT_STRATEGY (D-037).
 func newStrategy(name string, model llm.Model, host *mcphost.Host, states *agent.StateTemplates, out *delivery.Router) agent.Strategy {
 	switch name {
-	case "plan_execute":
-		return agent.NewPlanExecute(
-			agent.NewPlanner(model, states),
-			agent.NewExecutor(model, host, states,
-				mustInt("PLAN_MAX_STEPS_PER_STEP", 4), mustInt("PLAN_MAX_STEPS_TOTAL", 12)),
-			agent.NewSynthesizer(model, states),
-			out,
-		)
+	case "react":
+		return agent.NewLoop(model, host, states, out, mustInt("AGENT_MAX_STEPS", 12))
 	default:
-		fatal("AGENT_STRATEGY: unknown strategy", fmt.Errorf("%q (known: plan_execute)", name))
+		fatal("AGENT_STRATEGY: unknown strategy", fmt.Errorf("%q (known: react)", name))
 		return nil
 	}
 }
@@ -377,7 +371,7 @@ func logPromptsLoaded(dir string, pinned []mcphost.Pinned, stateNames []string) 
 	if chars == 0 {
 		missing = append(missing, "system/*.md")
 	}
-	required := []string{"plan", "execute_step", "synthesize"}
+	required := []string{"turn"}
 	have := make(map[string]bool, len(stateNames))
 	for _, n := range stateNames {
 		have[n] = true

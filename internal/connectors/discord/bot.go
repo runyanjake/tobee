@@ -18,6 +18,7 @@ import (
 	"github.com/runyanjake/tobee/internal/event"
 	"github.com/runyanjake/tobee/internal/ingest"
 	"github.com/runyanjake/tobee/internal/mcpserver"
+	"github.com/runyanjake/tobee/internal/scope"
 )
 
 // Name is shared by the event source, the delivery channel, and the MCP server.
@@ -263,6 +264,7 @@ func (b *Bot) Server(instructions string) *mcpserver.Server {
 			},
 			"required": ["channel_id", "text"]
 		}`),
+		OpenWorld: true,
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var in struct {
 				ChannelID string `json:"channel_id"`
@@ -273,6 +275,11 @@ func (b *Bot) Server(instructions string) *mcpserver.Server {
 			}
 			if strings.TrimSpace(in.ChannelID) == "" || strings.TrimSpace(in.Text) == "" {
 				return "", fmt.Errorf("channel_id and text are required")
+			}
+			// The reply to this conversation is sent in code; a send here would
+			// deliver it twice (D-035).
+			if sc, ok := scope.From(ctx); ok && sc.Connector == Name && sc.Channel == strings.TrimSpace(in.ChannelID) {
+				return "", fmt.Errorf("that is the current conversation; your reply is delivered automatically, so call reply instead")
 			}
 			id, err := b.Send(ctx, event.Address{Connector: Name, Channel: in.ChannelID}, in.Text)
 			if err != nil {

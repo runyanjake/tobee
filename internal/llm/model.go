@@ -20,7 +20,19 @@ type ToolSpec struct {
 	Name        string
 	Description string
 	InputSchema json.RawMessage
+	Category    Category
 }
+
+// Category groups tools for the model by what calling them does. The host
+// derives it from MCP's standard readOnlyHint / openWorldHint annotations.
+type Category string
+
+const (
+	CategoryRead     Category = "read"     // only reads
+	CategoryWrite    Category = "write"    // changes tobee's own state
+	CategoryExternal Category = "external" // reaches people or systems outside tobee
+	CategoryFinish   Category = "finish"   // ends or organizes the turn: reply, plan
+)
 
 type Decision struct {
 	// Call has a fresh ID, ready to append as an assistant turn.

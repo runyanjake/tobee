@@ -2,11 +2,14 @@ package email
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/runyanjake/tobee/internal/event"
+	"github.com/runyanjake/tobee/internal/mcphost"
+	"github.com/runyanjake/tobee/internal/scope"
 )
 
 func TestStripQuoted(t *testing.T) {
@@ -75,5 +78,26 @@ func TestMessageEvent(t *testing.T) {
 	}
 	if ev.Content != "Subject: plans\n\nyes" {
 		t.Fatalf("Content = %q", ev.Content)
+	}
+}
+
+func TestSendToolRefusesCurrentSender(t *testing.T) {
+	m, err := New(Config{
+		IMAPAddr: "imap.example.com:993", SMTPAddr: "smtp.example.com:587",
+		Username: "u", Password: "p", From: "tobee@example.com",
+		Allowed: []string{"me@example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mcphost.New()
+	defer h.Close()
+	if err := h.ConnectInProcess(context.Background(), m.Server("")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := scope.With(context.Background(), scope.UserScope{Connector: Name, Channel: "me@example.com", User: "me@example.com"})
+	res, err := h.Call(ctx, "email_send", json.RawMessage(`{"to":"Me@Example.com","subject":"s","body":"b"}`))
+	if err != nil || !res.IsError || !strings.Contains(res.Text, "call reply instead") {
+		t.Fatalf("res = %+v, err = %v", res, err)
 	}
 }

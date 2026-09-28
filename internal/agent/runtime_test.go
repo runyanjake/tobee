@@ -27,6 +27,7 @@ type scriptedLLM struct {
 	mu       sync.Mutex
 	calls    []call
 	requests [][]llm.Message
+	offered  [][]string // tool names offered per call
 }
 
 // call.invalid simulates output that could not be read as a tool call.
@@ -39,6 +40,11 @@ func (s *scriptedLLM) Decide(_ context.Context, msgs []llm.Message, tools []llm.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = append(s.requests, append([]llm.Message(nil), msgs...))
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	s.offered = append(s.offered, names)
 	if len(s.calls) == 0 {
 		return nil, fmt.Errorf("script exhausted")
 	}
@@ -82,6 +88,8 @@ func (c *chat) Send(_ context.Context, _ event.Address, text string) (string, er
 }
 
 type harness struct {
+	out   *delivery.Router
+	loop  *Loop
 	llm   *scriptedLLM
 	chat  *chat
 	queue *taskqueue.Queue
@@ -108,14 +116,13 @@ func newHarness(t *testing.T, extra ...*mcpserver.Server) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	strategy := NewPlanExecute(NewPlanner(fake, states), NewExecutor(fake, host, states, 4, 12),
-		NewSynthesizer(fake, states), out)
+	loop := NewLoop(fake, host, states, out, 12)
 	q, err := taskqueue.Open(t.TempDir(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := NewRuntime(q, &ContextBuilder{Host: host}, out, strategy, Config{TurnBudget: 10 * time.Second})
-	return &harness{llm: fake, chat: ch, queue: q, rt: rt}
+	rt := NewRuntime(q, &ContextBuilder{Host: host}, out, loop, Config{TurnBudget: 10 * time.Second})
+	return &harness{llm: fake, chat: ch, queue: q, rt: rt, out: out, loop: loop}
 }
 
 func (h *harness) runNext(t *testing.T, ev event.Event) *taskqueue.Task {
@@ -147,10 +154,7 @@ func chatEvent(id, content, inReplyTo string) event.Event {
 func TestAskParksAndAnswerResumes(t *testing.T) {
 	h := newHarness(t)
 
-	h.llm.script(
-		call{name: "plan_commit", args: `{"goal":"Rename a file.","steps":[{"intent":"Find out which file the user means."}]}`},
-		call{name: "user_ask", args: `{"question":"Which file?"}`},
-	)
+	h.llm.script(call{name: "user_ask", args: `{"question":"Which file?"}`})
 	h.runNext(t, chatEvent("e1", "rename the file", ""))
 
 	if len(h.chat.sent) != 1 || h.chat.sent[0] != "Which file?" {
@@ -160,7 +164,7 @@ func TestAskParksAndAnswerResumes(t *testing.T) {
 		t.Fatalf("parked = %d, want 1", parked)
 	}
 
-	h.llm.script(call{name: "plan_commit", args: `{"goal":"Confirm.","steps":[],"direct_reply":"Renamed notes.md."}`})
+	h.llm.script(call{name: "reply", args: `{"spoken":"Renamed notes.md."}`})
 	task := h.runNext(t, chatEvent("e2", "notes.md", "m1"))
 
 	if task.Resume == nil {
@@ -170,7 +174,6 @@ func TestAskParksAndAnswerResumes(t *testing.T) {
 		t.Fatalf("reply = %q", last)
 	}
 
-	// The resumed planner saw request → question → answer, untagged.
 	msgs := h.llm.requests[len(h.llm.requests)-1]
 	var convo []string
 	for _, m := range msgs[1:] { // skip system
@@ -185,49 +188,119 @@ func TestAskParksAndAnswerResumes(t *testing.T) {
 	}
 }
 
-// Verbatim tool output reaches the user even when the model says otherwise (D-030).
-func TestVerbatimToolOutputIsDelivered(t *testing.T) {
-	status := mcpserver.New("status", "")
-	status.Add(mcpserver.Tool{Name: "summary", Verbatim: true, Handler: func(context.Context, json.RawMessage) (string, error) {
-		return "Everything quiet.", nil
-	}})
-	h := newHarness(t, status)
+// A greeting is one model call and one message: no plan, no second reply.
+func TestGreetingIsOneCallOneMessage(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(call{name: "reply", args: `{"spoken":"Hey!"}`})
+	h.runNext(t, chatEvent("e1", "Hey @TOBEE", ""))
 
-	h.llm.script(
-		call{name: "plan_commit", args: `{"goal":"Report status.","steps":[{"intent":"Report tobee's status."}]}`},
-		call{name: "status_summary", args: `{}`},
-		call{name: "step_finish", args: `{"result":"Status reported.","finished":true}`},
-		call{name: "reply_commit", args: `{"spoken":"Here you go."}`},
-	)
-	h.runNext(t, chatEvent("e1", "how are things?", ""))
-
-	if got := h.chat.sent[len(h.chat.sent)-1]; got != "Here you go.\n\nEverything quiet." {
-		t.Fatalf("reply = %q", got)
+	if len(h.llm.requests) != 1 {
+		t.Fatalf("model calls = %d, want 1", len(h.llm.requests))
 	}
-	// The chat channel cannot edit, so no plan checklist was announced.
-	if len(h.chat.sent) != 1 {
-		t.Fatalf("sent %d messages, want 1: %q", len(h.chat.sent), h.chat.sent)
+	if len(h.chat.sent) != 1 || h.chat.sent[0] != "Hey!" {
+		t.Fatalf("sent = %q", h.chat.sent)
 	}
 }
 
-// The reasoning chain is reconstructable, in order, from task-tagged logs alone (D-040).
+// Verbatim tool output reaches the user even when the model's own words
+// say something else (D-030); the lookup's reply needs no synthesis phase.
+func TestVerbatimToolOutputIsDelivered(t *testing.T) {
+	h := newHarness(t, statusServer())
+	h.llm.script(
+		call{name: "status_summary", args: `{}`},
+		call{name: "reply", args: `{"spoken":"Here you go."}`},
+	)
+	h.runNext(t, chatEvent("e1", "how are things?", ""))
+
+	if got := h.chat.sent; len(got) != 1 || got[0] != "Here you go.\n\nEverything quiet." {
+		t.Fatalf("sent = %q", got)
+	}
+	// The model is told the output is already shown, so it doesn't restate it.
+	result := h.llm.requests[1][len(h.llm.requests[1])-1]
+	if result.Role != llm.RoleTool || !strings.Contains(result.Content, "Don't repeat it") {
+		t.Fatalf("verbatim result = %+v", result)
+	}
+}
+
+// A plan is shown only for several steps and only where it can be edited.
+func TestPlanShownOnlyWhenMultiStepAndEditable(t *testing.T) {
+	h := newHarness(t)
+	ed := &editableChat{}
+	h.out.Register("chat", ed)
+	h.llm.script(
+		call{name: "plan", args: `{"goal":"One thing.","steps":[{"title":"Do it","status":"active"}]}`},
+		call{name: "plan", args: `{"goal":"Two things.","steps":[{"title":"A","status":"active"},{"title":"B","status":"pending"}]}`},
+		call{name: "plan", args: `{"goal":"Two things.","steps":[{"title":"A","status":"done"},{"title":"B","status":"done"}]}`},
+		call{name: "reply", args: `{"spoken":"Both done."}`},
+	)
+	h.runNext(t, chatEvent("e1", "do A then B", ""))
+
+	if len(ed.sent) != 2 || !strings.Contains(ed.sent[0], "⏳ 2. B") || ed.sent[1] != "Both done." {
+		t.Fatalf("sent = %q", ed.sent)
+	}
+	if len(ed.edits) != 1 || !strings.Contains(ed.edits[0], "✅ 2. B") {
+		t.Fatalf("edits = %q", ed.edits)
+	}
+}
+
+// Out of steps, the loop forces one reply-only call instead of failing silently.
+func TestBudgetForcesReply(t *testing.T) {
+	h := newHarness(t, statusServer())
+	h.loop.maxSteps = 2
+	h.llm.script(
+		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{}`},
+		call{name: "reply", args: `{"spoken":"Partly done."}`},
+	)
+	h.runNext(t, chatEvent("e1", "loop forever", ""))
+
+	last := h.llm.offered[len(h.llm.offered)-1]
+	if len(last) != 1 || last[0] != "reply" {
+		t.Fatalf("final call offered %v, want only reply", last)
+	}
+	if got := h.chat.sent; len(got) != 1 || !strings.HasPrefix(got[0], "Partly done.") {
+		t.Fatalf("sent = %q", got)
+	}
+}
+
+// Unreadable output is retried once with a nudge and never kept in the
+// transcript, so later calls can't continue it (D-041).
+func TestInvalidOutputIsNotKept(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(
+		call{invalid: true},
+		call{name: "reply", args: `{"spoken":"Hey."}`},
+	)
+	h.runNext(t, chatEvent("e1", "hey", ""))
+
+	if got := h.chat.sent; len(got) != 1 || got[0] != "Hey." {
+		t.Fatalf("sent = %q", got)
+	}
+	retry := h.llm.requests[1]
+	for _, m := range retry {
+		if strings.Contains(m.Content, "some prose") {
+			t.Fatal("invalid output was kept in the conversation")
+		}
+	}
+	if last := retry[len(retry)-1]; last.Content != invalidNudge {
+		t.Fatalf("retry did not end with the nudge: %+v", last)
+	}
+}
+
+// The reasoning chain is reconstructable from the log alone, all tagged
+// with the task (D-040).
 func TestTurnLogsTheReasoningChain(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(telemetry.NewHandler(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))))
 	defer slog.SetDefault(prev)
 
-	status := mcpserver.New("status", "")
-	status.Add(mcpserver.Tool{Name: "summary", Verbatim: true, Handler: func(context.Context, json.RawMessage) (string, error) {
-		return "Everything quiet.", nil
-	}})
-	h := newHarness(t, status)
+	h := newHarness(t, statusServer())
 	h.llm.script(
-		call{name: "plan_commit", args: `{"goal":"Report status.","steps":[{"intent":"Report tobee's status."}]}`,
-			reasoning: "The user wants status; one step."},
+		call{name: "plan", args: `{"goal":"Report status.","steps":[{"title":"Check","status":"active"},{"title":"Report","status":"pending"}]}`,
+			reasoning: "Two steps."},
 		call{name: "status_summary", args: `{}`},
-		call{name: "step_finish", args: `{"result":"Status reported.","finished":true}`},
-		call{name: "reply_commit", args: `{"spoken":"Here you go."}`},
+		call{name: "reply", args: `{"spoken":"Here you go."}`},
 	)
 	task := h.runNext(t, chatEvent("e1", "how are things?", ""))
 
@@ -249,15 +322,12 @@ func TestTurnLogsTheReasoningChain(t *testing.T) {
 		}
 		chain = append(chain, cat+" "+rec["msg"].(string))
 	}
-
 	want := []string{
 		"input agent: input",
 		"thinking agent: reasoning",
 		"thinking agent: plan",
-		"thinking agent: step begin",
 		"action agent: tool call",
 		"action agent: tool result",
-		"thinking agent: step result",
 		"output agent: output",
 	}
 	if strings.Join(chain, "\n") != strings.Join(want, "\n") {
@@ -265,26 +335,21 @@ func TestTurnLogsTheReasoningChain(t *testing.T) {
 	}
 }
 
-// Unreadable output is retried once with a nudge and never kept in the
-// transcript, so later phases can't continue it (D-041).
-func TestInvalidOutputIsNotKept(t *testing.T) {
-	h := newHarness(t)
-	h.llm.script(
-		call{invalid: true},
-		call{name: "plan_commit", args: `{"goal":"Greet.","steps":[],"direct_reply":"Hey."}`},
-	)
-	h.runNext(t, chatEvent("e1", "hey", ""))
+func statusServer() *mcpserver.Server {
+	s := mcpserver.New("status", "")
+	s.Add(mcpserver.Tool{Name: "summary", Verbatim: true, ReadOnly: true, Handler: func(context.Context, json.RawMessage) (string, error) {
+		return "Everything quiet.", nil
+	}})
+	return s
+}
 
-	if got := h.chat.sent; len(got) != 1 || got[0] != "Hey." {
-		t.Fatalf("sent = %q", got)
-	}
-	retry := h.llm.requests[1]
-	for _, m := range retry {
-		if strings.Contains(m.Content, "some prose") {
-			t.Fatal("invalid output was kept in the conversation")
-		}
-	}
-	if last := retry[len(retry)-1]; last.Content != plannerNudge {
-		t.Fatalf("retry did not end with the nudge: %+v", last)
-	}
+// editableChat is a chat channel that supports edits, like Discord.
+type editableChat struct {
+	chat
+	edits []string
+}
+
+func (c *editableChat) Edit(_ context.Context, _ event.Address, _, text string) error {
+	c.edits = append(c.edits, text)
+	return nil
 }

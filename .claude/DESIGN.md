@@ -25,7 +25,7 @@ flowchart LR
     queue[("taskqueue.Queue<br/>data/tasks/{pending,parked}")]
     subgraph core["agent.Runtime (1 goroutine)"]
         ctxb["ContextBuilder"]
-        strat["Strategy: PlanExecute<br/>Planner → Executor → Synthesizer"]
+        strat["Strategy: Loop (ReAct)<br/>one tool per call until reply"]
     end
     llm["llm.Model<br/>openai provider · json_schema"]
     host["mcphost.Host<br/>catalog · trust · _meta"]
@@ -61,9 +61,9 @@ flowchart LR
 | `ingest.Engine` | `internal/ingest` | `Register` / `Unregister` sources at any time. Supervises each `Source.Run` and restarts it with backoff (1s doubling to 1m; reset after 1m of health). Dedups on `(source, ID)` over the last 1024 events. Applies per-source actor allowlists. `ingest` Reporter. |
 | `taskqueue.Queue` | `internal/taskqueue` | Durable FIFO. One JSON file per pending task; capacity 256. A task is removed only on `Done` or `Park` (at-least-once). A task dequeued 2 times without finishing is dropped at boot. Also holds parked tasks (24h TTL). `tasks` Reporter. |
 | `agent.Runtime` | `internal/agent/runtime.go` | Serial worker. For each task: attach scope, build the system message, run the strategy, then deliver the reply or park the task. |
-| `Strategy` / `PlanExecute` | `internal/agent` | A reasoning scheme: fills `Turn.Reply` or `Turn.Await`. `PlanExecute` is the only implementation (D-037). |
+| `Strategy` / `Loop` | `internal/agent` | A reasoning scheme: fills `Turn.Reply` or `Turn.Await`. `Loop` (`react`) is the tool-calling agent loop and the only one (D-037, D-043). |
 | `ContextBuilder` | `internal/agent/context.go` | Builds the system message: prompt fragments, `<servers>`, `<context>`. |
-| `Planner` / `Executor` / `Synthesizer` | `internal/agent` | The phases of `PlanExecute`. Virtual tools `plan_commit`, `step_finish`, `reply_commit`. |
+| `Plan` / `reply` | `internal/agent/plan.go`, `reply.go` | The loop's own tools: `plan` keeps the checklist the user sees; `reply` ends the turn, rendered by `renderReply`. |
 | `mcphost.Host` | `internal/mcphost` | One MCP client session per server. Aggregates `tools/list` into the catalog and refreshes on `notifications/tools/list_changed`. Routes calls with a per-call timeout (30s default) and caps results at 32 KiB. Enforces trust (D-038). `mcp` Reporter. |
 | `mcphost.LoadServers` | `internal/mcphost/config.go` | Parses `MCP_SERVER_<NAME>_*` into external server configs and builds their transports. |
 | `mcphost.ResourceSource` | `internal/mcphost` | Ingest source over `resources/subscribe`. Each update is read and emitted as a `notification` event. |
@@ -136,7 +136,13 @@ flowchart LR
 ### Catalog
 
 - Tool names are `<server>_<tool>`, sanitized to `[A-Za-z0-9_-]` and capped at 64 characters. This matches the function-name pattern hosted APIs enforce. A name that collides is skipped with a warning.
-- Every step's LLM call advertises the whole catalog plus `step_finish` (D-029).
+- Every model call offers the whole catalog plus the loop's `reply` and `plan` (D-029).
+- Each tool has a category, derived from standard MCP annotations (D-044):
+  - `read`: `readOnlyHint`.
+  - `write`: not read-only, and `openWorldHint: false`.
+  - `external`: everything else, following MCP's defaults.
+
+  `reply` and `plan` are `finish`. The provider's tool menu groups tools by category, with `finish` first. Categories only group tools; nothing is allowed or refused because of them. Built-in tools always send `openWorldHint` explicitly.
 - `ContextBuilder` renders `<servers>`: one `## <name>` section per server, with its instructions and tool names. External servers are marked `(external)` and get no instructions.
 
 ### Built-in servers
@@ -165,61 +171,45 @@ flowchart LR
 - A stdio server's process gets only `PATH`, `HOME`, and its `_ENV_*` values.
 - Tool output from any server is capped at 32 KiB. Non-text content blocks are named, not dropped.
 
-## Turn Lifecycle (`PlanExecute`)
+## Turn Lifecycle (`Loop`, D-043)
 
 ### Conversation shape (one request)
 
 ```
-0    system  pinned resources (system://prompt/*) + <servers> + <context>
+0    system  pinned resources + <servers> + <context>
 1    user    the user's message, verbatim, untagged     (resumed: request, assistant question, answer)
-2    user    <phase name="plan">…</phase>
-3    asst    tool call: plan_commit                     offered: plan_commit
-4    tool    ok
-             ── if direct_reply and zero steps: deliver it and stop (1 LLM call) ──
-5    user    <phase name="execute_step">…</phase>       (step 1 of N)
-6    asst    tool call: <one tool>                      offered: catalog + step_finish
-7    tool    <result or "error: …">
-…    asst    step_finish({result, finished})
-…    tool    ok
-             ── repeat per step; finished=true skips the remaining steps; user_ask parks ──
-N    user    <phase name="synthesize">…</phase>
-N+1  asst    tool call: reply_commit                    offered: reply_commit
-N+2  tool    ok
+2    user    <phase name="turn">…</phase>
+3    asst    tool call: <one tool>                      offered: reply, plan, catalog
+4    tool    <result or "error: …">
+             ── repeat until reply, a user_ask, or the step budget ──
+N    asst    tool call: reply                           ends the turn
 ```
 
-### Phases
+### The loop
 
-1. **Plan.** The request messages and the plan directive are sent as separate messages. `plan_commit` takes a `goal`, `steps: [{intent}]` (zero or more), and an optional `direct_reply`.
-   - If steps survive trimming, `direct_reply` is cleared.
-   - Zero steps with no `direct_reply` is an error.
-   - `plan.md` asks for at most six steps, and for a single clarifying step when the request is too ambiguous to act on. This is prompt guidance only.
-2. **Fast path (D-032).** If `direct_reply` is set, the strategy returns it. No announcement, execution, or synthesis.
-3. **Announce.** Only if the origin connector supports edits (Discord, not email). Sends `**Working on:** <goal>` plus a numbered checklist. The message is edited as step statuses change (⏳ 🔄 ✅ ❌ ⏭️). A failed send or edit is logged and the turn continues.
-4. **Execute.** For each step: append the `execute_step` directive, then loop through LLM call → tool calls → tool results until `step_finish`.
-   - A failed step doesn't stop the plan. The next step runs, and synthesis sees the failure.
-   - `finished: true` marks the remaining steps skipped.
-   - A tool result carrying `tobee/await` ends the step and the turn. Calls the model batched after it get a `skipped` tool result, and synthesis is skipped.
-   - If the last step completes without `finished: true`, a WARN is logged.
-5. **Synthesize.** Append the `synthesize` directive. When verbatim output exists, the template tells the model that output is already handled. `reply_commit` returns `spoken` and `artifacts`, and `renderReply` builds the text.
-6. **Deliver (runtime).** Send `Turn.Reply` to the origin.
-   - Non-empty reply: clear all progress reactions.
-   - Empty reply: add ❌. This is the only place ❌ is applied.
-   - Parked turn: clear reactions; the question is the output.
+1. Append the request messages and the one `turn` directive, which is kept separate (D-029).
+2. Each iteration is one model call offering `reply`, `plan`, and the catalog:
+   - **`reply`** renders `spoken`, `artifacts`, and any verbatim blocks, and ends the turn. A greeting is one call.
+   - **`plan`** stores the checklist and acknowledges `ok`. It is shown only on connectors that can edit the message, and only with two or more steps; later calls edit it.
+   - **Any other tool** runs through the host and its result is appended. A verbatim result tells the model it is already shown. A `user_ask` result ends the turn so the runtime can park it (D-036).
+3. When `AGENT_MAX_STEPS` calls are spent, a budget nudge is appended and one last call offers only `reply`. If that fails, any verbatim blocks are delivered on their own.
+4. The runtime delivers `Turn.Reply`: non-empty clears the progress reactions; empty adds ❌. A parked turn clears its reactions.
+
+Replying to the origin is never a tool, and the send tools refuse the current conversation in code (D-035). An earlier design let `discord_send_message` answer the channel it was in, which duplicated the reply.
 
 ### Progress feedback
 
 | Signal | Where | Values |
 |---|---|---|
-| Reactions on the inbound message | Events with a `MessageID` on a connector that supports reactions (Discord) | ✅ received → 🧠 planning → 💭 executing. Cleared on success or park; ❌ on failure. |
-| Plan message edits | Announced plans only (connectors with edit support) | ⏳ pending, 🔄 running, ✅ done, ❌ failed, ⏭️ skipped |
+| Reactions on the inbound message | Events with a `MessageID` on a connector that supports reactions (Discord) | ✅ received → 🧠 thinking → 💭 using tools. Cleared on success or park; ❌ on failure. |
+| Plan message | Only when the model calls `plan` with 2+ steps, on connectors with edit support | ⏳ pending, 🔄 active, ✅ done, ⏭️ skipped |
 
 ### Budgets and limits
 
 | Limit | Value | Source |
 |---|---|---|
 | Turn wall-clock budget | 2m | `AGENT_TURN_BUDGET` |
-| Executor LLM calls per step | 4 | `PLAN_MAX_STEPS_PER_STEP` |
-| Executor LLM calls per turn | 12 | `PLAN_MAX_STEPS_TOTAL`. Counted before each call, so failed calls count. |
+| Model calls per turn | 12 | `AGENT_MAX_STEPS`, then one reply-only call. Failed and invalid calls count. |
 | LLM HTTP timeout / max tokens | 10m / 2048 | `AI_TIMEOUT` / `AI_MAX_TOKENS` (the turn context cancels first) |
 | Temperature | 0.1 | `AI_TEMPERATURE` (`openai.DefaultTemperature`) |
 | Tool call timeout | 30s | `MCP_SERVER_<NAME>_TIMEOUT`; built-ins use the default |
@@ -238,31 +228,29 @@ N+2  tool    ok
 
 | Pattern | Where it appears |
 |---|---|
-| **Plan-and-Execute** (Plan-and-Solve) | The planner commits a structured plan before any tool runs. No replanning: failed steps are reported, not revised. |
-| **ReAct** (Reason + Act) | Inside each step: tool call → tool result → repeat until `step_finish`. |
-| **Self-declared completion** | `step_finish({finished: true})` ends the plan early, like Cline's `attempt_completion`. |
-| **Direct-answer fast path** | `direct_reply` in `plan_commit`. The route is decided inside the planning call, not by a separate classifier. |
+| **ReAct / tool-calling agent loop** | One tool per model call, results appended, until `reply`. The same shape as the OpenAI Agents SDK runner or LangGraph's tool-calling agent. |
+| **Answer as a tool** | `reply` is a tool the model chooses when it can answer, so a trivial message is one call and no separate synthesis pass exists. |
+| **Model-maintained checklist** | `plan` is a todo list the model sets and updates, like Claude Code's todo tool, and only for multi-step work. |
 | **Human-in-the-loop clarification** | `user_ask` suspends the task and resumes on the answer, like LangGraph's `interrupt`, with state limited to request + question. |
-| **Final synthesis** | A separate call that presents results instead of continuing the conversation. |
-| **Constrained decoding (structured output)** | Every call sends a JSON Schema admitting exactly one call to one offered tool; the server enforces it by grammar. Phase outputs are virtual tools whose schema defines the output. |
+| **Constrained decoding (structured output)** | Every call sends a JSON Schema admitting exactly one call to one offered tool; the server enforces it by grammar. |
 | **Corrective retry ("re-asking")** | Unreadable output is dropped, a short nudge is appended, and the call is retried once. |
 | **Tool errors returned to the model** | A tool error becomes the tool result (`error: …`) and the model decides what to do next. |
-| **Content/presentation separation** | The model provides `spoken` and `artifacts`; Go writes the code fences. |
+| **Content/presentation separation** | `reply` provides `spoken` and `artifacts`; Go writes the code fences. |
 | **Return-direct passthrough** | Output from verbatim tools is appended by code and never rewritten by the model. Same idea as LangChain's `return_direct`. |
-| **Spotlighting** (delimiting) | Harness directives are wrapped in `<phase>` tags; user text never is. |
-| **Tool-driven memory recall** | Nothing from memory is pre-loaded into the prompt; the model calls `memory_*` to fetch it. |
+| **Spotlighting** (delimiting) | The harness directive is wrapped in a `<phase>` tag; user text never is. |
+| **Tool-driven memory recall** | Nothing from memory is pre-loaded into the prompt; the model reads `memory://` resources. |
 
 ### Retry and failure handling
 
-| Phase | Retry budget | Unrecoverable | Result of exhaustion |
-|---|---|---|---|
-| Planner | 2 attempts shared by LLM errors and violations. The nudge is added only after the first violation. | Bad `plan_commit` JSON; zero steps and no `direct_reply` | Turn aborts before the announcement; ❌ |
-| Executor (per step) | 1 retry for LLM errors plus 1 retry for violations, both within the per-step and total budgets | Bad `step_finish` JSON; turn context expired | Step marked ❌; the plan continues |
-| Synthesizer | 2 attempts shared, like the planner | Bad `reply_commit` JSON | If verbatim blocks exist, send them alone; otherwise an empty reply and ❌ |
-| Tool call | No automatic retry | Unknown tool, timeout, transport failure, panic (recovered in built-ins) | Sent to the model as `error: …` |
-| Source | Restart with backoff, forever | — | Logged; `ingest` Reporter shows `down` |
-| Task | Redelivered after a crash, up to 2 attempts | — | Dropped at boot with an ERROR |
-| Announce, edit, react, send | No retry | — | Logged; turn continues |
+| Failure | Handling | Exhausted |
+|---|---|---|
+| Unreadable output (`ErrInvalidDecision`) | Dropped; nudge; retry. At most 1 per turn. | Turn ends with no reply; ❌ |
+| Model call error | Retry once per turn | Turn ends with no reply; ❌ |
+| Tool call error, timeout, panic (recovered in built-ins) | No retry; sent to the model as `error: …` | — |
+| Step budget spent | One reply-only call | Verbatim blocks alone, else ❌ |
+| Source | Restart with backoff, forever | Logged; `ingest` Reporter shows `down` |
+| Task | Redelivered after a crash, up to 2 attempts | Dropped at boot with an ERROR |
+| Plan message, react, send | No retry | Logged; turn continues |
 
 Violations (output that was not a valid tool choice, `llm.ErrInvalidDecision`) are logged at ERROR as `agent: PROTOCOL VIOLATION` (`cat=llm`) with `phase`, `err`, `raw_chars`, `raw_preview`. With constrained decoding they mean the server ignored the schema. The unreadable output is never appended to the conversation.
 
@@ -280,15 +268,14 @@ The conversation keeps standard tool-call form (an assistant message with `tool_
 
 ## Logging (D-040)
 
-Every record has a `cat` attribute. Records from a turn also carry `task`, and within a phase `phase` (`plan` / `execute` / `synthesize`) and `step`. The attributes ride on a logger in the context (`telemetry.With`).
+Every record has a `cat` attribute. Records from a turn also carry `task`, and records from a model call or tool call carry `step` (the loop iteration). The attributes ride on a logger in the context (`telemetry.With`).
 
 | `cat` | Level | Record (`msg`) | Content |
 |---|---|---|---|
 | `input` | INFO | `agent: input` | Event source, kind, connector, channel, user, `content`; on a resumed task also `resumes`, `request`, `question` |
 | `thinking` | INFO | `agent: reasoning` | The model's separate reasoning (`reasoning_content` / `reasoning`), when the server returns it |
 | `thinking` | INFO | `agent: model text` | Any text the model wrote alongside its tool call |
-| `thinking` | INFO | `agent: plan` | `goal`, `route` (`steps` / `direct_reply`), `steps` |
-| `thinking` | INFO | `agent: step begin` / `step result` / `step failed` | Intent; `result` and `finished`; error |
+| `thinking` | INFO | `agent: plan` | `goal`, `steps` (`status: title`) |
 | `action` | INFO / WARN | `agent: tool call` / `tool result` | `tool`, `call_id`, `args`; `status` (`ok` / `verbatim` / `await` / `error` / `failed`), `duration_ms`, `content` |
 | `output` | INFO | `agent: output` | `kind` (`reply` / `plan` / `question`), destination, `content` |
 | `llm` | INFO | `agent: llm call` | `duration_ms`, `prompt_tokens`, `completion_tokens`, `finish`, `tool_calls` |
@@ -314,12 +301,12 @@ Every record has a `cat` attribute. Records from a turn also carry `task`, and w
   1. Pinned resources from trusted servers, in server then URI order, capped at 32 KiB. Today only the `system` server pins anything: `prompts/system/*.md` (identity, voice, behaviour, safety, tools), read fresh each turn.
   2. `<servers>`: each connected server's name, trusted instructions, and tool names. Built-in instructions are `prompts/servers/<name>.md`. The workspace server appends its area list.
   3. `<context>`: `now` (RFC3339 plus a readable date), source, kind, connector, channel, thread, and user name and ID, or `user=none`.
-- **Phase directives** are user-role messages rendered from `prompts/state/{plan,execute_step,synthesize}.md` with `StateData` (`Plan`, `Step`, `StepNumber`, `StepTotal`, `AvailableTools`, `HasVerbatim`).
+- **Turn directive** is one user-role message rendered from `prompts/state/turn.md`, wrapped in `<phase name="turn">`.
 - **Prompts carry no call syntax.** No `tool({args})` examples anywhere: the local model copied them as text instead of making a tool call (2026-09-28). Tool names appear bare; schemas come with the request.
 - **What each file owns.**
-  - `prompts/system/` holds rules true in every phase.
+  - `prompts/system/` holds rules true for every turn.
   - `prompts/servers/` holds how to use one server.
-  - State templates hold one phase's contract.
+  - `prompts/state/turn.md` holds how to work a turn: reply early, plan only multi-step work, ask when unclear.
   - Phase rules placed in the system prompt leak into other phases.
 - **Prefix caching.**
   - Across turns, sections 1–2 are identical until a server connects, disconnects, or changes its tool list.
@@ -414,23 +401,23 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-015 | Model-created jobs: one JSON file each, robfig cron plus `AfterFunc`, replayed at boot, misfire skip. | Reminders must survive restart and route back to the originating channel. | Missed one-shots are dropped silently. |
 | D-017 | Stable sections first in the system message. | Prefix caching on the LLM server. | Reordering sections must keep the stable-first order. |
 | D-019 | Workspace areas: operator-configured sandboxed roots; list carried in the workspace server's instructions. | Access limited to directories the operator opts in; no discovery calls needed. | Area names and descriptions are visible to the model. |
-| D-024 | Tool-using turns run plan → announce → execute → synthesize. | A typed plan drives execution, progress UI, and synthesis input. | At least 3 LLM calls for tool turns. |
-| D-025 | Strict tool-call protocol in every phase; one nudge-and-retry; no text fallbacks. | Every text escape hatch became a class of "the model decided" bugs. | Worst case doubles the calls for a phase. |
+| D-025 | Every model output is a tool call; one nudge-and-retry; no text fallbacks. | Every text escape hatch became a class of "the model decided" bugs. | An unreadable call costs a retry. |
 | D-026 | Memory is never pre-loaded into the prompt, and is never pinned (D-042); recall is a read. | Bounded prompt; auditable reads; no stale snapshots. | Recall costs 1–2 extra tool calls. |
 | D-027 | No chat history: no ring buffer, summarizer, or sessions. The only cross-turn state is a parked question (D-036). | Transcripts got polluted; summaries were hallucinated; sessions mixed users in shared channels. | "Make it spicy" has no referent unless it was saved to memory. |
-| D-029 | One `Conversation` per request; phase directives from `prompts/state/` in `<phase>` tags; every step gets every tool. | Planner and executor share context; one system message enables prefix caching. | Synthesis sees the full transcript (continuation risk). |
+| D-029 | One `Conversation` per request; the harness directive is its own `<phase>`-tagged message; every call offers every tool. | One system message enables prefix caching; the user's words are never mixed with directives. | The whole transcript is resent on each call. |
 | D-030 | Verbatim output is enforced in code, now as `tobee/verbatim` tool metadata honored for trusted servers; clock stamped in `<context>`; status takes a relative `window`. | "Relay verbatim" in prose was ignored; the model invented windows and state. | Only a short lead-in is written by the model on status turns. |
-| D-032 | Planner may commit `direct_reply` with zero steps. | A greeting used to cost 3 LLM calls and render a checklist. | A wrong route produces a wrong answer, and nothing in code prevents it. |
-| D-033 | MCP is the only tool plane. Built-ins are in-process MCP servers; the host aggregates `tools/list` into one catalog named `<server>_<tool>`; server instructions (from `prompts/servers/`) replace the hand-written catalogue. Virtual tools are `plan_commit`, `step_finish`, `reply_commit`. | One path for built-in and third-party tools; the catalog can't drift from what's callable; names valid on every OpenAI-compatible backend. | In-process servers can't see the turn's `ctx`, so scope rides in `_meta`. Tool renames touched every prompt. |
+| D-033 | MCP is the only tool plane. Built-ins are in-process MCP servers; the host aggregates `tools/list` into one catalog named `<server>_<tool>`; server instructions (from `prompts/servers/`) replace the hand-written catalogue. The loop adds its own tools, `reply` and `plan`. | One path for built-in and third-party tools; the catalog can't drift from what's callable; names valid on every OpenAI-compatible backend. | In-process servers can't see the turn's `ctx`, so scope rides in `_meta`. Tool renames touched every prompt. |
 | D-034 | Input is an ingest engine of `Source`s feeding a durable task queue. Sources register and unregister at runtime and restart with backoff; events are deduped and allowlisted per source; tasks are on disk until done, at most 2 attempts. | Any number of inputs (chat, mail, timers, MCP notifications) through one path; nothing lost on restart or while a long turn runs. | At-least-once: a crash mid-turn can repeat a reply. A bad token now retries instead of exiting. |
 | D-035 | A connector is one package that is a source, a delivery channel, and an MCP server. The reply to the origin is sent in code; messages elsewhere (`discord_send_message`, `email_send`) and questions (`user_ask`) are tools. Plans are announced only where edits work. | The default reply can't be skipped or reworded; the model can still reach people deliberately. | Two ways to send text; prompts must say which is which. |
 | D-036 | Clarifying questions park the task. `user_ask` sends the question and returns `tobee/await` keys; an answer matching a reply key (or, failing that, the same user in the same channel) within 24h resumes it as request → question → answer. | Blocking inside a 2-minute turn can't wait for a person; a full transcript would reintroduce session state. | The resumed turn replans from scratch. A user's unrelated next message in that channel can be taken as the answer. |
-| D-037 | Reasoning schemes implement `Strategy`; `PlanExecute` is the only one; `AGENT_STRATEGY` selects it. | The operator wants to try other schemes without touching the runtime. | An interface with one implementation, by explicit choice. |
+| D-037 | Reasoning schemes implement `Strategy`; the `react` loop is the only one; `AGENT_STRATEGY` selects it. | The operator wants to try other schemes without touching the runtime. | An interface with one implementation, by explicit choice. |
 | D-038 | Trust is per MCP server. Built-ins are trusted; external servers are untrusted unless `_TRUSTED=true`: no scope in `_meta`, no instructions in the prompt, no verbatim/await, no subscriptions. Stdio servers get a minimal environment. Email is allowlisted inbound and outbound. | Third-party servers and inboxes are the widest prompt-injection surface; the system prompt is the most privileged place text can land. | Untrusted servers get less context and may be less useful. |
 | D-039 | The LLM backend is configuration: `AI_PROVIDER_URL`, `AI_MODEL`, `AI_API_KEY`, `AI_TEMPERATURE`, `AI_MAX_TOKENS`, `AI_TIMEOUT`. The OpenAI-compatible chat API is the contract. | Switching models or hosts is planned; no code change should be needed. | Backends without an OpenAI-compatible endpoint need a proxy. |
-| D-040 | Logs are categorized by the reasoning chain: `input`, `thinking`, `action`, `output`, plus `llm` and `system`, with `task` / `phase` / `step` correlation from a context logger. The INFO trail carries content (capped by `LOG_CONTENT_LIMIT`); DEBUG adds the exact prompts, logged incrementally. | One turn's input, reasoning, actions, and output must be reconstructable and filterable without DEBUG; the old DEBUG dump re-printed the whole transcript per call and dropped model reasoning. | User messages and tool output are in INFO logs; lower `LOG_CONTENT_LIMIT` to trim them. |
+| D-040 | Logs are categorized by the reasoning chain: `input`, `thinking`, `action`, `output`, plus `llm` and `system`, with `task` / `step` correlation from a context logger. The INFO trail carries content (capped by `LOG_CONTENT_LIMIT`); DEBUG adds the exact prompts, logged incrementally. | One turn's input, reasoning, actions, and output must be reconstructable and filterable without DEBUG; the old DEBUG dump re-printed the whole transcript per call and dropped model reasoning. | User messages and tool output are in INFO logs; lower `LOG_CONTENT_LIMIT` to trim them. |
 | D-041 | The agent reaches a model only through `llm.Model.Decide`, which returns exactly one call to one offered tool. The OpenAI-compatible provider enforces this with `response_format: json_schema` (grammar-constrained on Ollama), not `tools` / `tool_choice`; a per-request tool menu describes the options. Unreadable output is never kept. `AI_PROVIDER` selects the provider. | Ollama ignores `tool_choice`, so the model answered in prose or wrote calls as text (the long-standing protocol violations). Constrained decoding makes that impossible, and one interface keeps request shape and server quirks out of the agent. | One tool call per model call. The tool menu adds prompt tokens at the tail of every request. Needs a server with `json_schema` support. `llm.Model` has one implementation, by choice. |
 | D-042 | Servers expose readable content as MCP resources and resource templates, with URIs that mirror the folder tree (`memory://user/…`, `workspace://<area>/…`). The model reads any of them through the one `resources_read` tool; per-server read tools are gone. Resources a trusted server pins (priority 1) go into every system prompt, capped at 32 KiB; the only pinned set is `prompts/system/*.md`, served by the `system` server. | One read path for built-in and third-party content; files stay human-editable; the system prompt uses the same mechanism as any other context. | Pinned resources are read every turn. Memory is never pinned (D-026). Untrusted servers cannot pin (D-038). |
+| D-043 | A turn is one tool-calling agent loop (ReAct): each model call picks one tool from the catalog plus the loop's own `reply` and `plan`, until `reply`. `plan` is a model-maintained checklist shown only for 2+ steps where it can be edited. Out of steps, one reply-only call. | The fixed plan → announce → execute → synthesize sequence turned a greeting into a one-step plan, a checklist, and two replies. With `reply` as a tool, simple turns cost one call and there is no separate synthesis. | Multi-step structure depends on the model choosing to call `plan`. No per-step budget; `AGENT_MAX_STEPS` bounds the turn. |
+| D-044 | Tool categories are derived from standard MCP annotations: `read` (readOnlyHint), `write` (openWorldHint false), `external` (otherwise); the loop's tools are `finish`. They group the tool menu and nothing else. | Helps the model tell answering from acting without a custom MCP field; works for third-party servers that annotate. | Annotations are hints; untrusted servers can mislabel tools, which is why categories never gate anything (D-038). |
 
 ## Rejected Alternatives
 
@@ -440,7 +427,8 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | Native `tools` + `tool_choice=required` | Ollama's OpenAI endpoint ignores `tool_choice`, so nothing prevented prose or text-written calls | D-041 |
 | Two calls per step (choose tool, then fill arguments) | Doubles latency; one `anyOf` schema does both | D-041 |
 | Separate triage/classifier call before planning | `tool_choice=required` didn't hold on the local model; adds a round trip | D-022 → D-023, D-030, D-032 |
-| Pure ReAct loop with always-on synthesis | Synthesis continued the conversation instead of presenting results; no plan to announce | D-023 → D-024, D-029 |
+| Fixed plan → announce → execute → synthesize phases | A trivial message became a plan, a checklist, and a synthesis; the executor even answered the origin with a send tool, duplicating the reply | D-024 → D-043 |
+| Pure ReAct loop with always-on synthesis | Synthesis continued the conversation instead of presenting results; no plan to announce | D-023. D-043 is ReAct without a synthesis pass: the model replies when ready. |
 | Planner with `plan.revise` replanning | Removed when the plan/execute shape was restored; failures are reported instead | D-020 → D-024 |
 | Per-step tool scoping | The planner granted empty tool lists, so steps did nothing | D-029 |
 | Text-wrap fallback / salvage parser for tool calls written as text | Masks an undiagnosed cause; reintroduces "the model chooses the format" | D-025, `3e818f9` |
@@ -459,12 +447,11 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | Per-event tool filtering by trust level | Admission control already limits who can start a task; revisit when an untrusted source is admitted | D-038 |
 | `workspace.delete` / `move` / `exec` | Destructive or high-risk with no human in the loop | D-019 |
 | More than one retry per phase, backoff | Only covers for a broken model | D-025 |
-| `direct_reply` length cap | No evidence of overuse | D-032 |
 
 ## Open Questions
 
 - **Grammar cost of large catalogs.** An `anyOf` over many external tools may be slow to compile on Ollama. Watch `agent: llm call` latency as servers are added.
-- **Synthesizer context.** Full transcript (current) or `[system, request, directive]` (branch `synth-slim-context-violations`)?
+- **Small-model planning.** With `plan` optional, watch whether `qwen2.5:7b` plans genuinely multi-step work or skips it.
 - **Catalog size.** 13 built-in tools with Discord only, up to 19 with every built-in. Watch for tool-choice errors as external servers are added; per-source toolsets may be needed.
 - **Streaming replies** vs. single-shot delivery.
 - **`INDEX.md` curation:** keep it human-maintained or let the agent own it.

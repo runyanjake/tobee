@@ -6,7 +6,7 @@ A self-hosted personal AI agent (named after the family cat 🐾): it takes task
 
 - **Pluggable inputs.** Discord, an IMAP inbox, scheduled jobs, and MCP resource notifications all feed one durable task queue. Sources restart on failure and can be registered at runtime.
 - **MCP tool platform.** Built-in capabilities (memory, workspace, schedules, status, messaging) are MCP servers. Add third-party servers over stdio or HTTP with env vars alone. External servers are sandboxed by default.
-- **Plan → execute → synthesize, on rails.** Every model call is schema-constrained JSON choosing one tool, so the model cannot ramble or write tool calls as text. Tool-using requests get a live-edited plan checklist, a ReAct loop for each step, and one composed reply. Simple messages get a one-call answer. Every model output is a forced tool call.
+- **One agent loop, on rails.** Each model call is schema-constrained JSON choosing one tool, so the model cannot ramble or write tool calls as text. It replies as soon as it can: a greeting is one call, and only multi-step work shows a live checklist. Tools are grouped by MCP annotations into read / write / external. Simple messages get a one-call answer. Every model output is a forced tool call.
 - **Asks when unsure.** The agent can send a clarifying question, pause the task, and resume when the user answers.
 - **Plain-text memory as MCP resources.** Per-user and shared folder trees under `data/memory/`, addressed as `memory://user/…` and `memory://shared/…` and read through one `resources_read` tool. No database, no vector store, no chat history.
 - **Swappable model and reasoning.** The agent talks to an `llm.Model` interface; the OpenAI-compatible provider covers local and hosted backends by env. The reasoning strategy is an interface too.
@@ -26,7 +26,7 @@ flowchart LR
             direction TB
             ingest["Ingest engine<br/>sources: discord · email · schedule · mcp"]
             queue["Task queue<br/>durable · parked questions"]
-            runtime["Agent runtime<br/>serial · Strategy: plan → execute → synthesize"]
+            runtime["Agent runtime<br/>serial · agent loop until reply"]
             mcphost["MCP host<br/>tool catalog · trust"]
             builtin["Built-in MCP servers<br/>memory · workspace · schedule<br/>status · user · discord · email"]
             delivery["Delivery router<br/>reply to origin"]
@@ -85,9 +85,9 @@ Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every v
 | `AI_API_KEY` | no | — | Bearer token for hosted APIs. |
 | `AI_TEMPERATURE` | no | `0.1` | Keep low; every call is a structured decision. |
 | `AI_MAX_TOKENS` / `AI_TIMEOUT` | no | `2048` / `10m` | Per-completion token cap and HTTP timeout. |
-| `AGENT_STRATEGY` | no | `plan_execute` | Reasoning strategy. |
+| `AGENT_STRATEGY` | no | `react` | Reasoning strategy: the tool-calling agent loop. |
 | `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn. |
-| `PLAN_MAX_STEPS_PER_STEP` / `PLAN_MAX_STEPS_TOTAL` | no | `4` / `12` | Executor LLM calls per step / per turn. |
+| `AGENT_MAX_STEPS` | no | `12` | Model calls per turn; then one forced reply. |
 | `DISCORD_TOKEN` | one connector | — | Enables the Discord connector. |
 | `DISCORD_CHANNEL_ID` | no | *(all)* | Only handle this channel. |
 | `DISCORD_ALLOWED_USERS` | no | *(all)* | Comma-separated user IDs to accept. |

@@ -12,31 +12,31 @@ func TestRenderReplyVerbatim(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		args     replyCommitArgs
+		args     replyArgs
 		verbatim []VerbatimBlock
 		want     string
 	}{
 		{
 			name:     "single-line verbatim goes in bare",
-			args:     replyCommitArgs{Spoken: "Here's where things stand."},
+			args:     replyArgs{Spoken: "Here's where things stand."},
 			verbatim: []VerbatimBlock{{Tool: "status_summary", Body: summary}},
 			want:     "Here's where things stand.\n\n" + summary,
 		},
 		{
 			name:     "empty spoken yields the block alone",
-			args:     replyCommitArgs{},
+			args:     replyArgs{},
 			verbatim: []VerbatimBlock{{Tool: "status_summary", Body: summary}},
 			want:     summary,
 		},
 		{
 			name:     "multi-line verbatim is fenced",
-			args:     replyCommitArgs{},
+			args:     replyArgs{},
 			verbatim: []VerbatimBlock{{Tool: "status_report", Body: report}},
 			want:     "```\n" + report + "\n```",
 		},
 		{
 			name: "verbatim follows model artifacts",
-			args: replyCommitArgs{
+			args: replyArgs{
 				Spoken:    "Done.",
 				Artifacts: []replyArtifact{{Lang: "go", Body: "package main"}},
 			},
@@ -45,7 +45,7 @@ func TestRenderReplyVerbatim(t *testing.T) {
 		},
 		{
 			name: "no verbatim leaves the reply untouched",
-			args: replyCommitArgs{Spoken: "Hello."},
+			args: replyArgs{Spoken: "Hello."},
 			want: "Hello.",
 		},
 	}
@@ -63,7 +63,7 @@ func TestRenderReplyVerbatim(t *testing.T) {
 func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 	const body = "Discord is connected and saw 1 inbound message in the window."
 	got := renderReply(
-		replyCommitArgs{Spoken: "Discord checked and found 1 inbound message in the last hour."},
+		replyArgs{Spoken: "Discord checked and found 1 inbound message in the last hour."},
 		[]VerbatimBlock{{Tool: "status_summary", Body: body}},
 	)
 	if !strings.Contains(got, body) {
@@ -74,7 +74,7 @@ func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 // When the synthesiser dies, the loop falls back to what the tools already rendered.
 func TestRenderReplyVerbatimOnlyIsDeliverable(t *testing.T) {
 	const body = "Discord is connected and saw 2 inbound messages in the window."
-	got := renderReply(replyCommitArgs{}, []VerbatimBlock{{Tool: "status_summary", Body: body}})
+	got := renderReply(replyArgs{}, []VerbatimBlock{{Tool: "status_summary", Body: body}})
 	if got != body {
 		t.Fatalf("renderReply() = %q, want %q", got, body)
 	}
@@ -99,29 +99,17 @@ func TestAddVerbatim(t *testing.T) {
 	}
 }
 
-// Render the real template from disk so a broken action fails here, not at boot.
-func TestSynthesizeTemplateBranches(t *testing.T) {
+// The turn directive must load and render from disk, or boot fails later.
+func TestTurnTemplateRenders(t *testing.T) {
 	states, err := LoadStateTemplates(filepath.Join("..", "..", "prompts", "state"))
 	if err != nil {
 		t.Fatalf("LoadStateTemplates: %v", err)
 	}
-
-	with, err := states.Render("synthesize", StateData{HasVerbatim: true})
+	got, err := states.RenderPhase("turn", StateData{})
 	if err != nil {
-		t.Fatalf("render with verbatim: %v", err)
+		t.Fatalf("render turn: %v", err)
 	}
-	without, err := states.Render("synthesize", StateData{})
-	if err != nil {
-		t.Fatalf("render without verbatim: %v", err)
-	}
-
-	if !strings.Contains(with, "already handled") {
-		t.Fatalf("HasVerbatim=true did not emit the pre-rendered section:\n%s", with)
-	}
-	if strings.Contains(without, "already handled") {
-		t.Fatalf("HasVerbatim=false leaked the pre-rendered section:\n%s", without)
-	}
-	if !strings.Contains(without, "reply_commit") {
-		t.Fatalf("base contract missing from synthesize template:\n%s", without)
+	if !strings.HasPrefix(got, `<phase name="turn">`) || !strings.Contains(got, "reply") {
+		t.Fatalf("turn directive = %q", got)
 	}
 }

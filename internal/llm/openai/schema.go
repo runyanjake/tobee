@@ -138,20 +138,51 @@ func renderMenu(tools []llm.ToolSpec) string {
 	var b strings.Builder
 	b.WriteString("<tools>\nReply with one JSON object that calls exactly one of these tools:\n")
 	b.WriteString(`{"call": {"tool": "<name>", "arguments": {...}}}` + "\n")
-	for _, t := range tools {
-		fmt.Fprintf(&b, "\n%s", t.Name)
-		if d := strings.TrimSpace(t.Description); d != "" {
-			fmt.Fprintf(&b, ": %s", oneLine(d))
-		}
-		b.WriteByte('\n')
-		var schema map[string]any
-		_ = json.Unmarshal(t.InputSchema, &schema)
-		for _, line := range argLines(schema) {
-			fmt.Fprintf(&b, "  - %s\n", line)
+	for _, g := range menuGroups {
+		first := true
+		for _, t := range tools {
+			if t.Category != g.category && !(g.category == "" && !knownCategory(t.Category)) {
+				continue
+			}
+			if first {
+				fmt.Fprintf(&b, "\n## %s\n", g.heading)
+				first = false
+			}
+			fmt.Fprintf(&b, "\n%s", t.Name)
+			if d := strings.TrimSpace(t.Description); d != "" {
+				fmt.Fprintf(&b, ": %s", oneLine(d))
+			}
+			b.WriteByte('\n')
+			var schema map[string]any
+			_ = json.Unmarshal(t.InputSchema, &schema)
+			for _, line := range argLines(schema) {
+				fmt.Fprintf(&b, "  - %s\n", line)
+			}
 		}
 	}
 	b.WriteString("</tools>")
 	return b.String()
+}
+
+// menuGroups orders the menu by what a call does; "" collects uncategorized tools.
+var menuGroups = []struct {
+	category llm.Category
+	heading  string
+}{
+	{llm.CategoryFinish, "Finish or organize the turn"},
+	{llm.CategoryRead, "Read (no side effects)"},
+	{llm.CategoryWrite, "Change tobee's own state"},
+	{llm.CategoryExternal, "Reach people or systems outside tobee"},
+	{"", "Other"},
+}
+
+func knownCategory(c llm.Category) bool {
+	for _, g := range menuGroups {
+		if g.category != "" && g.category == c {
+			return true
+		}
+	}
+	return false
 }
 
 // argLines renders `name (type, required): description`, required ones first.

@@ -137,3 +137,25 @@ func TestSingleToolSchemaHasNoAnyOf(t *testing.T) {
 		t.Fatalf("single-tool schema should not branch: %s", schema)
 	}
 }
+
+// The menu groups tools by category, finishing tools first, so a chat reply
+// isn't buried under side-effect tools.
+func TestMenuGroupsByCategory(t *testing.T) {
+	menu := renderMenu([]llm.ToolSpec{
+		{Name: "discord_send_message", Category: llm.CategoryExternal},
+		{Name: "memory_list", Category: llm.CategoryRead},
+		{Name: "reply", Category: llm.CategoryFinish},
+		{Name: "memory_write", Category: llm.CategoryWrite},
+		{Name: "mystery"},
+	})
+	order := []string{"## Finish", "reply", "## Read", "memory_list", "## Change", "memory_write",
+		"## Reach people", "discord_send_message", "## Other", "mystery"}
+	at := 0
+	for _, want := range order {
+		i := strings.Index(menu[at:], want)
+		if i < 0 {
+			t.Fatalf("menu missing %q after offset %d:\n%s", want, at, menu)
+		}
+		at += i
+	}
+}

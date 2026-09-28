@@ -39,8 +39,11 @@ type Tool struct {
 	InputSchema json.RawMessage // JSON Schema, type "object"
 	Handler     Handler
 
-	ReadOnly bool
-	Verbatim bool
+	ReadOnly bool // MCP readOnlyHint
+	// OpenWorld (MCP openWorldHint) marks tools that reach people or systems
+	// outside tobee. Always sent: absent means true in the MCP spec.
+	OpenWorld bool
+	Verbatim  bool
 }
 
 type Server struct {
@@ -88,7 +91,7 @@ func (s *Server) Add(t Tool) {
 		Name:        t.Name,
 		Description: t.Description,
 		InputSchema: schema,
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: t.ReadOnly},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: t.ReadOnly, OpenWorldHint: &t.OpenWorld},
 	}
 	if t.Verbatim {
 		def.Meta = mcp.Meta{MetaVerbatim: true}

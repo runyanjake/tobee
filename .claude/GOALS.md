@@ -5,7 +5,7 @@
 - **Take input from many sources.** Discord messages, email to an agent-owned inbox, its own scheduled jobs, and change notifications from trusted MCP servers all arrive as events in one durable task queue (D-034). Sources can be added or removed without touching the agent.
 - **Chat through Discord.** Responds when mentioned (`@tobee` or a raw `<@id>`), replied to, or named as a whole word ("tobee, …"). Works in DMs and guild channels, and needs to be addressed in both. `DISCORD_CHANNEL_ID` and `DISCORD_ALLOWED_USERS` narrow it.
 - **Handle email.** Polls an IMAP inbox for mail from allowlisted senders and replies in-thread over SMTP.
-- **Plan and act with tools.** Commits a plan, announces it as a live checklist where the channel supports edits, executes steps with tools, and replies. Simple messages skip straight to a one-call direct reply (D-032).
+- **Act with tools in one loop.** Calls one tool at a time until it can reply. Greetings and small talk are one call. Multi-step work gets a live checklist where the channel supports edits (D-043).
 - **Use any MCP server.** Built-in tools are MCP servers; external servers connect over stdio or HTTP with env config only. The model sees one catalog (D-033). External servers are untrusted by default (D-038).
 - **Ask when unsure.** `user_ask` sends a clarifying question and pauses the task until the user answers (D-036).
 - **Remember across messages.** Reads and writes plain-text memory files, split into a per-user tree and a shared tree (`memory_*`).
@@ -58,7 +58,8 @@ Deferred until there is a concrete need (D-004 and later entries):
 Explicitly rejected:
 
 - Chat history or a rolling summarizer across turns (D-027).
-- A separate triage or classifier LLM call before planning (D-022 → D-023, D-032).
+- A separate triage or classifier LLM call before acting (D-022 → D-023).
+- Fixed plan / execute / synthesize phases (D-024 → D-043).
 - Parsing tool calls the model wrote as text (D-025, `3e818f9`).
 - `workspace.delete`, `workspace.move`, `workspace.exec`. Adding any of these needs a new decision (D-019).
 - Prefix commands like `!memory.list` as a second control plane (D-007).
@@ -69,8 +70,7 @@ Explicitly rejected:
 From the open questions in the former decision log and the latest commits (2026-07-19):
 
 1. **Confirm structured output in prod** (D-041). The cause of the text-written tool calls was found on 2026-09-28: Ollama's OpenAI endpoint ignores `tool_choice`. Every call now uses a JSON-schema `response_format`, which Ollama enforces by grammar. Verify on the prod Ollama and `qwen2.5:7b` that `agent: PROTOCOL VIOLATION` no longer appears and that tool choice is sensible.
-2. **Decide on a smaller synthesizer context.** The unmerged branch `synth-slim-context-violations` builds the synthesizer's input as `[system, user request, directive]` instead of the full transcript.
-3. **Watch the direct-reply fast path** for wrong answers the model should have looked up (D-032).
-4. **Validate the MCP platform in prod** (2026-09-28). Confirm `qwen2.5:7b` handles the renamed tools and `user_ask`. Test the email connector against a real mailbox. Watch tool-choice accuracy as external servers are added.
+2. **Watch the agent loop on the prod model** (D-043): does `qwen2.5:7b` reply directly to chit-chat, look things up before answering, and call `plan` only for real multi-step work?
+3. **Validate the MCP platform in prod** (2026-09-28). Confirm `qwen2.5:7b` handles the renamed tools and `user_ask`. Test the email connector against a real mailbox. Watch tool-choice accuracy as external servers are added.
 
 TODO: Confirm these priorities and add any roadmap items not recorded in the repo.

@@ -11,17 +11,8 @@ import (
 	"text/template"
 )
 
-// StateData renders prompts/state/*.md; irrelevant fields stay zero and templates gate on them.
-type StateData struct {
-	Plan              *Plan
-	Step              *Step
-	StepNumber        int // 1-indexed for display
-	StepTotal         int
-	SurfacedKnowledge []string // stub for future web/file search
-
-	// HasVerbatim tells synth that code appends tool output, so the model mustn't restate it (D-030).
-	HasVerbatim bool
-}
+// StateData is the render context for prompts/state/*.md.
+type StateData struct{}
 
 // StateTemplates are parsed at boot; a render failure is a programming error, not bad input.
 type StateTemplates struct {

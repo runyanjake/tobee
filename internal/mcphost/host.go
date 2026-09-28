@@ -273,10 +273,25 @@ func (h *Host) Tools() []llm.ToolSpec {
 			Name:        exposed,
 			Description: ref.tool.Description,
 			InputSchema: schema,
+			Category:    category(ref.tool.Annotations),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// category follows MCP's annotation defaults: a tool without hints may
+// write and may reach the outside world. Annotations only group tools in the
+// model's menu; nothing is allowed or refused on the strength of them (D-038).
+func category(a *mcp.ToolAnnotations) llm.Category {
+	switch {
+	case a != nil && a.ReadOnlyHint:
+		return llm.CategoryRead
+	case a != nil && a.OpenWorldHint != nil && !*a.OpenWorldHint:
+		return llm.CategoryWrite
+	default:
+		return llm.CategoryExternal
+	}
 }
 
 func (h *Host) ToolNames() []string {

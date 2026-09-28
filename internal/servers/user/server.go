@@ -28,7 +28,8 @@ func New(instructions string, out *delivery.Router) *mcpserver.Server {
 			},
 			"required": ["question"]
 		}`),
-		Handler: askHandler(out),
+		OpenWorld: true,
+		Handler:   askHandler(out),
 	})
 	return srv
 }
