@@ -114,7 +114,7 @@ func newHarness(t *testing.T, extra ...*mcpserver.Server) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := NewRuntime(q, &ContextBuilder{Servers: host}, out, strategy, Config{TurnBudget: 10 * time.Second})
+	rt := NewRuntime(q, &ContextBuilder{Host: host}, out, strategy, Config{TurnBudget: 10 * time.Second})
 	return &harness{llm: fake, chat: ch, queue: q, rt: rt}
 }
 

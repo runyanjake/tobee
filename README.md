@@ -8,7 +8,7 @@ A self-hosted personal AI agent (named after the family cat 🐾): it takes task
 - **MCP tool platform.** Built-in capabilities (memory, workspace, schedules, status, messaging) are MCP servers. Add third-party servers over stdio or HTTP with env vars alone. External servers are sandboxed by default.
 - **Plan → execute → synthesize, on rails.** Every model call is schema-constrained JSON choosing one tool, so the model cannot ramble or write tool calls as text. Tool-using requests get a live-edited plan checklist, a ReAct loop for each step, and one composed reply. Simple messages get a one-call answer. Every model output is a forced tool call.
 - **Asks when unsure.** The agent can send a clarifying question, pause the task, and resume when the user answers.
-- **Plain-text memory.** Per-user and shared trees under `data/memory/`. No database, no vector store, no chat history.
+- **Plain-text memory as MCP resources.** Per-user and shared folder trees under `data/memory/`, addressed as `memory://user/…` and `memory://shared/…` and read through one `resources_read` tool. No database, no vector store, no chat history.
 - **Swappable model and reasoning.** The agent talks to an `llm.Model` interface; the OpenAI-compatible provider covers local and hosted backends by env. The reasoning strategy is an interface too.
 - **Traceable reasoning.** Every log line is tagged `input`, `thinking`, `action`, `output`, `llm`, or `system`, and turn logs carry a task ID.
 

@@ -1,0 +1,1 @@
+Read any file or resource with resources_read and its URI: memory://user/<path>, memory://shared/<path>, or workspace://<area>/<path>. List and search tools return these URIs. resources_list shows what else servers offer.

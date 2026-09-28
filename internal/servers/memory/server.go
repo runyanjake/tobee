@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -15,23 +16,20 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
-const sharedRoot = "shared"
+const (
+	sharedRoot = "shared"
+	uriPrefix  = "memory://"
+)
 
 func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 	srv := mcpserver.New("memory", instructions)
-	srv.Add(mcpserver.Tool{
-		Name:        "read",
-		Description: `Read a memory file. Pass scope="user" (default) for files specific to the current user, or scope="shared" for cross-user knowledge.`,
-		InputSchema: json.RawMessage(`{
-			"type": "object",
-			"properties": {
-				"path":  {"type": "string", "description": "Path relative to the scope root, e.g. \"user.md\" or \"facts/deploy.md\""},
-				"scope": {"type": "string", "enum": ["user", "shared"], "description": "Which slice of memory to read. Default \"user\"."}
-			},
-			"required": ["path"]
-		}`),
-		ReadOnly: true,
-		Handler:  readHandler(fs),
+	srv.AddResourceTemplate(mcpserver.ResourceTemplate{
+		URITemplate: uriPrefix + "{scope}/{+path}",
+		Name:        "memory",
+		Description: `Memory files. scope is "user" (the current user's tree) or "shared". ` +
+			`memory_list and memory_search return these URIs.`,
+		MIMEType: "text/markdown",
+		Read:     readResource(fs),
 	})
 
 	srv.Add(mcpserver.Tool{
@@ -72,7 +70,7 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 
 	srv.Add(mcpserver.Tool{
 		Name:        "search",
-		Description: `Case-insensitive substring search. Returns "<scope>:<path>:<line>  <snippet>" rows. Default scope is "both" (user + shared).`,
+		Description: `Case-insensitive substring search. Returns "<uri>:<line>  <snippet>" rows; read a hit with resources_read. Default scope is "both" (user + shared).`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -88,7 +86,7 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 
 	srv.Add(mcpserver.Tool{
 		Name:        "list",
-		Description: `List memory files. Returns "<scope>:<path>" rows. Default scope is "both" (user + shared).`,
+		Description: `List memory files as memory:// URIs; read one with resources_read. Default scope is "both" (user + shared).`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -143,28 +141,38 @@ func readableRoots(ctx context.Context, scopeArg string) ([]scopedRoot, error) {
 	}
 }
 
-func joinScope(root, path string) string {
-	path = strings.TrimPrefix(path, "/")
-	if path == "" {
-		return root
+// joinScope confines p to the scope root. sandboxfs only keeps paths inside
+// the whole memory tree, so "../<other user>" must be stopped here (D-013).
+func joinScope(root scopedRoot, p string) (string, error) {
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return root.Dir, nil
 	}
-	return root + "/" + path
+	c := path.Clean(p)
+	if c == ".." || strings.HasPrefix(c, "../") {
+		return "", fmt.Errorf("path %q leaves the %s scope", p, root.Label)
+	}
+	return root.Dir + "/" + c, nil
 }
 
-func readHandler(fs *sandboxfs.FS) mcpserver.Handler {
-	return func(ctx context.Context, args json.RawMessage) (string, error) {
-		var in struct {
-			Path  string `json:"path"`
-			Scope string `json:"scope"`
+// uri renders a scope-relative path as memory://<scope>/<path>.
+func uri(label, rel string) string { return uriPrefix + label + "/" + rel }
+
+func readResource(fs *sandboxfs.FS) func(context.Context, string) (string, error) {
+	return func(ctx context.Context, u string) (string, error) {
+		label, rel, ok := strings.Cut(strings.TrimPrefix(u, uriPrefix), "/")
+		if !ok || rel == "" {
+			return "", fmt.Errorf("%q is not memory://<scope>/<path>", u)
 		}
-		if err := json.Unmarshal(args, &in); err != nil {
-			return "", fmt.Errorf("invalid args: %w", err)
-		}
-		root, err := writableRoot(ctx, in.Scope)
+		root, err := writableRoot(ctx, label)
 		if err != nil {
 			return "", err
 		}
-		return fs.Read(joinScope(root.Dir, in.Path))
+		full, err := joinScope(root, rel)
+		if err != nil {
+			return "", err
+		}
+		return fs.Read(full)
 	}
 }
 
@@ -186,11 +194,14 @@ func writeHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		if err != nil {
 			return "", err
 		}
-		full := joinScope(root.Dir, dated)
+		full, err := joinScope(root, dated)
+		if err != nil {
+			return "", err
+		}
 		if err := fs.Write(full, in.Content); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("wrote %s:%s (%d bytes)", root.Label, dated, len(in.Content)), nil
+		return fmt.Sprintf("wrote %s (%d bytes)", uri(root.Label, dated), len(in.Content)), nil
 	}
 }
 
@@ -212,11 +223,14 @@ func appendHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		if err != nil {
 			return "", err
 		}
-		full := joinScope(root.Dir, dated)
+		full, err := joinScope(root, dated)
+		if err != nil {
+			return "", err
+		}
 		if err := fs.Append(full, in.Content); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("appended to %s:%s (%d bytes)", root.Label, dated, len(in.Content)), nil
+		return fmt.Sprintf("appended to %s (%d bytes)", uri(root.Label, dated), len(in.Content)), nil
 	}
 }
 
@@ -250,7 +264,7 @@ func searchHandler(fs *sandboxfs.FS) mcpserver.Handler {
 			}
 			for _, h := range hits {
 				rel := strings.TrimPrefix(h.Path, r.Dir+"/")
-				fmt.Fprintf(&sb, "%s:%s:%d  %s\n", r.Label, rel, h.Line, h.Snippet)
+				fmt.Fprintf(&sb, "%s:%d  %s\n", uri(r.Label, rel), h.Line, h.Snippet)
 				remaining--
 				if remaining <= 0 {
 					break
@@ -278,14 +292,17 @@ func listHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		}
 		var sb strings.Builder
 		for _, r := range roots {
-			start := joinScope(r.Dir, in.Dir)
+			start, err := joinScope(r, in.Dir)
+			if err != nil {
+				return "", err
+			}
 			files, err := fs.List(start)
 			if err != nil {
 				continue
 			}
 			for _, f := range files {
 				rel := strings.TrimPrefix(f, r.Dir+"/")
-				fmt.Fprintf(&sb, "%s:%s\n", r.Label, rel)
+				fmt.Fprintf(&sb, "%s\n", uri(r.Label, rel))
 			}
 		}
 		out := strings.TrimRight(sb.String(), "\n")

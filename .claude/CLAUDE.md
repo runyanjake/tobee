@@ -31,7 +31,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
 | `internal/agent/` | `Runtime`, `Strategy`, `PlanExecute` (planner / executor / synthesizer), context builder, state templates. |
 | `internal/mcphost/` | MCP host: sessions, catalog, trust, `MCP_SERVER_*` config, resource-subscription source. |
 | `internal/mcpserver/` | Builder for built-in MCP servers (scope from `_meta`, error results, tobee metadata). |
-| `internal/servers/` | Built-in MCP servers: `memory/`, `workspace/`, `schedule/`, `status/`, `user/`. |
+| `internal/servers/` | Built-in MCP servers: `memory/`, `workspace/`, `schedule/`, `status/`, `user/`, `resources/` (the read path), `system/` (pinned prompts). |
 | `internal/connectors/` | `discord/` and `email/`: each is a source, a delivery channel, and an MCP server. |
 | `internal/delivery/` | `Router` from connector name to `Channel` / `Editor` / `Reactor`. |
 | `internal/llm/` | `Model` interface (`Decide`: choose one tool), message types. `openai/`: the OpenAI-compatible provider (structured output, schema sanitizer, tool menu). |
@@ -42,7 +42,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
 | `internal/scope/` | Per-turn user/channel scope on `context.Context` and in MCP `_meta`. |
 | `internal/datedname/` | Filename date-stamping helper. |
 | `internal/telemetry/` | Log categories and correlation (D-040). |
-| `prompts/system/` | System prompt fragments, concatenated in filename order. |
+| `prompts/system/` | System prompt fragments, served as pinned resources by the `system` server in filename order (D-042). |
 | `prompts/servers/` | MCP `instructions` for each built-in server, one file per server name. |
 | `prompts/state/` | Per-phase directive templates (`plan`, `execute_step`, `synthesize`). |
 | `static/images/` | Cat photos. Not referenced by code. |
@@ -99,7 +99,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Log with `log/slog` using structured fields. Prefix messages with the subsystem: `"agent: …"`, `"discord: …"`, `"jobs: …"`.
 - Log prefixes for the new layers: `"ingest: …"`, `"taskqueue: …"`, `"mcphost: …"`, `"mcpserver: …"`, `"email: …"`.
 - Anything in the reasoning chain logs through `telemetry.Log(ctx, level, telemetry.<Category>, …)` with the turn's `ctx`, so it carries `cat`, `task`, `phase`, and `step`. Wrap message and tool text in `telemetry.Content` so it is capped. Plain `slog` calls are fine elsewhere; they are tagged `cat=system` automatically. Don't log the whole conversation per LLM call; `decide` logs only new messages (D-040).
-- Tools live on an MCP server and are exposed as `<server>_<tool>` (`memory_read`). Server names are lowercase `[a-z0-9_-]`. Never use dots: hosted APIs reject them (D-033).
+- Tools live on an MCP server and are exposed as `<server>_<tool>` (`memory_write`). Server names are lowercase `[a-z0-9_-]`. Never use dots: hosted APIs reject them (D-033).
 
 ### Filesystem & memory
 
@@ -122,6 +122,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Every input is an `ingest.Source` emitting `event.Event`s. Register it with the ingest engine in `main.go`; never write to the task queue directly. Give events a stable `ID`: it is the dedup key (D-034).
 - A new external system is a connector under `internal/connectors/<name>/`: a `Source`, a `delivery.Channel` (plus `Editor` / `Reactor` if supported), an MCP server, and a Reporter, all named with one `Name` constant (D-035).
 - The reply to the event's origin, and progress reactions, are delivered in code, not by tools. Tools are for actions the model chooses, including messages elsewhere and `user_ask` (D-035).
+- Readable content is an MCP resource or resource template with a URI that mirrors its folder path, read through `resources_read`. Don't add per-server read tools. Only trusted servers may pin a resource into the system prompt, and memory is never pinned (D-026, D-042).
+- Anything that turns a model-supplied path into a file path confines it to its scope root first. `sandboxfs` only confines to its own root.
 - New capabilities are MCP tools, never a side channel. A built-in server uses `internal/mcpserver`, gets a `prompts/servers/<name>.md` instructions file, and is connected with `host.ConnectInProcess`. Every tool needs a real JSON-Schema `InputSchema`; set `ReadOnly` when it doesn't write (D-033).
 - Third-party tools arrive through `MCP_SERVER_<NAME>_*`, not code. Don't relax trust: untrusted servers get no scope, no prompt instructions, no verbatim/await, and no subscriptions (D-038).
 - A source that admits third-party text (like email) needs an allowlist, enforced in code.
@@ -147,7 +149,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-042**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-043**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

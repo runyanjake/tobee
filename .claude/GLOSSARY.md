@@ -44,9 +44,12 @@
 | **Plan** | `agent.Plan`: `Goal`, ordered `Steps` (intent, status, result, error), or a `DirectReply`. Exists only for the turn. |
 | **Planner** | The phase that commits the plan via `plan_commit`. |
 | **Prefix cache** | LLM-server KV cache reuse when consecutive requests share leading tokens. Why the system message keeps stable sections first and is never rebuilt mid-turn. |
+| **Pinned resource** | A resource a trusted server marks priority 1. The host puts its text in every system prompt (D-042). Only the `system` server pins today. |
 | **Protocol violation** | Model output that is not a valid choice of an offered tool (`llm.ErrInvalidDecision`). With constrained decoding it means the server ignored the schema. Logged at ERROR, dropped, nudged, retried once. |
 | **Structured output** | A JSON Schema sent as `response_format` that the server enforces while decoding (a grammar on Ollama). How every model call is made (D-041). |
 | **Tool menu** | The `<tools>` block the provider appends to each request, describing the offered tools. The schema constrains output, but the model never sees it. |
+| **Resource** | Readable content a server exposes under a URI, e.g. `memory://user/INDEX.md`. The model reads resources with `resources_read`. |
+| **Resource template** | A URI pattern for a family of resources, e.g. `memory://{scope}/{+path}` or `workspace://{area}/{+path}`. |
 | **ReAct** | Reason + Act: alternate model tool calls and tool results. The executor's inner loop. |
 | **Reaction lifecycle** | ✅ received → 🧠 planning → 💭 executing on the inbound message. Cleared on success or park; ❌ on failure. |
 | **`reply_commit`** | The synthesizer's virtual tool: `{spoken, artifacts}`. |
@@ -67,7 +70,7 @@
 | **`step_finish`** | The executor's virtual tool that ends a step: `{result, finished}`. |
 | **Strategy** | An `agent.Strategy`: a reasoning scheme that turns a `Turn` into a reply or an await. `PlanExecute` is the only one (D-037). |
 | **Synthesizer** | The phase that turns the finished work into the user-facing reply via `reply_commit`. |
-| **System prompt** | `prompts/system/*.md` joined in filename order, plus `<servers>` and `<context>`. Sent once as message 0. |
+| **System prompt** | Pinned resources (`prompts/system/*.md` in filename order), plus `<servers>` and `<context>`. Sent once as message 0. |
 | **Task** | `taskqueue.Task`: an event, a `Resume` if it answers a parked question, and an attempt count. Persisted until done. |
 | **Task queue** | `taskqueue.Queue`, the durable FIFO between ingest and the runtime; also stores parked tasks. |
 | **Trust** | Per-server setting. Trusted servers get scope, show instructions, and may set verbatim/await or feed tasks; untrusted ones may not (D-038). |

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,8 +27,10 @@ import (
 	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scheduler"
 	memoryserver "github.com/runyanjake/tobee/internal/servers/memory"
+	resourcesserver "github.com/runyanjake/tobee/internal/servers/resources"
 	scheduleserver "github.com/runyanjake/tobee/internal/servers/schedule"
 	statusserver "github.com/runyanjake/tobee/internal/servers/status"
+	systemserver "github.com/runyanjake/tobee/internal/servers/system"
 	userserver "github.com/runyanjake/tobee/internal/servers/user"
 	workspaceserver "github.com/runyanjake/tobee/internal/servers/workspace"
 	"github.com/runyanjake/tobee/internal/taskqueue"
@@ -134,6 +135,12 @@ func main() {
 	connect(statusserver.New(instructions("status"), abilityReg))
 	connect(scheduleserver.New(instructions("schedule"), jobs))
 	connect(userserver.New(instructions("user"), out))
+	connect(resourcesserver.New(instructions("resources"), host))
+	if sys, err := systemserver.New(promptsDir + "/system"); err != nil {
+		slog.Error("prompts: MISSING — agent will misbehave (check PROMPTS_DIR mount)", "err", err)
+	} else {
+		connect(sys)
+	}
 	if areas.Len() > 0 {
 		connect(workspaceserver.New(instructions("workspace"), areas))
 	}
@@ -158,15 +165,18 @@ func main() {
 
 	// --- Prompts ------------------------------------------------------------
 	// One system prompt for every turn (D-029); server sections come from instructions (D-033).
-	systemPrompt := readSystemPrompt(promptsDir + "/system")
+	pinned, err := host.Pinned(ctx)
+	if err != nil {
+		slog.Error("prompts: pinned resources unreadable", "err", err)
+	}
 	states, err := agent.LoadStateTemplates(promptsDir + "/state")
 	if err != nil {
 		fatal("prompts: state templates failed", err)
 	}
-	logPromptsLoaded(promptsDir, systemPrompt, states.Names())
+	logPromptsLoaded(promptsDir, pinned, states.Names())
 
 	// --- Agent ----------------------------------------------------------------
-	ctxb := &agent.ContextBuilder{Persona: systemPrompt, Servers: host}
+	ctxb := &agent.ContextBuilder{Host: host}
 	strategy := newStrategy(envOr("AGENT_STRATEGY", "plan_execute"), model, host, states, out)
 	runtime := agent.NewRuntime(queue, ctxb, out, strategy, agent.Config{
 		TurnBudget: mustDuration("AGENT_TURN_BUDGET", 2*time.Minute),
@@ -351,35 +361,20 @@ func readServerPrompt(dir, name string) string {
 	return strings.TrimSpace(string(body))
 }
 
-// readSystemPrompt joins dir/*.md in filename order; the numeric prefix is the contract (D-012).
-func readSystemPrompt(dir string) string {
-	matches, err := filepath.Glob(filepath.Join(dir, "*.md"))
-	if err != nil || len(matches) == 0 {
-		slog.Warn("prompt: system-prompt load failed; using empty system prompt", "dir", dir, "err", err)
-		return ""
-	}
-	sort.Strings(matches)
-	var parts []string
-	for _, p := range matches {
-		body, err := os.ReadFile(p)
-		if err != nil {
-			slog.Warn("prompt: system fragment unreadable; skipping", "path", p, "err", err)
-			continue
-		}
-		parts = append(parts, strings.TrimSpace(string(body)))
-	}
-	return strings.Join(parts, "\n\n")
-}
-
 // logPromptsLoaded errors loudly on empty prompts: an unmounted prompts dir
 // otherwise looks healthy while the LLM runs with no instructions.
-func logPromptsLoaded(dir, system string, stateNames []string) {
+func logPromptsLoaded(dir string, pinned []mcphost.Pinned, stateNames []string) {
+	chars := 0
+	for _, p := range pinned {
+		chars += len(p.Text)
+	}
 	slog.Info("prompts: loaded",
 		"prompts_dir", dir,
-		"system_chars", len(system),
+		"pinned_resources", len(pinned),
+		"system_chars", chars,
 		"state_templates", strings.Join(stateNames, ", "))
 	missing := []string{}
-	if len(system) == 0 {
+	if chars == 0 {
 		missing = append(missing, "system/*.md")
 	}
 	required := []string{"plan", "execute_step", "synthesize"}

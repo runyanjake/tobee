@@ -143,11 +143,13 @@ flowchart LR
 
 | Server | Tools | Notes |
 |---|---|---|
-| `memory` | `read`, `write`, `append`, `search`, `list` | See [Memory Model](#memory-model). |
-| `workspace` | `areas`, `list`, `read`, `write`, `search` | Only when areas exist. Area names, flags, and descriptions are appended to the instructions (never host paths). |
+| `memory` | `write`, `append`, `search`, `list`; template `memory://{scope}/{+path}` | See [Memory Model](#memory-model). |
+| `workspace` | `areas`, `list`, `write`, `search`; template `workspace://{area}/{+path}` | Only when areas exist. Area names, flags, and descriptions are appended to the instructions (never host paths). |
 | `schedule` | `create`, `cancel`, `list` | `create` needs a connector and channel in scope. |
 | `status` | `summary`, `report` | Verbatim. Reporters: `discord`, `email`, `ingest`, `mcp`, `schedules`, `tasks`. |
 | `user` | `ask` | Parks the task (D-036). Needs a user in scope. |
+| `resources` | `list`, `read` | The one read path for every server's resources, routed by the host (D-042). |
+| `system` | none; pinned resources `system://prompt/<file>` | `prompts/system/*.md`, read fresh each turn (D-042). |
 | `discord` | `send_message` | Any channel ID. Not for replying to the current conversation. |
 | `email` | `send` | Allowlisted recipients only, enforced in code. |
 
@@ -168,7 +170,7 @@ flowchart LR
 ### Conversation shape (one request)
 
 ```
-0    system  prompts/system/*.md + <servers> + <context>
+0    system  pinned resources (system://prompt/*) + <servers> + <context>
 1    user    the user's message, verbatim, untagged     (resumed: request, assistant question, answer)
 2    user    <phase name="plan">…</phase>
 3    asst    tool call: plan_commit                     offered: plan_commit
@@ -309,7 +311,7 @@ Every record has a `cat` attribute. Records from a turn also carry `task`, and w
 ## Prompt Architecture
 
 - **System message** (built once per request, `ContextBuilder.ComposeSystem`), in order:
-  1. `prompts/system/*.md`, sorted by filename and joined: identity, voice, behaviour, safety, tools.
+  1. Pinned resources from trusted servers, in server then URI order, capped at 32 KiB. Today only the `system` server pins anything: `prompts/system/*.md` (identity, voice, behaviour, safety, tools), read fresh each turn.
   2. `<servers>`: each connected server's name, trusted instructions, and tool names. Built-in instructions are `prompts/servers/<name>.md`. The workspace server appends its area list.
   3. `<context>`: `now` (RFC3339 plus a readable date), source, kind, connector, channel, thread, and user name and ID, or `user=none`.
 - **Phase directives** are user-role messages rendered from `prompts/state/{plan,execute_step,synthesize}.md` with `StateData` (`Plan`, `Step`, `StepNumber`, `StepTotal`, `AvailableTools`, `HasVerbatim`).
@@ -358,13 +360,15 @@ data/
 
 | Tool | Args | Default scope | Notes |
 |---|---|---|---|
-| `memory_read` | `path`, `scope` | `user` | |
+| `resources_read` | `uri` (`memory://user/<path>` or `memory://shared/<path>`) | — | The read path; `user` resolves to the current user's tree |
 | `memory_write` | `path`, `content`, `scope` | `user` | Filename date-stamped; overwrites |
 | `memory_append` | `path`, `content`, `scope` | `user` | Filename date-stamped; creates if missing |
 | `memory_search` | `query`, `limit` (20), `scope` | `both` | Case-insensitive substring; `<scope>:<path>:<line>  <snippet>` |
 | `memory_list` | `dir`, `scope` | `both` | `<scope>:<path>` |
 
-- `scope="user"` on a turn with no user attached (a resource notification) returns an error telling the model to use `shared`.
+- `scope="user"` (or `memory://user/…`) on a turn with no user attached (a resource notification) returns an error telling the model to use `shared`.
+- Paths are confined to their scope root before `sandboxfs` sees them: `..` that leaves the scope is rejected (D-013). `sandboxfs` alone only confines to the whole memory tree.
+- List, search, write, and append results are `memory://` URIs, so any result can be read directly.
 - `both` covers `shared` plus the current user's tree only. Other users' trees are never searched or listed.
 
 ### Safety
@@ -404,7 +408,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-005 | Single serial agent worker, now draining the task queue. | No races on memory writes; replies stay in order. | One turn blocks all others for up to the turn budget. |
 | D-007 | No `!command` prefix control plane. | It turned into a second control plane. | Poking tools requires Go tests or a live LLM. |
 | D-008 | `data/` is fully gitignored; no seed files. | Memory is private to each install. | Fresh installs start empty. |
-| D-012 | System prompt = `prompts/system/*.md` sorted by numeric prefix. | Fragments are easy to edit. | Order is a filename convention. |
+| D-012 | System prompt fragments are `prompts/system/*.md`, ordered by numeric prefix; since D-042 they arrive as pinned resources. | Fragments are easy to edit. | Order is a filename convention. |
 | D-013 | Memory split into `shared/` and `users/<connector>/<id>/`; scope travels on `ctx` and in `_meta`. | Per-user isolation without a user table. | Search and list must never cross user trees; one person on two connectors is two users. |
 | D-014, D-021 | Subsystems expose `Reporter.Render → (full, summary)` text; status tools compose it. | Consistent wording; no reach-in coupling. | Reporters format their own text. |
 | D-015 | Model-created jobs: one JSON file each, robfig cron plus `AfterFunc`, replayed at boot, misfire skip. | Reminders must survive restart and route back to the originating channel. | Missed one-shots are dropped silently. |
@@ -412,7 +416,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-019 | Workspace areas: operator-configured sandboxed roots; list carried in the workspace server's instructions. | Access limited to directories the operator opts in; no discovery calls needed. | Area names and descriptions are visible to the model. |
 | D-024 | Tool-using turns run plan → announce → execute → synthesize. | A typed plan drives execution, progress UI, and synthesis input. | At least 3 LLM calls for tool turns. |
 | D-025 | Strict tool-call protocol in every phase; one nudge-and-retry; no text fallbacks. | Every text escape hatch became a class of "the model decided" bugs. | Worst case doubles the calls for a phase. |
-| D-026 | Memory is never pre-loaded into the prompt; recall is a tool call. | Bounded prompt; auditable reads; no stale snapshots. | Recall costs 1–2 extra tool calls. |
+| D-026 | Memory is never pre-loaded into the prompt, and is never pinned (D-042); recall is a read. | Bounded prompt; auditable reads; no stale snapshots. | Recall costs 1–2 extra tool calls. |
 | D-027 | No chat history: no ring buffer, summarizer, or sessions. The only cross-turn state is a parked question (D-036). | Transcripts got polluted; summaries were hallucinated; sessions mixed users in shared channels. | "Make it spicy" has no referent unless it was saved to memory. |
 | D-029 | One `Conversation` per request; phase directives from `prompts/state/` in `<phase>` tags; every step gets every tool. | Planner and executor share context; one system message enables prefix caching. | Synthesis sees the full transcript (continuation risk). |
 | D-030 | Verbatim output is enforced in code, now as `tobee/verbatim` tool metadata honored for trusted servers; clock stamped in `<context>`; status takes a relative `window`. | "Relay verbatim" in prose was ignored; the model invented windows and state. | Only a short lead-in is written by the model on status turns. |
@@ -426,6 +430,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-039 | The LLM backend is configuration: `AI_PROVIDER_URL`, `AI_MODEL`, `AI_API_KEY`, `AI_TEMPERATURE`, `AI_MAX_TOKENS`, `AI_TIMEOUT`. The OpenAI-compatible chat API is the contract. | Switching models or hosts is planned; no code change should be needed. | Backends without an OpenAI-compatible endpoint need a proxy. |
 | D-040 | Logs are categorized by the reasoning chain: `input`, `thinking`, `action`, `output`, plus `llm` and `system`, with `task` / `phase` / `step` correlation from a context logger. The INFO trail carries content (capped by `LOG_CONTENT_LIMIT`); DEBUG adds the exact prompts, logged incrementally. | One turn's input, reasoning, actions, and output must be reconstructable and filterable without DEBUG; the old DEBUG dump re-printed the whole transcript per call and dropped model reasoning. | User messages and tool output are in INFO logs; lower `LOG_CONTENT_LIMIT` to trim them. |
 | D-041 | The agent reaches a model only through `llm.Model.Decide`, which returns exactly one call to one offered tool. The OpenAI-compatible provider enforces this with `response_format: json_schema` (grammar-constrained on Ollama), not `tools` / `tool_choice`; a per-request tool menu describes the options. Unreadable output is never kept. `AI_PROVIDER` selects the provider. | Ollama ignores `tool_choice`, so the model answered in prose or wrote calls as text (the long-standing protocol violations). Constrained decoding makes that impossible, and one interface keeps request shape and server quirks out of the agent. | One tool call per model call. The tool menu adds prompt tokens at the tail of every request. Needs a server with `json_schema` support. `llm.Model` has one implementation, by choice. |
+| D-042 | Servers expose readable content as MCP resources and resource templates, with URIs that mirror the folder tree (`memory://user/…`, `workspace://<area>/…`). The model reads any of them through the one `resources_read` tool; per-server read tools are gone. Resources a trusted server pins (priority 1) go into every system prompt, capped at 32 KiB; the only pinned set is `prompts/system/*.md`, served by the `system` server. | One read path for built-in and third-party content; files stay human-editable; the system prompt uses the same mechanism as any other context. | Pinned resources are read every turn. Memory is never pinned (D-026). Untrusted servers cannot pin (D-038). |
 
 ## Rejected Alternatives
 
@@ -440,7 +445,9 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | Per-step tool scoping | The planner granted empty tool lists, so steps did nothing | D-029 |
 | Text-wrap fallback / salvage parser for tool calls written as text | Masks an undiagnosed cause; reintroduces "the model chooses the format" | D-025, `3e818f9` |
 | Session ring buffer, rolling summarizer, idle rotation, janitor | Polluted transcripts, hallucinated summaries, users mixed in shared channels | D-027 |
-| Pre-loading `INDEX.md` / profile / preferences into the prompt | Unbounded prompt growth, stale snapshots | D-026 |
+| Pre-loading `INDEX.md` / profile / preferences into the prompt, or pinning memory resources | Unbounded prompt growth, stale snapshots | D-026, D-042 |
+| Per-server read tools alongside `resources_read` | Two read paths for the same files | D-042 |
+| Absolute memory URIs (`memory://users/<connector>/<id>/…`) | Exposes user IDs and invites cross-user reads; `user` resolves per turn instead | D-042 |
 | Asking the model to relay status verbatim | The model reworded it and invented facts | D-030 |
 | Discord embeds for structured output | The reply path is plain strings through every connector | D-030 |
 | Reply to origin as a tool | Makes delivery optional; the model can forget to answer | D-035 |

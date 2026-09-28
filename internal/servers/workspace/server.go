@@ -22,7 +22,7 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 		Name: "areas",
 		Description: `List the workspace areas tobee has access to. Each entry has a name, ` +
 			`optional description, and a readonly flag. Use the name as the "area" argument to ` +
-			`workspace_list / read / write / search.`,
+			`workspace_list, workspace_write, and workspace_search.`,
 		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
 		ReadOnly:    true,
 		Handler:     areasHandler(areas),
@@ -30,7 +30,7 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 
 	srv.Add(mcpserver.Tool{
 		Name:        "list",
-		Description: `List files in a workspace area. Returns "<area>:<path>" rows.`,
+		Description: `List files in a workspace area as workspace:// URIs; read one with resources_read.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -43,19 +43,11 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 		Handler:  listHandler(areas),
 	})
 
-	srv.Add(mcpserver.Tool{
-		Name:        "read",
-		Description: `Read a file from a workspace area. Path is relative to the area root.`,
-		InputSchema: json.RawMessage(`{
-			"type": "object",
-			"properties": {
-				"area": {"type": "string", "description": "Configured area name."},
-				"path": {"type": "string", "description": "File path relative to the area root."}
-			},
-			"required": ["area", "path"]
-		}`),
-		ReadOnly: true,
-		Handler:  readHandler(areas),
+	srv.AddResourceTemplate(mcpserver.ResourceTemplate{
+		URITemplate: uriPrefix + "{area}/{+path}",
+		Name:        "workspace",
+		Description: "Files in a workspace area. workspace_list and workspace_search return these URIs.",
+		Read:        readResource(areas),
 	})
 
 	srv.Add(mcpserver.Tool{
@@ -79,7 +71,7 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 	srv.Add(mcpserver.Tool{
 		Name: "search",
 		Description: `Case-insensitive substring search across one or all workspace areas. ` +
-			`Returns "<area>:<path>:<line>  <snippet>" rows. Default area is "all".`,
+			`Returns "<uri>:<line>  <snippet>" rows; read a hit with resources_read. Default area is "all".`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -149,26 +141,25 @@ func listHandler(areas *workspace.Areas) mcpserver.Handler {
 		}
 		var sb strings.Builder
 		for _, f := range files {
-			fmt.Fprintf(&sb, "%s:%s\n", ar.Name, f)
+			fmt.Fprintf(&sb, "%s%s/%s\n", uriPrefix, ar.Name, f)
 		}
 		return strings.TrimRight(sb.String(), "\n"), nil
 	}
 }
 
-func readHandler(areas *workspace.Areas) mcpserver.Handler {
-	return func(_ context.Context, args json.RawMessage) (string, error) {
-		var in struct {
-			Area string `json:"area"`
-			Path string `json:"path"`
+const uriPrefix = "workspace://"
+
+func readResource(areas *workspace.Areas) func(context.Context, string) (string, error) {
+	return func(_ context.Context, u string) (string, error) {
+		area, rel, ok := strings.Cut(strings.TrimPrefix(u, uriPrefix), "/")
+		if !ok || rel == "" {
+			return "", fmt.Errorf("%q is not workspace://<area>/<path>", u)
 		}
-		if err := json.Unmarshal(args, &in); err != nil {
-			return "", fmt.Errorf("invalid args: %w", err)
-		}
-		ar, ok := areas.Get(in.Area)
+		ar, ok := areas.Get(area)
 		if !ok {
-			return "", unknownAreaErr(in.Area, areas)
+			return "", unknownAreaErr(area, areas)
 		}
-		return ar.FS.Read(in.Path)
+		return ar.FS.Read(rel)
 	}
 }
 
@@ -196,7 +187,7 @@ func writeHandler(areas *workspace.Areas) mcpserver.Handler {
 		if err := ar.FS.Write(dated, in.Content); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("wrote %s:%s (%d bytes)", ar.Name, dated, len(in.Content)), nil
+		return fmt.Sprintf("wrote %s%s/%s (%d bytes)", uriPrefix, ar.Name, dated, len(in.Content)), nil
 	}
 }
 
@@ -244,7 +235,7 @@ func searchHandler(areas *workspace.Areas) mcpserver.Handler {
 				continue
 			}
 			for _, h := range hits {
-				fmt.Fprintf(&sb, "%s:%s:%d  %s\n", ar.Name, h.Path, h.Line, h.Snippet)
+				fmt.Fprintf(&sb, "%s%s/%s:%d  %s\n", uriPrefix, ar.Name, h.Path, h.Line, h.Snippet)
 				remaining--
 				if remaining <= 0 {
 					break

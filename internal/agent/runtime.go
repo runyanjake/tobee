@@ -81,7 +81,7 @@ func (r *Runtime) run(parent context.Context, task *taskqueue.Task) {
 		Ctx:          ctx,
 		Task:         task,
 		Event:        ev,
-		Conversation: NewConversation(r.ctxb.ComposeSystem(ev)),
+		Conversation: NewConversation(r.ctxb.ComposeSystem(ctx, ev)),
 		out:          r.out,
 	}
 	turn.React(reactReceived)

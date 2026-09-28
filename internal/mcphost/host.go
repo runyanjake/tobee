@@ -50,6 +50,10 @@ type conn struct {
 	opts         Options
 	session      *mcp.ClientSession
 	instructions string
+
+	// Guarded by Host.mu; refreshed on resources/list_changed.
+	resources []*mcp.Resource
+	templates []*mcp.ResourceTemplate
 }
 
 type toolRef struct {
@@ -86,6 +90,9 @@ func New() *Host {
 		ToolListChangedHandler: func(ctx context.Context, req *mcp.ToolListChangedRequest) {
 			// Handlers run on the session's read loop; refreshing inline
 			// would deadlock waiting for our own tools/list response.
+			go h.refreshSession(context.Background(), req.Session)
+		},
+		ResourceListChangedHandler: func(ctx context.Context, req *mcp.ResourceListChangedRequest) {
 			go h.refreshSession(context.Background(), req.Session)
 		},
 		ResourceUpdatedHandler: func(_ context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
@@ -218,12 +225,17 @@ func (h *Host) refreshSession(ctx context.Context, s *mcp.ClientSession) {
 }
 
 func (h *Host) refresh(ctx context.Context, c *conn) error {
+	if err := h.refreshResources(ctx, c); err != nil {
+		return err
+	}
 	var listed []*mcp.Tool
-	for t, err := range c.session.Tools(ctx, nil) {
-		if err != nil {
-			return fmt.Errorf("mcphost: list tools on %s: %w", c.name, err)
+	if caps := capabilities(c); caps == nil || caps.Tools != nil {
+		for t, err := range c.session.Tools(ctx, nil) {
+			if err != nil {
+				return fmt.Errorf("mcphost: list tools on %s: %w", c.name, err)
+			}
+			listed = append(listed, t)
 		}
-		listed = append(listed, t)
 	}
 
 	h.mu.Lock()

@@ -5,7 +5,9 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"sync"
 
@@ -140,4 +142,63 @@ func errorResult(err error) *mcp.CallToolResult {
 	r := &mcp.CallToolResult{}
 	r.SetError(err)
 	return r
+}
+
+// Resource is one fixed resource. Pinned resources are placed in every
+// system prompt by the host (D-042); Read is called on each read.
+type Resource struct {
+	URI         string
+	Name        string
+	Description string
+	MIMEType    string
+	Pinned      bool
+	Read        func(ctx context.Context) (string, error)
+}
+
+// ResourceTemplate addresses a family of resources by URI template, e.g.
+// memory://{scope}/{+path}. Read receives the concrete URI.
+type ResourceTemplate struct {
+	URITemplate string
+	Name        string
+	Description string
+	MIMEType    string
+	Read        func(ctx context.Context, uri string) (string, error)
+}
+
+// ErrNotFound makes a read return MCP's resource-not-found error.
+var ErrNotFound = errors.New("resource not found")
+
+// AddResource registers a fixed resource.
+func (s *Server) AddResource(r Resource) {
+	def := &mcp.Resource{URI: r.URI, Name: r.Name, Description: r.Description, MIMEType: r.MIMEType}
+	if r.Pinned {
+		def.Annotations = &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 1}
+	}
+	s.srv.AddResource(def, s.wrapRead(r.MIMEType, func(ctx context.Context, _ string) (string, error) {
+		return r.Read(ctx)
+	}))
+}
+
+// AddResourceTemplate registers a resource template.
+func (s *Server) AddResourceTemplate(t ResourceTemplate) {
+	s.srv.AddResourceTemplate(&mcp.ResourceTemplate{
+		URITemplate: t.URITemplate, Name: t.Name, Description: t.Description, MIMEType: t.MIMEType,
+	}, s.wrapRead(t.MIMEType, t.Read))
+}
+
+func (s *Server) wrapRead(mime string, read func(context.Context, string) (string, error)) mcp.ResourceHandler {
+	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		if sc, ok := scope.FromMeta(req.Params.Meta); ok {
+			ctx = scope.With(ctx, sc)
+		}
+		uri := req.Params.URI
+		text, err := read(ctx, uri)
+		if errors.Is(err, ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+			return nil, mcp.ResourceNotFoundError(uri)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: mime, Text: text}}}, nil
+	}
 }
