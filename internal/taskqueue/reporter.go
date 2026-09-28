@@ -8,7 +8,6 @@ import (
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
-// Reporter exposes queue depth via abilities.Reporter.
 func (q *Queue) Reporter() abilities.Reporter { return queueReporter{q: q} }
 
 type queueReporter struct{ q *Queue }

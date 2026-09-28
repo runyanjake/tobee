@@ -1,17 +1,5 @@
-// Package mcphost is tobee's MCP host: it holds one MCP client session per
-// connected server — built-in servers over in-memory transports, external
-// servers over stdio or Streamable HTTP — and presents their tools to the
-// agent as a single catalog (D-033).
-//
-// Tools are exposed to the model as <server>_<tool>, which fits the
-// OpenAI function-name pattern ^[a-zA-Z0-9_-]{1,64}$ that hosted backends
-// enforce.
-//
-// Trust is per server (D-038). Only trusted servers receive the turn's
-// user scope in `_meta`, contribute their `instructions` to the system
-// prompt, or have their tobee-specific metadata (verbatim output, await)
-// honored. Built-in servers are trusted; external ones are not unless the
-// operator says so.
+// Package mcphost holds one MCP client session per connected server and
+// presents their tools as one <server>_<tool> catalog (D-033); trust is per server (D-038).
 package mcphost
 
 import (
@@ -31,20 +19,16 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
-// defaultTimeout bounds one tools/call when the server config sets none.
 const defaultTimeout = 30 * time.Second
 
-// maxResultBytes caps tool output fed back to the model. An external
-// server can return anything; an unbounded result would blow the context.
+// An external server can return anything; an unbounded result would blow the context.
 const maxResultBytes = 32 * 1024
 
-// Options configures one server connection.
 type Options struct {
 	Trusted bool
 	Timeout time.Duration // per tools/call; 0 means 30s
 }
 
-// ServerInfo describes a connected server for prompts and status.
 type ServerInfo struct {
 	Name         string
 	Trusted      bool
@@ -52,15 +36,12 @@ type ServerInfo struct {
 	Tools        []string // exposed names, sorted
 }
 
-// Result is the outcome of one tool call.
 type Result struct {
 	Text    string
 	IsError bool
-	// Verbatim is true when a trusted server marked the tool's output as
-	// finished user-facing text (D-030).
+	// Set only for trusted servers that marked the output as finished user-facing text (D-030).
 	Verbatim bool
-	// Await is set when a trusted server asked the agent to pause the task
-	// until the user answers (D-036).
+	// Set when a trusted server asks to pause the task until the user answers (D-036).
 	Await *mcpserver.Await
 }
 
@@ -77,7 +58,6 @@ type toolRef struct {
 	verbatim bool
 }
 
-// Host is the MCP host.
 type Host struct {
 	client *mcp.Client
 
@@ -94,7 +74,6 @@ type callStat struct {
 	last          time.Time
 }
 
-// New creates an empty host.
 func New() *Host {
 	h := &Host{
 		conns:    make(map[string]*conn),
@@ -117,8 +96,7 @@ func New() *Host {
 	return h
 }
 
-// watch routes a server's resources/updated notifications to f; nil
-// stops routing.
+// watch routes a server's resources/updated notifications to f; nil stops routing.
 func (h *Host) watch(server string, f func(uri string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -129,8 +107,7 @@ func (h *Host) watch(server string, f func(uri string)) {
 	h.watchers[server] = f
 }
 
-// ConnectInProcess connects a built-in server over an in-memory transport.
-// Built-in servers are always trusted.
+// ConnectInProcess connects a built-in server in memory; built-ins are always trusted.
 func (h *Host) ConnectInProcess(ctx context.Context, s *mcpserver.Server) error {
 	clientT, serverT := mcp.NewInMemoryTransports()
 	if _, err := s.MCP().Connect(ctx, serverT, nil); err != nil {
@@ -139,8 +116,7 @@ func (h *Host) ConnectInProcess(ctx context.Context, s *mcpserver.Server) error 
 	return h.connect(ctx, s.Name(), clientT, Options{Trusted: true})
 }
 
-// Connect connects an external server over t (a CommandTransport or a
-// StreamableClientTransport).
+// Connect connects an external server over a CommandTransport or StreamableClientTransport.
 func (h *Host) Connect(ctx context.Context, name string, t mcp.Transport, opts Options) error {
 	return h.connect(ctx, name, t, opts)
 }
@@ -179,7 +155,6 @@ func (h *Host) connect(ctx context.Context, name string, t mcp.Transport, opts O
 	return nil
 }
 
-// Disconnect closes a server's session and drops its tools.
 func (h *Host) Disconnect(name string) error {
 	h.mu.Lock()
 	c, ok := h.conns[name]
@@ -199,7 +174,6 @@ func (h *Host) Disconnect(name string) error {
 	return c.session.Close()
 }
 
-// Close disconnects every server.
 func (h *Host) Close() {
 	h.mu.RLock()
 	names := make([]string, 0, len(h.conns))
@@ -214,8 +188,7 @@ func (h *Host) Close() {
 	}
 }
 
-// Session returns the client session for a server, for callers that need
-// more than tools (the resource-subscription source).
+// Session exposes a server's client session for the resource-subscription source.
 func (h *Host) Session(name string) (*mcp.ClientSession, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -244,7 +217,6 @@ func (h *Host) refreshSession(ctx context.Context, s *mcp.ClientSession) {
 	}
 }
 
-// refresh re-reads a server's tools/list and swaps its catalog entries.
 func (h *Host) refresh(ctx context.Context, c *conn) error {
 	var listed []*mcp.Tool
 	for t, err := range c.session.Tools(ctx, nil) {
@@ -276,7 +248,6 @@ func (h *Host) refresh(ctx context.Context, c *conn) error {
 	return nil
 }
 
-// Tools returns the catalog as LLM tool specs, sorted by name.
 func (h *Host) Tools() []llm.ToolSpec {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -296,7 +267,6 @@ func (h *Host) Tools() []llm.ToolSpec {
 	return out
 }
 
-// ToolNames returns the exposed tool names, sorted.
 func (h *Host) ToolNames() []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -308,7 +278,6 @@ func (h *Host) ToolNames() []string {
 	return out
 }
 
-// Servers describes every connected server, sorted by name.
 func (h *Host) Servers() []ServerInfo {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -330,9 +299,8 @@ func (h *Host) Servers() []ServerInfo {
 	return out
 }
 
-// Call runs one tool by its exposed name. A tool-level failure comes back
-// as a Result with IsError set; the error return is for calls that never
-// reached a tool (unknown name, transport failure, timeout).
+// Call runs a tool by its exposed name. Tool failures come back as Result.IsError;
+// err is for calls that never reached a tool (unknown name, transport, timeout).
 func (h *Host) Call(ctx context.Context, name string, args json.RawMessage) (Result, error) {
 	h.mu.RLock()
 	ref, ok := h.tools[name]
@@ -401,8 +369,7 @@ func (h *Host) resourceUpdated(s *mcp.ClientSession, uri string) {
 	}
 	h.mu.RUnlock()
 	if f != nil {
-		// Off the session's read loop: the watcher calls back into the
-		// session to read the resource.
+		// Off the read loop: the watcher calls back into the session to read the resource.
 		go f(uri)
 	}
 }
@@ -423,9 +390,7 @@ func decodeAwait(meta mcp.Meta) *mcpserver.Await {
 	return &a
 }
 
-// renderContent flattens MCP content blocks into the text the model sees.
-// Non-text blocks are named rather than dropped so the model knows they
-// existed.
+// Non-text blocks are named rather than dropped so the model knows they existed.
 func renderContent(blocks []mcp.Content) string {
 	parts := make([]string, 0, len(blocks))
 	for _, b := range blocks {
@@ -456,7 +421,7 @@ func truncate(s string) string {
 	return s[:maxResultBytes] + fmt.Sprintf("\n[truncated: %d of %d bytes shown]", maxResultBytes, len(s))
 }
 
-// exposedName builds the model-facing tool name, capped at 64 characters.
+// Hosted backends enforce the OpenAI function-name pattern ^[a-zA-Z0-9_-]{1,64}$.
 func exposedName(server, tool string) string {
 	n := server + "_" + sanitize(tool)
 	if len(n) > 64 {

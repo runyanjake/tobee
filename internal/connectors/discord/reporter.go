@@ -10,7 +10,6 @@ import (
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
-// Reporter exposes Discord state via the abilities.Reporter contract.
 func (b *Bot) Reporter() abilities.Reporter { return discReporter{b: b} }
 
 type discReporter struct{ b *Bot }

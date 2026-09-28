@@ -13,13 +13,7 @@ import (
 	"time"
 )
 
-// Job is the persisted shape of a scheduled task. Exactly one of Cron or At
-// is set: Cron means recurring (any expression robfig/cron accepts, including
-// "@every 5m"), At means one-shot at that wall-clock time.
-//
-// Connector / Channel / Thread / User / UserName describe the originating
-// scope, so the timer event emitted when the job fires routes back to the
-// same conversation and the active user-scope is preserved. Connector keeps
+// Job has exactly one of Cron (recurring) or At (one-shot). Connector keeps
 // the "integration" JSON key so jobs saved before the rename still load.
 type Job struct {
 	ID        string    `json:"id"`
@@ -37,8 +31,7 @@ type Job struct {
 
 func (j Job) IsRecurring() bool { return j.Cron != "" }
 
-// JobStore persists Jobs as one JSON file per job under rootDir.
-// Files are named "<id>.json". Writes are atomic (tmp + rename).
+// JobStore keeps one "<id>.json" file per job, written atomically.
 type JobStore struct {
 	mu      sync.Mutex
 	rootDir string
@@ -51,9 +44,6 @@ func NewJobStore(rootDir string) (*JobStore, error) {
 	return &JobStore{rootDir: rootDir}, nil
 }
 
-// NewJobID returns a short hex id ("j-1a2b3c4d"). Uniqueness is
-// probabilistic; collisions in 8 hex chars are vanishingly unlikely at our
-// scale, and Save still errors if a file with that name already exists.
 func NewJobID() string {
 	var b [4]byte
 	_, _ = rand.Read(b[:])
@@ -64,9 +54,7 @@ func (s *JobStore) path(id string) string {
 	return filepath.Join(s.rootDir, id+".json")
 }
 
-// Save writes the job to disk atomically. If a file for j.ID already exists
-// it is overwritten — callers building jobs from scratch should use a fresh
-// NewJobID().
+// Save overwrites any existing file for j.ID.
 func (s *JobStore) Save(j Job) error {
 	if j.ID == "" {
 		return fmt.Errorf("jobstore: job id required")
@@ -90,9 +78,7 @@ func (s *JobStore) Save(j Job) error {
 	return nil
 }
 
-// Delete removes the job's file. Missing files are not an error — callers
-// reach Delete via two paths (explicit cancel and one-shot self-cleanup) and
-// either may lose a race against a manual file removal.
+// Delete ignores missing files: cancel and one-shot self-cleanup can race.
 func (s *JobStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -103,9 +89,7 @@ func (s *JobStore) Delete(id string) error {
 	return nil
 }
 
-// LoadAll returns every persisted job, sorted by CreatedAt ascending.
-// Unreadable files are skipped with no error — a corrupt entry should not
-// take down the rest of the scheduler.
+// LoadAll skips unreadable files so one corrupt job can't take down the scheduler.
 func (s *JobStore) LoadAll() ([]Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

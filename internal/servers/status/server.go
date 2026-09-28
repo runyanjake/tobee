@@ -1,16 +1,5 @@
-// Package status is the built-in "status" MCP server — the model-facing
-// entry point to tobee's introspection layer.
-//
-// Two tools, both returning pre-rendered deterministic text:
-//
-//   - summary — a brief few-sentence overview. Use for general
-//     "how are things?" / "what are you up to?" inquiries.
-//   - report  — a strict full-detail block keyed by subsystem.
-//     Use when the user asks for specifics (failures, schedules, exact
-//     next-fire times, channel filters, …).
-//
-// Both are Verbatim: the agent appends their output to the reply in code
-// (D-030). The render shape lives in each Reporter, not in this package.
+// Package status is the built-in "status" MCP server; its summary and report
+// tools are Verbatim (D-030), rendered by each abilities.Reporter.
 package status
 
 import (
@@ -25,24 +14,14 @@ import (
 	"github.com/runyanjake/tobee/internal/mcpserver"
 )
 
-// defaultWindow is used when the caller omits `window`. One hour is short
-// enough to keep the output concise, long enough to catch a meaningful
-// burst of background activity.
 const defaultWindow = time.Hour
 
-// maxWindow bounds an explicit lookback. Nothing in the reporters retains
-// state this long, so a larger window only reads as precision the output
-// does not have.
+// maxWindow: no reporter retains state longer, so a larger window would imply false precision.
 const maxWindow = 30 * 24 * time.Hour
 
-// New builds the status server backed by reps.
 func New(instructions string, reps *abilities.Registry) *mcpserver.Server {
 	srv := mcpserver.New("status", instructions)
-	// A relative duration, not an absolute instant. The model has no
-	// clock, so an absolute timestamp it composes lands near its
-	// training cutoff — the earlier `since` parameter took an ISO-8601
-	// string and got "2023-10-05T18:00:00Z" on a live turn. A duration
-	// cannot express that mistake.
+	// A relative duration, not a timestamp: the model has no clock and guesses its training cutoff.
 	windowSchema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -77,8 +56,7 @@ func New(instructions string, reps *abilities.Registry) *mcpserver.Server {
 	return srv
 }
 
-// parseSince resolves the caller's `window` duration into the absolute
-// instant the reporters filter on. Returns now-1h when unset.
+// parseSince converts `window` into the absolute instant reporters filter on.
 func parseSince(args json.RawMessage) (time.Time, error) {
 	var in struct {
 		Window string `json:"window"`
@@ -92,9 +70,7 @@ func parseSince(args json.RawMessage) (time.Time, error) {
 	return time.Now().Add(-d), nil
 }
 
-// parseWindow accepts Go duration syntax plus a "d" (days) suffix, which
-// time.ParseDuration does not handle and which is the natural unit for a
-// multi-day lookback.
+// parseWindow adds a "d" (days) suffix, which time.ParseDuration lacks.
 func parseWindow(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {

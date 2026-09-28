@@ -6,10 +6,10 @@ A self-hosted personal AI agent (named after the family cat 🐾): it takes task
 
 - **Pluggable inputs.** Discord, an IMAP inbox, scheduled jobs, and MCP resource notifications all feed one durable task queue. Sources restart on failure and can be registered at runtime.
 - **MCP tool platform.** Built-in capabilities (memory, workspace, schedules, status, messaging) are MCP servers. Add third-party servers over stdio or HTTP with env vars alone. External servers are sandboxed by default.
-- **Plan → execute → synthesize.** Tool-using requests get a live-edited plan checklist, a ReAct loop for each step, and one composed reply. Simple messages get a one-call answer. Every model output is a forced tool call.
+- **Plan → execute → synthesize, on rails.** Every model call is schema-constrained JSON choosing one tool, so the model cannot ramble or write tool calls as text. Tool-using requests get a live-edited plan checklist, a ReAct loop for each step, and one composed reply. Simple messages get a one-call answer. Every model output is a forced tool call.
 - **Asks when unsure.** The agent can send a clarifying question, pause the task, and resume when the user answers.
 - **Plain-text memory.** Per-user and shared trees under `data/memory/`. No database, no vector store, no chat history.
-- **Swappable model and reasoning.** Any OpenAI-compatible backend, local or hosted, chosen by env. The reasoning strategy is an interface.
+- **Swappable model and reasoning.** The agent talks to an `llm.Model` interface; the OpenAI-compatible provider covers local and hosted backends by env. The reasoning strategy is an interface too.
 - **Traceable reasoning.** Every log line is tagged `input`, `thinking`, `action`, `output`, `llm`, or `system`, and turn logs carry a task ID.
 
 ## System Design
@@ -62,7 +62,7 @@ Architecture, the turn lifecycle, trust rules, and decisions are in [.claude/DES
 
 - **Go 1.25+** for native runs and tests.
 - **Docker** with **Docker Compose v2**. The prod compose file uses `env_file` entries with `required:`.
-- **An OpenAI-compatible LLM server with native tool calling.** Dev uses [LM Studio](https://lmstudio.ai/) on port 1234 with a tool-capable model loaded.
+- **An OpenAI-compatible LLM server that supports `response_format: json_schema`** (Ollama, LM Studio, vLLM, llama.cpp, OpenAI). Dev uses [LM Studio](https://lmstudio.ai/) on port 1234.
 - **At least one connector:**
   - a Discord bot with the privileged **Message Content** intent enabled, and/or
   - a mailbox with IMAP and SMTP access (an app password).
@@ -79,10 +79,11 @@ Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every v
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
+| `AI_PROVIDER` | no | `openai` | LLM provider implementation. `openai` covers every OpenAI-compatible server. |
 | `AI_PROVIDER_URL` | yes | — | OpenAI-compatible base URL; `/v1/chat/completions` is appended. |
 | `AI_MODEL` | no | `local-model` | Model name. Must support tool calling (prod: `qwen2.5:7b`). |
 | `AI_API_KEY` | no | — | Bearer token for hosted APIs. |
-| `AI_TEMPERATURE` | no | `0.1` | Keep low; higher values increase protocol violations. |
+| `AI_TEMPERATURE` | no | `0.1` | Keep low; every call is a structured decision. |
 | `AI_MAX_TOKENS` / `AI_TIMEOUT` | no | `2048` / `10m` | Per-completion token cap and HTTP timeout. |
 | `AGENT_STRATEGY` | no | `plan_execute` | Reasoning strategy. |
 | `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn. |

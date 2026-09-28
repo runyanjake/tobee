@@ -12,11 +12,9 @@ import (
 	"github.com/emersion/go-message/mail"
 )
 
-// maxBodyBytes caps the text taken from one message.
 const maxBodyBytes = 16 * 1024
 
-// plainText returns the first text/plain part of a raw RFC 5322 message.
-// HTML-only mail yields an error: tobee does not render HTML.
+// plainText errors on HTML-only mail: tobee does not render HTML.
 func plainText(raw []byte) (string, error) {
 	r, err := mail.CreateReader(bytes.NewReader(raw))
 	if err != nil && r == nil {
@@ -46,12 +44,10 @@ func plainText(raw []byte) (string, error) {
 	}
 }
 
-// wroteRe matches the attribution line mail clients put above a quote:
-// "On Mon, 1 Jan 2026 at 10:00, Name <a@b.c> wrote:".
+// wroteRe matches a quote attribution: "On Mon, 1 Jan 2026 at 10:00, Name <a@b.c> wrote:".
 var wroteRe = regexp.MustCompile(`(?i)^on .+ wrote:\s*$`)
 
-// stripQuoted drops the quoted history under a reply. The model only
-// needs the new text; the quote is the question tobee already has.
+// stripQuoted drops quoted history: it is the question tobee already has.
 func stripQuoted(body string) string {
 	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
 	var out []string

@@ -5,14 +5,12 @@ import (
 	"log/slog"
 )
 
-// Handler wraps an slog.Handler and adds cat=system to any record that
-// does not set a category itself.
+// Handler adds cat=system to any record that sets no category.
 type Handler struct {
 	inner  slog.Handler
 	hasCat bool // a category was attached with WithAttrs
 }
 
-// NewHandler wraps h.
 func NewHandler(h slog.Handler) *Handler { return &Handler{inner: h} }
 
 func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {

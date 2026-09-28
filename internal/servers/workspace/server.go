@@ -1,14 +1,5 @@
-// Package workspace is the built-in "workspace" MCP server: areas, list,
-// read, write, and search over the configured workspace areas (see
-// internal/workspace).
-//
-// Every operation takes an `area` argument naming one configured area.
-// search additionally accepts area="all" (the default) to walk every
-// configured area in one call.
-//
-// Writes to a read-only area return a clear error. The model already sees
-// the readonly flag in the server instructions, so this should be a rare
-// path.
+// Package workspace is the built-in "workspace" MCP server over the configured
+// workspace areas; search defaults to area="all".
 package workspace
 
 import (
@@ -23,10 +14,8 @@ import (
 	"github.com/runyanjake/tobee/internal/workspace"
 )
 
-// New builds the workspace server backed by areas. The configured areas
-// are appended to instructions so the model sees them without a discovery
-// call (D-019). Callers should skip this when areas.Len() == 0 — a server
-// with no usable area name is worse than no server at all.
+// New appends the areas to instructions (D-019). Skip it when areas.Len() == 0:
+// a server with no usable area is worse than none.
 func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 	srv := mcpserver.New("workspace", withAreas(instructions, areas))
 	srv.Add(mcpserver.Tool{
@@ -106,8 +95,7 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 	return srv
 }
 
-// withAreas appends the configured areas — name, read-only flag, and
-// description, never the host path — to the server instructions.
+// withAreas never includes the host path.
 func withAreas(instructions string, areas *workspace.Areas) string {
 	var sb strings.Builder
 	sb.WriteString(strings.TrimSpace(instructions))

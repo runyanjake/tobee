@@ -15,10 +15,7 @@ import (
 	"github.com/runyanjake/tobee/internal/ingest"
 )
 
-// ResourceSource turns an MCP server's resource subscriptions into
-// ingest events: each resources/updated notification is read and emitted
-// as a notification event answered at ReplyTo. This is how an MCP server
-// feeds work to tobee rather than only answering tool calls.
+// ResourceSource emits each resources/updated notification as an event answered at replyTo.
 type ResourceSource struct {
 	host    *Host
 	server  string
@@ -26,15 +23,12 @@ type ResourceSource struct {
 	replyTo event.Address
 }
 
-// NewResourceSource watches uris on a connected server.
 func NewResourceSource(h *Host, server string, uris []string, replyTo event.Address) *ResourceSource {
 	return &ResourceSource{host: h, server: server, uris: uris, replyTo: replyTo}
 }
 
-// Name implements ingest.Source.
 func (s *ResourceSource) Name() string { return "mcp_" + s.server }
 
-// Run implements ingest.Source.
 func (s *ResourceSource) Run(ctx context.Context, emit ingest.Emit) error {
 	session, ok := s.host.Session(s.server)
 	if !ok {

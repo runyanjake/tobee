@@ -1,9 +1,5 @@
-// Package scope carries the active user identity through a turn.
-//
-// One UserScope is attached to the per-turn context.Context by the agent
-// runtime. In-process MCP servers cannot see that context, so the MCP
-// host also sends the scope as request metadata (ToMeta / FromMeta) and
-// each built-in server re-attaches it before running a tool handler.
+// Package scope carries the user identity through a turn; MCP servers can't see the
+// turn's context, so it also travels in tools/call `_meta`.
 package scope
 
 import (
@@ -14,15 +10,11 @@ import (
 	"github.com/runyanjake/tobee/internal/event"
 )
 
-// MetaKey is the `_meta` key the scope travels under on tools/call. It
-// is only sent to trusted servers (D-038).
+// MetaKey is sent only to trusted servers (D-038).
 const MetaKey = "tobee/scope"
 
-// UserScope identifies the originating turn: the user, the connector that
-// delivered the inbound event, and the channel/thread the reply will land in.
-// Empty User means no user is attached (e.g. a resource notification).
-// Channel and Thread are pure routing hints — they do not affect Key() /
-// Dir(), which remain user-only and safe for filesystem use.
+// Channel and Thread are routing hints only; Key and Dir stay user-only and
+// filesystem-safe. Empty User means no user (e.g. a resource notification).
 type UserScope struct {
 	Connector string `json:"connector"`
 	User      string `json:"user,omitempty"`
@@ -31,7 +23,6 @@ type UserScope struct {
 	Thread    string `json:"thread,omitempty"`
 }
 
-// FromEvent derives a scope from an inbound event.
 func FromEvent(e event.Event) UserScope {
 	return UserScope{
 		Connector: e.Origin.Connector,
@@ -42,17 +33,13 @@ func FromEvent(e event.Event) UserScope {
 	}
 }
 
-// Address is the delivery address of the turn this scope belongs to.
 func (s UserScope) Address() event.Address {
 	return event.Address{Connector: s.Connector, Channel: s.Channel, Thread: s.Thread}
 }
 
-// HasUser reports whether the scope identifies a specific user.
 func (s UserScope) HasUser() bool { return s.User != "" }
 
-// Key returns a sanitized "<connector>/<user>" identifier safe for
-// use as a filesystem path component. Characters outside [a-zA-Z0-9-_]
-// are replaced with '_'.
+// Key returns a sanitized "<connector>/<user>" safe for use as a path component.
 func (s UserScope) Key() string {
 	if !s.HasUser() {
 		return ""
@@ -60,8 +47,7 @@ func (s UserScope) Key() string {
 	return sanitize(s.Connector) + "/" + sanitize(s.User)
 }
 
-// Dir returns the memory.FS-relative directory for this scope's user
-// tree, e.g. "users/discord/12345". Returns "" if no user is attached.
+// Dir is the memory-relative user tree, e.g. "users/discord/12345".
 func (s UserScope) Dir() string {
 	if !s.HasUser() {
 		return ""
@@ -71,19 +57,15 @@ func (s UserScope) Dir() string {
 
 type ctxKey struct{}
 
-// With attaches s to ctx.
 func With(ctx context.Context, s UserScope) context.Context {
 	return context.WithValue(ctx, ctxKey{}, s)
 }
 
-// From extracts the scope attached to ctx. The second return is false
-// if no scope was attached.
 func From(ctx context.Context) (UserScope, bool) {
 	s, ok := ctx.Value(ctxKey{}).(UserScope)
 	return s, ok
 }
 
-// ToMeta renders s as a `_meta` value.
 func (s UserScope) ToMeta() map[string]any {
 	return map[string]any{
 		"connector": s.Connector,
@@ -94,8 +76,6 @@ func (s UserScope) ToMeta() map[string]any {
 	}
 }
 
-// FromMeta reads a scope back out of a request's `_meta`. The second
-// return is false when none was sent.
 func FromMeta(meta map[string]any) (UserScope, bool) {
 	raw, ok := meta[MetaKey]
 	if !ok {

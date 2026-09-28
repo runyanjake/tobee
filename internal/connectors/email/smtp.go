@@ -12,8 +12,7 @@ import (
 	"time"
 )
 
-// smtpSend delivers one plain-text message and returns its Message-ID
-// (without angle brackets, matching what IMAP envelopes report).
+// smtpSend returns the Message-ID without angle brackets, as IMAP envelopes report it.
 func (m *Mailbox) smtpSend(to, subject, body, inReplyTo string) (string, error) {
 	host, port, err := net.SplitHostPort(m.cfg.SMTPAddr)
 	if err != nil {
@@ -63,7 +62,6 @@ func (m *Mailbox) smtpSend(to, subject, body, inReplyTo string) (string, error) 
 	return id, c.Quit()
 }
 
-// compose renders a minimal RFC 5322 plain-text message.
 func compose(from, to, subject, body, id, inReplyTo string, now time.Time) []byte {
 	var sb strings.Builder
 	header := func(k, v string) { fmt.Fprintf(&sb, "%s: %s\r\n", k, v) }

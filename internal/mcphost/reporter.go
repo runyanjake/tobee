@@ -9,15 +9,13 @@ import (
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
-// Reporter exposes connected servers and call counts via abilities.Reporter.
 func (h *Host) Reporter() abilities.Reporter { return hostReporter{h: h} }
 
 type hostReporter struct{ h *Host }
 
 func (r hostReporter) Name() string { return "mcp" }
 
-// Render reports lifetime counters; the host keeps no per-call history,
-// so `since` does not narrow them.
+// The host keeps no per-call history, so `since` does not narrow the lifetime counters.
 func (r hostReporter) Render(_ context.Context, _ time.Time) (string, string) {
 	servers := r.h.Servers()
 	r.h.mu.RLock()

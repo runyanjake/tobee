@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -24,30 +25,24 @@ var stepFinishSchema = json.RawMessage(`{
   }
 }`)
 
-// stepFinishArgs is the JSON shape step_finish emits.
 type stepFinishArgs struct {
 	Result   string `json:"result"`
 	Finished bool   `json:"finished"`
 }
 
-// executorNudge is the reminder appended to the transcript after a
-// protocol violation inside a step.
-const executorNudge = "PROTOCOL VIOLATION: your previous response was neither a tool call nor a step_finish call. You must call exactly one tool per turn. When the step's outcome is known, call step_finish with the result. Free-form text is not accepted. Retry."
+// executorNudge follows output that was not a tool call; one retry is allowed (D-025).
+const executorNudge = "Your last response could not be read as a tool call. Call exactly one tool. When the step's outcome is known, call step_finish."
 
-// Executor drives one Step at a time through a ReAct sub-loop that
-// runs against the shared Conversation. Every tool in the MCP host's
-// catalog is advertised on every step's LLM call — D-029 removed per-step
-// tool scoping — plus the virtual step_finish tool. Free-form text is a
-// protocol violation: retried once, then fails the step.
+// Executor runs one Step's ReAct sub-loop with the full catalog plus step_finish (D-029, D-041).
 type Executor struct {
-	client      *llm.Client
+	model       llm.Model
 	tools       *mcphost.Host
 	states      *StateTemplates
 	maxPerStep  int
 	totalBudget int
 }
 
-func NewExecutor(client *llm.Client, host *mcphost.Host, states *StateTemplates, maxPerStep, totalBudget int) *Executor {
+func NewExecutor(model llm.Model, host *mcphost.Host, states *StateTemplates, maxPerStep, totalBudget int) *Executor {
 	if maxPerStep <= 0 {
 		maxPerStep = 4
 	}
@@ -55,7 +50,7 @@ func NewExecutor(client *llm.Client, host *mcphost.Host, states *StateTemplates,
 		totalBudget = 12
 	}
 	return &Executor{
-		client:      client,
+		model:       model,
 		tools:       host,
 		states:      states,
 		maxPerStep:  maxPerStep,
@@ -63,12 +58,7 @@ func NewExecutor(client *llm.Client, host *mcphost.Host, states *StateTemplates,
 	}
 }
 
-// RunStep appends the rendered execute_step user message to the
-// conversation, then runs the ReAct sub-loop against the shared
-// Conversation. Mutates step in place (Status, Result, Error,
-// Finished, Attempts). Returns true when the step ended cleanly via
-// step_finish or a user_ask; the strategy should stop executing when
-// the conversation is Finished.
+// RunStep mutates step in place and reports whether it ended via step_finish or user_ask.
 func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool {
 	step.Status = StepRunning
 	step.Attempts++
@@ -78,11 +68,10 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 
 	toolSpecs := e.toolSpecs()
 	userMsg, err := e.states.RenderPhase("execute_step", StateData{
-		Step:           step,
-		StepNumber:     stepNumber,
-		StepTotal:      stepTotal,
-		Plan:           t.Conversation.Plan,
-		AvailableTools: e.toolNames(),
+		Step:       step,
+		StepNumber: stepNumber,
+		StepTotal:  stepTotal,
+		Plan:       t.Conversation.Plan,
 	})
 	if err != nil {
 		step.Error = fmt.Sprintf("render execute_step: %v", err)
@@ -103,8 +92,18 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 		}
 		t.Conversation.Plan.StepsRun++
 
-		resp, err := callLLM(ctx, e.client, t.Conversation, toolSpecs, llm.ToolChoiceRequired)
-		if err != nil {
+		d, err := decide(ctx, e.model, t.Conversation, toolSpecs)
+		switch {
+		case errors.Is(err, llm.ErrInvalidDecision):
+			if violations >= 1 {
+				step.Error = "model output was not a valid tool call across retries"
+				step.Status = StepFailed
+				return false
+			}
+			violations++
+			t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: executorNudge})
+			continue
+		case err != nil:
 			if ctx.Err() != nil {
 				step.Error = err.Error()
 				step.Status = StepFailed
@@ -118,26 +117,9 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 			llmErrors++
 			continue
 		}
-		asst := llm.Message{
-			Role:      llm.RoleAssistant,
-			Content:   resp.Text,
-			ToolCalls: resp.ToolCalls,
-		}
-		t.Conversation.Append(asst)
+		t.Conversation.Append(llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{d.Call}})
 
-		if len(resp.ToolCalls) == 0 {
-			logViolation(ctx, violations, stepFinishTool, resp)
-			if violations >= 1 {
-				step.Error = "protocol violation: model emitted text without a tool call across retries"
-				step.Status = StepFailed
-				return false
-			}
-			violations++
-			t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: executorNudge})
-			continue
-		}
-
-		if e.dispatchCalls(ctx, t, step, resp.ToolCalls) {
+		if e.dispatch(ctx, t, step, d.Call) {
 			return step.Status == StepDone
 		}
 	}
@@ -149,92 +131,75 @@ func (e *Executor) RunStep(t *Turn, stepNumber, stepTotal int, step *Step) bool 
 	return false
 }
 
-// dispatchCalls runs every tool_call in the assistant response,
-// appending tool-role messages for each. Returns true when the step is
-// now terminal: a step_finish was consumed, or a tool asked the user a
-// question and the turn must end (D-036). False means keep iterating.
-func (e *Executor) dispatchCalls(ctx context.Context, t *Turn, step *Step, calls []llm.ToolCall) bool {
-	for i, tc := range calls {
-		if tc.Function.Name == stepFinishTool {
-			var args stepFinishArgs
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-				telemetry.Logger(ctx).Error("agent: executor: step_finish decode error",
-					"err", err, "args", tc.Function.Arguments)
-				step.Error = fmt.Sprintf("step_finish decode: %v", err)
-				step.Status = StepFailed
-				return true
-			}
-			t.Conversation.Append(llm.Message{
-				Role:       llm.RoleTool,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    "ok",
-			})
-			step.Result = strings.TrimSpace(args.Result)
-			step.Finished = args.Finished
-			step.Status = StepDone
-			telemetry.Log(ctx, slog.LevelInfo, telemetry.Thinking, "agent: step result",
-				telemetry.Content("result", step.Result), "finished", args.Finished)
-			if args.Finished {
-				t.Conversation.Finished = true
-			}
+// dispatch runs one tool call; true means the step is terminal (step_finish or a user question, D-036).
+func (e *Executor) dispatch(ctx context.Context, t *Turn, step *Step, tc llm.ToolCall) bool {
+	if tc.Function.Name == stepFinishTool {
+		var args stepFinishArgs
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			telemetry.Logger(ctx).Error("agent: executor: step_finish decode error",
+				"err", err, "args", tc.Function.Arguments)
+			step.Error = fmt.Sprintf("step_finish decode: %v", err)
+			step.Status = StepFailed
 			return true
 		}
-
-		telemetry.Log(ctx, slog.LevelInfo, telemetry.Action, "agent: tool call",
-			"tool", tc.Function.Name, "call_id", tc.ID, telemetry.Content("args", tc.Function.Arguments))
-		start := time.Now()
-		res, cerr := e.tools.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
-		content := res.Text
-		status, level := "ok", slog.LevelInfo
-		switch {
-		case cerr != nil:
-			content = fmt.Sprintf("error: %v", cerr)
-			status, level = "failed", slog.LevelWarn
-		case res.IsError:
-			content = "error: " + res.Text
-			status, level = "error", slog.LevelWarn
-		case res.Await != nil:
-			status = "await"
-		case res.Verbatim:
-			t.AddVerbatim(tc.Function.Name, res.Text)
-			status = "verbatim"
-		}
-		telemetry.Log(ctx, level, telemetry.Action, "agent: tool result",
-			"tool", tc.Function.Name, "call_id", tc.ID, "status", status,
-			"duration_ms", time.Since(start).Milliseconds(), telemetry.Content("content", content))
 		t.Conversation.Append(llm.Message{
 			Role:       llm.RoleTool,
 			ToolCallID: tc.ID,
 			Name:       tc.Function.Name,
-			Content:    content,
+			Content:    "ok",
 		})
-
-		if cerr == nil && res.Await != nil {
-			// The question has been sent; nothing else this turn can use the
-			// answer. Close out any calls the model batched after it so the
-			// transcript stays a valid tool exchange, then end the turn.
-			for _, rest := range calls[i+1:] {
-				t.Conversation.Append(llm.Message{
-					Role:       llm.RoleTool,
-					ToolCallID: rest.ID,
-					Name:       rest.Function.Name,
-					Content:    "skipped: waiting for the user's answer",
-				})
-			}
-			t.Await = res.Await
-			step.Result = "Asked the user: " + res.Await.Question
-			step.Status = StepDone
+		step.Result = strings.TrimSpace(args.Result)
+		step.Finished = args.Finished
+		step.Status = StepDone
+		telemetry.Log(ctx, slog.LevelInfo, telemetry.Thinking, "agent: step result",
+			telemetry.Content("result", step.Result), "finished", args.Finished)
+		if args.Finished {
 			t.Conversation.Finished = true
-			return true
 		}
+		return true
+	}
+
+	telemetry.Log(ctx, slog.LevelInfo, telemetry.Action, "agent: tool call",
+		"tool", tc.Function.Name, "call_id", tc.ID, telemetry.Content("args", tc.Function.Arguments))
+	start := time.Now()
+	res, cerr := e.tools.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+	content := res.Text
+	status, level := "ok", slog.LevelInfo
+	switch {
+	case cerr != nil:
+		content = fmt.Sprintf("error: %v", cerr)
+		status, level = "failed", slog.LevelWarn
+	case res.IsError:
+		content = "error: " + res.Text
+		status, level = "error", slog.LevelWarn
+	case res.Await != nil:
+		status = "await"
+	case res.Verbatim:
+		t.AddVerbatim(tc.Function.Name, res.Text)
+		status = "verbatim"
+	}
+	telemetry.Log(ctx, level, telemetry.Action, "agent: tool result",
+		"tool", tc.Function.Name, "call_id", tc.ID, "status", status,
+		"duration_ms", time.Since(start).Milliseconds(), telemetry.Content("content", content))
+	t.Conversation.Append(llm.Message{
+		Role:       llm.RoleTool,
+		ToolCallID: tc.ID,
+		Name:       tc.Function.Name,
+		Content:    content,
+	})
+
+	if cerr == nil && res.Await != nil {
+		// Nothing else this turn can use the answer, so end the turn.
+		t.Await = res.Await
+		step.Result = "Asked the user: " + res.Await.Question
+		step.Status = StepDone
+		t.Conversation.Finished = true
+		return true
 	}
 	return false
 }
 
-// toolSpecs returns the host's whole catalog plus the virtual step_finish
-// tool. Same set advertised on every step's LLM call — D-029 dropped
-// per-step scoping.
+// toolSpecs is the same set on every call: no per-step scoping (D-029).
 func (e *Executor) toolSpecs() []llm.ToolSpec {
 	all := e.tools.Tools()
 	out := make([]llm.ToolSpec, 0, len(all)+1)
@@ -245,10 +210,4 @@ func (e *Executor) toolSpecs() []llm.ToolSpec {
 		InputSchema: stepFinishSchema,
 	})
 	return out
-}
-
-// toolNames returns just the catalog names, for the state template's
-// {{.AvailableTools}} field.
-func (e *Executor) toolNames() []string {
-	return e.tools.ToolNames()
 }

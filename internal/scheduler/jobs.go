@@ -1,6 +1,5 @@
-// Package scheduler runs model-created jobs. The JobManager is an ingest
-// source: when a job fires it emits a timer event routed back to the
-// channel and user that created the job.
+// Package scheduler runs model-created jobs as an ingest source; a fire routes
+// back to the channel and user that created the job.
 package scheduler
 
 import (
@@ -19,22 +18,16 @@ import (
 
 const firedJobRingSize = 32
 
-// JobManager owns the set of model-scheduled jobs. Load reads persisted
-// jobs and schedules them — recurring entries on a robfig cron, one-shots
-// as time.AfterFunc timers. Run makes it an ingest.Source: fires are
-// emitted as timer events while it runs.
-//
-// Concurrency: the embedded cron.Cron runs its own goroutine and dispatches
-// each fire in a goroutine of its own. mu guards the per-manager maps, the
-// emit function, and the recent-fires ring buffer.
+// JobManager runs recurring jobs on robfig cron and one-shots on AfterFunc;
+// fires arrive on their own goroutines, so mu guards all mutable state.
 type JobManager struct {
 	store *JobStore
 	cron  *cron.Cron
 
 	mu      sync.Mutex
-	emit    ingest.Emit         // nil while the source is not running
-	entries map[string]canceler // job id → handle for cancelling its next fire
-	jobs    map[string]Job      // job id → snapshot (for List / reporter)
+	emit    ingest.Emit // nil while the source is not running
+	entries map[string]canceler
+	jobs    map[string]Job
 	recent  []firedJobEvent
 	head    int
 	filled  bool
@@ -48,7 +41,6 @@ type firedJobEvent struct {
 	OneShot bool
 }
 
-// canceler unifies the cancel surface for cron entries and AfterFunc timers.
 type canceler interface{ cancel() }
 
 type cronEntry struct {
@@ -64,8 +56,7 @@ type timerEntry struct {
 
 func (e timerEntry) cancel() { e.t.Stop() }
 
-// cronParser accepts the standard 5-field syntax plus robfig's @-shortcuts
-// (@every 5m, @hourly, @daily, ...). We deliberately do not enable seconds.
+// cronParser takes 5-field syntax plus @-shortcuts; seconds are deliberately off.
 var cronParser = cron.NewParser(
 	cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 )
@@ -80,12 +71,9 @@ func NewJobManager(store *JobStore) *JobManager {
 	}
 }
 
-// Name implements ingest.Source.
 func (m *JobManager) Name() string { return "schedule" }
 
-// Load reads persisted jobs and schedules the survivors. One-shot jobs
-// whose At time has already passed are dropped from disk (misfire policy:
-// skip, D-015). Idempotent.
+// Load is idempotent. Missed one-shots are deleted, not fired (D-015).
 func (m *JobManager) Load() error {
 	m.mu.Lock()
 	if m.loaded {
@@ -117,9 +105,7 @@ func (m *JobManager) Load() error {
 	return nil
 }
 
-// Run implements ingest.Source: it runs the cron dispatcher and emits
-// fires until ctx is cancelled. A one-shot that comes due while the
-// source is stopped fires into nothing and is logged.
+// Run: a one-shot that comes due while the source is stopped is logged and skipped.
 func (m *JobManager) Run(ctx context.Context, emit ingest.Emit) error {
 	if err := m.Load(); err != nil {
 		return err
@@ -141,8 +127,6 @@ func (m *JobManager) Run(ctx context.Context, emit ingest.Emit) error {
 	return nil
 }
 
-// Create validates, persists, and schedules a new job. The caller fills in
-// everything except ID/CreatedAt which Create assigns when zero.
 func (m *JobManager) Create(j Job) (Job, error) {
 	if err := validate(&j); err != nil {
 		return Job{}, err
@@ -165,9 +149,7 @@ func (m *JobManager) Create(j Job) (Job, error) {
 	return j, nil
 }
 
-// Cancel removes a scheduled job from both the in-memory schedule and disk.
-// Cancelling an unknown id is not an error — the caller may have raced a
-// one-shot self-cleanup.
+// Cancel of an unknown id is not an error: it may have raced a one-shot's self-cleanup.
 func (m *JobManager) Cancel(id string) error {
 	m.mu.Lock()
 	e, ok := m.entries[id]
@@ -186,7 +168,6 @@ func (m *JobManager) Cancel(id string) error {
 	return nil
 }
 
-// List returns the currently scheduled jobs in stable id order.
 func (m *JobManager) List() []Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -197,13 +178,11 @@ func (m *JobManager) List() []Job {
 	return out
 }
 
-// schedule registers j with the underlying timer (cron or AfterFunc) and
-// records the handle in entries/jobs. Caller is responsible for persistence.
+// schedule does not persist; the caller does.
 func (m *JobManager) schedule(j Job) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Replace any prior in-memory entry under the same id (rescheduling).
 	if prev, ok := m.entries[j.ID]; ok {
 		prev.cancel()
 		delete(m.entries, j.ID)
@@ -227,17 +206,14 @@ func (m *JobManager) schedule(j Job) error {
 	return nil
 }
 
-// fire emits the timer event, records it, and—if this was a one-shot
-// —removes the job from the schedule and disk. Errors here are logged, not
-// returned: the timer callback has nowhere to surface them.
+// fire logs errors: the timer callback has nowhere to return them.
 func (m *JobManager) fire(id string) {
 	m.mu.Lock()
 	j, ok := m.jobs[id]
 	emit := m.emit
 	m.mu.Unlock()
 	if !ok {
-		// Job was cancelled between scheduling and firing. Cron entries should
-		// have been removed; a stale timer can still race in.
+		// Cancelled, but a stale timer raced in.
 		return
 	}
 
@@ -310,9 +286,6 @@ func validate(j *Job) error {
 	return nil
 }
 
-// snapshotRecent / snapshotJobs / nextFire support the schedules reporter.
-// They live here so the lock and ring layout stay private to this file.
-
 func (m *JobManager) snapshotRecent() []firedJobEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -335,8 +308,7 @@ func (m *JobManager) snapshotJobs() []Job {
 	return m.List()
 }
 
-// nextFire returns the next fire time for a job, or the zero time if the
-// scheduling for it is no longer live.
+// nextFire returns the zero time once the job is no longer scheduled.
 func (m *JobManager) nextFire(j Job) time.Time {
 	if !j.IsRecurring() {
 		return j.At

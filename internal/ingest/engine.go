@@ -1,10 +1,5 @@
-// Package ingest is tobee's input engine. Sources — a Discord gateway, an
-// IMAP poller, the job scheduler, an MCP resource subscription — emit
-// normalized events; the engine supervises them, drops duplicates and
-// events from senders a source does not admit, and hands the rest to the
-// task queue (D-034).
-//
-// Sources can be registered and unregistered while tobee runs.
+// Package ingest supervises event sources, drops duplicates and unadmitted
+// senders, and hands the rest to the task queue (D-034).
 package ingest
 
 import (
@@ -21,23 +16,20 @@ import (
 	"github.com/runyanjake/tobee/internal/event"
 )
 
-// Emit hands one event to the engine. Safe to call from any goroutine.
+// Emit is safe to call from any goroutine.
 type Emit func(event.Event)
 
-// Source produces events. Run blocks until ctx is cancelled. Returning
-// early with an error makes the engine restart the source with backoff;
-// returning nil after ctx is done is a clean stop.
+// Source.Run blocks until ctx is cancelled; an early error return makes the
+// engine restart it with backoff.
 type Source interface {
 	Name() string
 	Run(ctx context.Context, emit Emit) error
 }
 
-// Sink receives admitted events. The task queue implements it.
 type Sink interface {
 	Enqueue(event.Event) error
 }
 
-// Backoff bounds for restarting a failed source.
 const (
 	minBackoff = time.Second
 	maxBackoff = time.Minute
@@ -45,16 +37,14 @@ const (
 	healthyRun = time.Minute
 )
 
-// dedupSize bounds the remembered event IDs. Pollers re-see a message at
-// most a few polls apart, so a short memory is enough.
+// dedupSize is small: pollers re-see a message at most a few polls apart.
 const dedupSize = 1024
 
-// Engine supervises sources and admits their events.
 type Engine struct {
 	sink Sink
 
 	mu      sync.Mutex
-	ctx     context.Context // set by Start; nil until then
+	ctx     context.Context // nil until Start
 	sources map[string]*running
 	allow   map[string]map[string]bool // source → admitted actor IDs; absent = admit all
 	seen    map[string]bool
@@ -75,7 +65,6 @@ type running struct {
 	lastAt   time.Time
 }
 
-// New creates an engine that delivers admitted events to sink.
 func New(sink Sink) *Engine {
 	return &Engine{
 		sink:    sink,
@@ -85,9 +74,7 @@ func New(sink Sink) *Engine {
 	}
 }
 
-// Allow restricts a source to events from the given actor IDs. Events
-// with no actor (timers, notifications) are unaffected. An empty list
-// removes the restriction.
+// Allow ignores actorless events (timers, notifications); an empty list lifts the restriction.
 func (e *Engine) Allow(source string, actorIDs []string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -102,8 +89,6 @@ func (e *Engine) Allow(source string, actorIDs []string) {
 	e.allow[source] = set
 }
 
-// Register adds a source. If the engine is running the source starts
-// immediately; otherwise it starts with Start.
 func (e *Engine) Register(src Source) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -120,7 +105,6 @@ func (e *Engine) Register(src Source) error {
 	return nil
 }
 
-// Unregister stops a source and waits for it to exit.
 func (e *Engine) Unregister(name string) error {
 	e.mu.Lock()
 	r, ok := e.sources[name]
@@ -137,8 +121,6 @@ func (e *Engine) Unregister(name string) error {
 	return nil
 }
 
-// Start launches every registered source. Cancel ctx to stop them all;
-// Wait blocks until they have exited.
 func (e *Engine) Start(ctx context.Context) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -148,7 +130,6 @@ func (e *Engine) Start(ctx context.Context) {
 	}
 }
 
-// Wait blocks until every running source has exited.
 func (e *Engine) Wait() {
 	e.mu.Lock()
 	var dones []chan struct{}
@@ -163,7 +144,7 @@ func (e *Engine) Wait() {
 	}
 }
 
-// launch starts r's supervisor. Caller holds e.mu.
+// Caller holds e.mu.
 func (e *Engine) launch(r *running) {
 	ctx, cancel := context.WithCancel(e.ctx)
 	r.cancel = cancel
@@ -201,7 +182,6 @@ func (e *Engine) supervise(ctx context.Context, r *running) {
 	}
 }
 
-// admit applies dedup and the sender allowlist, then enqueues.
 func (e *Engine) admit(r *running, ev event.Event) {
 	name := r.src.Name()
 	if ev.Source == "" {
@@ -246,7 +226,7 @@ func (e *Engine) admit(r *running, ev event.Event) {
 		"connector", ev.Origin.Connector, "channel", ev.Origin.Channel, "actor", ev.Actor.ID)
 }
 
-// remember records key in the bounded dedup set. Caller holds e.mu.
+// Caller holds e.mu.
 func (e *Engine) remember(key string) {
 	e.seen[key] = true
 	e.order = append(e.order, key)
@@ -256,7 +236,6 @@ func (e *Engine) remember(key string) {
 	}
 }
 
-// Names returns the registered source names, sorted.
 func (e *Engine) Names() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()

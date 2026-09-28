@@ -22,8 +22,7 @@ func discordEvent() event.Event {
 	}
 }
 
-// The model has no clock. Without a stamped `now` it dates timestamps
-// from its training cutoff — see D-030.
+// The model has no clock; without a stamped `now` it dates from its training cutoff.
 func TestComposeSystemStampsTheClock(t *testing.T) {
 	fixed := time.Date(2026, 7, 19, 14, 30, 0, 0, time.UTC)
 	b := &ContextBuilder{
@@ -64,8 +63,7 @@ func TestComposeSystemMarksMissingUser(t *testing.T) {
 	}
 }
 
-// Untrusted server instructions are third-party text; they must never
-// reach the system prompt (D-038).
+// Untrusted server instructions must never reach the system prompt (D-038).
 func TestComposeSystemServers(t *testing.T) {
 	b := &ContextBuilder{Servers: fakeServers{
 		{Name: "memory", Trusted: true, Instructions: "Start with INDEX.md.", Tools: []string{"memory_read"}},

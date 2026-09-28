@@ -2,29 +2,17 @@ package agent
 
 import "github.com/runyanjake/tobee/internal/llm"
 
-// Conversation is the growing chat state for one task from dequeue
-// through delivery. Every phase (plan, execute per step, synth)
-// appends to the same Messages list — LM Studio is stateless on the
-// wire, so we resend the whole list on each call, but from our code's
-// view this is one continuous conversation.
-//
-// SurfacedKnowledge is a stub for a future integration (web search /
-// file search) that will accumulate durable facts separately from the
-// raw message tail. Empty today; kept on the struct so state templates
-// can reference `{{.SurfacedKnowledge}}` and be no-op if nothing is
-// there yet.
+// Conversation is one task's chat, shared by every phase; the whole list is resent on each stateless call.
 type Conversation struct {
 	Messages          []llm.Message
 	Plan              *Plan
-	StepCursor        int      // index of the step being executed (0-indexed)
-	SurfacedKnowledge []string // stub — populated by future web/file search hooks
+	StepCursor        int
+	SurfacedKnowledge []string // stub for future web/file search; always empty today
 	Finished          bool     // set when step_finish or user_ask ends the whole turn
 
-	logged int // Messages already written to the debug log (see callLLM)
+	logged int // Messages already written to the debug log (see logNewMessages)
 }
 
-// NewConversation seeds the chat with a system message and returns
-// the empty container. All subsequent phases append to Messages.
 func NewConversation(systemPrompt string) *Conversation {
 	msgs := make([]llm.Message, 0, 8)
 	if systemPrompt != "" {
@@ -33,9 +21,7 @@ func NewConversation(systemPrompt string) *Conversation {
 	return &Conversation{Messages: msgs}
 }
 
-// Append records one message into the conversation. Every LLM call
-// (plan, per-step, synth) reads back the whole Messages slice; do not
-// mutate positions in place after appending.
+// Append adds a message; never mutate earlier positions, every call resends them.
 func (c *Conversation) Append(m llm.Message) {
 	c.Messages = append(c.Messages, m)
 }

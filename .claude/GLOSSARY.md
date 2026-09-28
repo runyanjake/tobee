@@ -36,14 +36,17 @@
 | **Log category** | The `cat` attribute on every log record: `input`, `thinking`, `action`, `output`, `llm`, or `system` (D-040). |
 | **Memory scope** | `user` (`data/memory/users/<connector>/<id>/`), `shared` (`data/memory/shared/`), or `both` (search and list only). |
 | **Misfire policy: skip** | One-shot jobs whose time passed while tobee was down are deleted at boot, not run. |
-| **Nudge** | The `PROTOCOL VIOLATION: …` user message appended before the single retry of a phase. |
+| **Model (`llm.Model`)** | The agent's only interface to an LLM: `Decide` returns exactly one call to one offered tool (D-041). Implemented by the OpenAI-compatible provider in `internal/llm/openai`. |
+| **Nudge** | The short "could not be read as a tool call" user message appended before the single retry of a phase. The unreadable output itself is dropped. |
 | **Parked task** | A task that asked the user a question and is waiting for the answer in `data/tasks/parked/`. Holds the request, question, and resume keys; expires after 24h (D-036). |
 | **Phase** | One stage of `PlanExecute`: plan, (announce), execute step, synthesize. |
 | **Phase directive / state template** | A user-role message rendered from `prompts/state/<phase>.md` and wrapped in `<phase name="…">`. Carries that phase's contract. |
 | **Plan** | `agent.Plan`: `Goal`, ordered `Steps` (intent, status, result, error), or a `DirectReply`. Exists only for the turn. |
 | **Planner** | The phase that commits the plan via `plan_commit`. |
 | **Prefix cache** | LLM-server KV cache reuse when consecutive requests share leading tokens. Why the system message keeps stable sections first and is never rebuilt mid-turn. |
-| **Protocol violation** | A phase response without the required tool call (e.g. prose under `tool_choice=required`). Logged at ERROR, nudged, retried once. |
+| **Protocol violation** | Model output that is not a valid choice of an offered tool (`llm.ErrInvalidDecision`). With constrained decoding it means the server ignored the schema. Logged at ERROR, dropped, nudged, retried once. |
+| **Structured output** | A JSON Schema sent as `response_format` that the server enforces while decoding (a grammar on Ollama). How every model call is made (D-041). |
+| **Tool menu** | The `<tools>` block the provider appends to each request, describing the offered tools. The schema constrains output, but the model never sees it. |
 | **ReAct** | Reason + Act: alternate model tool calls and tool results. The executor's inner loop. |
 | **Reaction lifecycle** | ✅ received → 🧠 planning → 💭 executing on the inbound message. Cleared on success or park; ❌ on failure. |
 | **`reply_commit`** | The synthesizer's virtual tool: `{spoken, artifacts}`. |

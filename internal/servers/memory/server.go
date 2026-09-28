@@ -1,19 +1,5 @@
-// Package memory is the built-in "memory" MCP server: read, write,
-// append, search, and list over the long-term memory sandbox.
-//
-// Every tool takes an optional `scope` argument that selects which slice of
-// the memory tree it operates on:
-//
-//   - "user"   — files under data/memory/users/<connector>/<userId>/
-//   - "shared" — files under data/memory/shared/
-//   - "both"   — read-only scopes only (search, list); walks user + shared
-//
-// Defaults: read/write/append → "user". search/list → "both".
-//
-// The active user is read from the per-turn context (see internal/scope).
-// A "user" scope call on a turn with no attached user (e.g. a resource
-// notification)
-// returns a clear error rather than silently writing to a generic location.
+// Package memory is the built-in "memory" MCP server over the memory sandbox,
+// scoped per call to the turn's user, shared, or both (search/list only).
 package memory
 
 import (
@@ -31,7 +17,6 @@ import (
 
 const sharedRoot = "shared"
 
-// New builds the memory server backed by fs.
 func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 	srv := mcpserver.New("memory", instructions)
 	srv.Add(mcpserver.Tool{
@@ -122,8 +107,7 @@ type scopedRoot struct {
 	Dir   string // FS-relative root for this scope
 }
 
-// writableRoot returns the FS-relative root for a write/read of the given
-// scope. Errors if scope=user is requested but no user is attached to ctx.
+// writableRoot errors on scope=user with no user attached rather than writing somewhere generic.
 func writableRoot(ctx context.Context, scopeArg string) (scopedRoot, error) {
 	switch scopeArg {
 	case "", "user":
@@ -139,8 +123,7 @@ func writableRoot(ctx context.Context, scopeArg string) (scopedRoot, error) {
 	}
 }
 
-// readableRoots returns the roots to walk for search/list. "both" includes
-// shared and, if a user is attached, that user's tree.
+// readableRoots: "both" is shared plus the user's tree when a user is attached.
 func readableRoots(ctx context.Context, scopeArg string) ([]scopedRoot, error) {
 	switch scopeArg {
 	case "", "both":
@@ -160,7 +143,6 @@ func readableRoots(ctx context.Context, scopeArg string) ([]scopedRoot, error) {
 	}
 }
 
-// joinScope joins the scope root with a caller-supplied relative path.
 func joinScope(root, path string) string {
 	path = strings.TrimPrefix(path, "/")
 	if path == "" {

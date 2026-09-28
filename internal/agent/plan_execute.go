@@ -8,8 +8,7 @@ import (
 	"github.com/runyanjake/tobee/internal/telemetry"
 )
 
-// PlanExecute is the plan → announce → execute → synthesize strategy
-// (D-024, D-029), with the planner's direct-reply fast path (D-032).
+// PlanExecute is the plan → announce → execute → synthesize strategy (D-024, D-029, D-032).
 type PlanExecute struct {
 	planner *Planner
 	exec    *Executor
@@ -21,17 +20,8 @@ func NewPlanExecute(planner *Planner, exec *Executor, synth *Synthesizer, out *d
 	return &PlanExecute{planner: planner, exec: exec, synth: synth, out: out}
 }
 
-// Name implements Strategy.
 func (s *PlanExecute) Name() string { return "plan_execute" }
 
-// Handle drives one turn through a single conversation:
-//
-//  1. Plan: Planner.Run calls plan_commit and sets the Plan.
-//  2. Announce the plan where the connector can edit it afterwards.
-//  3. For each step, run the ReAct sub-loop against the same
-//     Conversation. finished=true skips the remaining steps; a user_ask
-//     ends the turn so the runtime can park it.
-//  4. Synthesize the reply via reply_commit.
 func (s *PlanExecute) Handle(t *Turn) {
 	ctx := t.Ctx
 	ev := t.Event
@@ -46,16 +36,14 @@ func (s *PlanExecute) Handle(t *Turn) {
 	}
 	plan := conv.Plan
 
-	// Fast path (D-032): the planner answered outright, so there is
-	// nothing to announce, execute, or synthesise.
+	// Fast path (D-032): the planner answered outright.
 	if plan.DirectReply != "" {
 		t.Reply = plan.DirectReply
 		return
 	}
 
 	// --- Phase 2: announce --------------------------------------------
-	// Only where the message can be edited as steps progress: on email a
-	// checklist would be one more message nobody can update.
+	// Only where the message is editable; on email a checklist can't be updated.
 	if s.out.CanEdit(ev.Origin.Connector) {
 		if msg := plan.RenderAnnouncement(); msg != "" {
 			telemetry.Log(ctx, slog.LevelInfo, telemetry.Output, "agent: output",
@@ -101,15 +89,12 @@ func (s *PlanExecute) Handle(t *Turn) {
 		}
 	}
 
-	// The question is the turn's output; there is nothing to synthesise
-	// until the user answers.
+	// The question is the turn's output; nothing to synthesise until answered.
 	if t.Await != nil {
 		return
 	}
 
-	// Correctness surface: if the plan ran to the last step but no
-	// step ever set finished=true, log the mismatch. Not fatal — synth
-	// still runs.
+	// No step set finished=true: log the mismatch, but synth still runs.
 	if !conv.Finished && plan.Complete() && stepTotal > 0 {
 		if plan.Steps[stepTotal-1].Status == StepDone {
 			log.Warn("agent: last step done without finished=true attestation",
@@ -126,9 +111,7 @@ func (s *PlanExecute) Handle(t *Turn) {
 	case err == nil:
 		t.Reply = strings.TrimSpace(out)
 
-	// A tool already rendered the answer, so a dead synthesiser is no
-	// reason to send the user nothing. Code owns these blocks (D-030),
-	// which is exactly what makes delivering them here safe.
+	// Tools already rendered the answer; code owns these blocks (D-030), so deliver them.
 	case len(t.Verbatim) > 0:
 		t.Reply = strings.TrimSpace(renderReply(replyCommitArgs{}, t.Verbatim))
 		log.Warn("agent: synthesizer failed; delivering verbatim tool output instead",
@@ -139,8 +122,7 @@ func (s *PlanExecute) Handle(t *Turn) {
 	}
 }
 
-// updatePlanMessage edits the plan announcement to reflect current step
-// statuses. Best-effort: no announcement or a failed edit is a debug log.
+// updatePlanMessage is best-effort: a missing announcement or failed edit only logs.
 func (s *PlanExecute) updatePlanMessage(t *Turn) {
 	if t.PlanMessageID == "" {
 		return

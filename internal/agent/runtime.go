@@ -11,9 +11,7 @@ import (
 	"github.com/runyanjake/tobee/internal/telemetry"
 )
 
-// Reaction emojis mark turn progress on the inbound message: received,
-// planning, executing, and (terminal) failure. A successful turn clears
-// its reactions instead of leaving a marker.
+// Progress reactions on the inbound message; a successful turn clears them.
 const (
 	reactReceived  = "✅"
 	reactPlanning  = "🧠"
@@ -21,15 +19,12 @@ const (
 	reactFailed    = "❌"
 )
 
-// Config controls the runtime's turn-level limits. Per-step and total
-// executor caps live on Executor.
+// Config holds turn-level limits; step caps live on Executor.
 type Config struct {
-	TurnBudget time.Duration // wall-clock cap on a single turn
+	TurnBudget time.Duration // wall-clock cap per turn
 }
 
-// Runtime is the serial worker: it takes one task at a time off the
-// queue, runs it through the strategy, and delivers or parks the result
-// (D-005). There is no state across tasks except parked questions.
+// Runtime runs one task at a time (D-005); only parked questions persist across tasks.
 type Runtime struct {
 	queue    *taskqueue.Queue
 	ctxb     *ContextBuilder
@@ -45,7 +40,6 @@ func NewRuntime(queue *taskqueue.Queue, ctxb *ContextBuilder, out *delivery.Rout
 	return &Runtime{queue: queue, ctxb: ctxb, out: out, strategy: strategy, cfg: cfg}
 }
 
-// Start launches the single worker goroutine. Cancel ctx to stop.
 func (r *Runtime) Start(ctx context.Context) {
 	go func() {
 		slog.Info("agent: runtime started", "strategy", r.strategy.Name(), "channels", r.out.Names())
@@ -102,9 +96,7 @@ func (r *Runtime) run(parent context.Context, task *taskqueue.Task) {
 	r.queue.Done(task)
 }
 
-// park records the task as waiting on the user's answer. The question
-// was already sent by the tool that asked it; it is logged here as the
-// turn's output so every turn ends with one output record.
+// park logs the already-sent question as the turn's output so every turn ends with one output record.
 func (r *Runtime) park(t *Turn) {
 	telemetry.Log(t.Ctx, slog.LevelInfo, telemetry.Output, "agent: output",
 		"kind", "question", "connector", t.Event.Origin.Connector, "channel", t.Event.Origin.Channel,
@@ -117,8 +109,7 @@ func (r *Runtime) park(t *Turn) {
 	telemetry.Logger(t.Ctx).Info("agent: turn parked awaiting user", "keys", len(t.Await.Keys))
 }
 
-// deliver sends the reply (if any). A best-effort operation — a
-// failure here must not block future turns.
+// deliver is best-effort: a failure must not block future turns.
 func (r *Runtime) deliver(t *Turn) {
 	ev := t.Event
 	log := telemetry.Logger(t.Ctx)
@@ -133,11 +124,7 @@ func (r *Runtime) deliver(t *Turn) {
 		}
 	}
 
-	// Terminal reaction: a produced reply is success (clear the trail);
-	// an empty reply means the turn failed to answer (mark it). ❌ is
-	// applied here and nowhere else — each phase handles its own retries,
-	// so by the time we get here every retry-worthy failure has already
-	// been exhausted.
+	// ❌ is applied only here: phases have already exhausted their own retries.
 	if t.Reply == "" {
 		t.React(reactFailed)
 	} else {

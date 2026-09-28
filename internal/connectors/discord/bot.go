@@ -1,10 +1,5 @@
-// Package discord is the Discord connector. One Bot plays three roles:
-//
-//   - ingest.Source: the gateway listener, emitting addressed messages;
-//   - delivery.Channel (+ Editor, Reactor): replies, plan edits, and
-//     progress reactions on the originating channel;
-//   - an MCP server ("discord") with a send_message tool for posting
-//     anywhere else.
+// Package discord is the Discord connector: an ingest source, a delivery
+// channel (with edits and reactions), and an MCP server, all in one Bot (D-035).
 package discord
 
 import (
@@ -25,17 +20,14 @@ import (
 	"github.com/runyanjake/tobee/internal/mcpserver"
 )
 
-// Name is the connector name: the event source, the delivery channel,
-// and the MCP server all use it.
+// Name is shared by the event source, the delivery channel, and the MCP server.
 const Name = "discord"
 
-// Config configures a Bot.
 type Config struct {
 	Token     string
-	ChannelID string // optional; if set only this channel is handled
+	ChannelID string // optional; restricts handling to this channel
 }
 
-// Bot is the Discord connector.
 type Bot struct {
 	session   *discordgo.Session
 	channelID string
@@ -51,7 +43,7 @@ type Bot struct {
 	rxHead  int
 	rxFill  bool
 	lastRx  time.Time
-	connect time.Time // set in onReady
+	connect time.Time
 }
 
 type rxEvent struct {
@@ -61,7 +53,6 @@ type rxEvent struct {
 
 const rxRingSize = 32
 
-// New creates a Bot. The gateway connection is not opened until Run.
 func New(cfg Config) (*Bot, error) {
 	if cfg.Token == "" {
 		return nil, fmt.Errorf("discord token is empty")
@@ -70,11 +61,8 @@ func New(cfg Config) (*Bot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create discord session: %w", err)
 	}
-	// MessageContent is a privileged intent; without it Discord delivers
-	// m.Content as an empty string in guild channels unless the bot is in
-	// m.Mentions, which breaks bare-name addressing like "tobee, ..." and
-	// the "@TOBEE" plain-text form. Must also be enabled in the developer
-	// portal for the bot application.
+	// Privileged intent (also enable it in the developer portal): without it guild
+	// m.Content is empty unless the bot is @-mentioned, breaking bare-name addressing.
 	session.Identify.Intents = discordgo.IntentsAllWithoutPrivileged | discordgo.IntentMessageContent
 
 	b := &Bot{
@@ -88,11 +76,8 @@ func New(cfg Config) (*Bot, error) {
 	return b, nil
 }
 
-// Name implements ingest.Source.
 func (b *Bot) Name() string { return Name }
 
-// Run implements ingest.Source: it holds the gateway connection open and
-// emits addressed messages until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context, emit ingest.Emit) error {
 	if err := b.session.Open(); err != nil {
 		return fmt.Errorf("discord: open gateway: %w", err)
@@ -121,7 +106,7 @@ func (b *Bot) onReady(_ *discordgo.Session, r *discordgo.Ready) {
 	b.statsMu.Lock()
 	b.connect = time.Now()
 	b.statsMu.Unlock()
-	b.remember(r.User) // cache self so <@selfID> rewrites without waiting for a third party to mention us first.
+	b.remember(r.User) // so <@selfID> rewrites before anyone else mentions the bot
 	slog.Info("discord: ready", "user", r.User.Username, "guilds", len(r.Guilds))
 	if b.channelID != "" {
 		slog.Info("discord: listening on channel", "id", b.channelID)
@@ -191,23 +176,12 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	emit(ev)
 }
 
-// nameRe matches the bot's name as a whole word, case-insensitive. Used to
-// detect bare-name addressing ("tobee, are you there?") alongside the @-mention
-// and reply-to-bot paths in isAddressed. The \b boundaries already match
-// "@TOBEE" because @ is a non-word character — the boundary sits between @ and T.
+// nameRe detects bare-name addressing; \b also matches plain-text "@TOBEE"
+// because @ is a non-word character.
 var nameRe = regexp.MustCompile(`(?i)\btobee\b`)
 
-// isAddressed reports whether m is for the bot. We forward to the agent loop
-// when any of:
-//   - the bot is in the mentions list,
-//   - the bot's raw mention token (<@id> or <@!id>) appears in the body even
-//     though it's missing from Mentions (defensive against gateway state races),
-//   - the message is a reply to one of the bot's own messages, or
-//   - the bot's name appears as a whole word in the body (covers "tobee, ..."
-//     and plain-text "@TOBEE" alike — see nameRe).
-//
-// Everything else is ambient channel chatter and gets dropped here so we don't
-// burn an LLM call on it.
+// isAddressed filters out ambient chatter. The raw <@id> check covers mentions
+// missing from m.Mentions due to gateway state races.
 func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	selfID := s.State.User.ID
 	for _, u := range m.Mentions {
@@ -224,12 +198,8 @@ func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) bool
 	return nameRe.MatchString(m.Content)
 }
 
-// Send implements delivery.Channel. to.Channel is the Discord channel
-// ID; to.Thread is unused (no thread support yet). Returns the ID of the
-// LAST sent chunk so the agent can later edit it. For multi-chunk
-// replies, in-place edit only makes sense for short messages that fit in
-// one chunk — the plan announcement is sized to fit, so this is fine in
-// practice.
+// Send returns the last chunk's ID; edits only make sense for one-chunk
+// messages like the plan announcement.
 func (b *Bot) Send(_ context.Context, to event.Address, text string) (string, error) {
 	text = b.rewriteOutboundMentions(text)
 	chunks := splitMessage(text)
@@ -249,8 +219,6 @@ func (b *Bot) Send(_ context.Context, to event.Address, text string) (string, er
 	return lastID, nil
 }
 
-// Edit implements delivery.Editor. Used to update the plan announcement
-// with step status changes (running / done / failed emojis).
 func (b *Bot) Edit(_ context.Context, to event.Address, messageID, text string) error {
 	text = b.rewriteOutboundMentions(text)
 	slog.Debug("discord: message edited",
@@ -262,10 +230,8 @@ func (b *Bot) Edit(_ context.Context, to event.Address, messageID, text string) 
 	return nil
 }
 
-// React implements delivery.Reactor: it adds or removes the bot's own
-// emoji reaction on a message. Removing the bot's own reaction needs no
-// Manage Messages permission. The ctx is unused — discordgo issues a
-// plain REST call.
+// React ignores ctx: discordgo's REST calls don't take one. Removing the
+// bot's own reaction needs no Manage Messages permission.
 func (b *Bot) React(_ context.Context, to event.Address, messageID, emoji string, add bool) error {
 	if messageID == "" {
 		return nil
@@ -282,9 +248,7 @@ func (b *Bot) React(_ context.Context, to event.Address, messageID, emoji string
 	return nil
 }
 
-// Server builds the connector's MCP server. Replies to the current
-// conversation go through delivery in code; this tool is only for
-// posting somewhere else (D-035).
+// Server's tool is only for posting elsewhere; replies are delivered in code (D-035).
 func (b *Bot) Server(instructions string) *mcpserver.Server {
 	srv := mcpserver.New(Name, instructions)
 	srv.Add(mcpserver.Tool{
@@ -332,7 +296,6 @@ func (b *Bot) recordRx(ch string) {
 	b.lastRx = now
 }
 
-// remember records a user ID → display-name mapping for later rewrites.
 func (b *Bot) remember(u *discordgo.User) {
 	if u == nil || u.ID == "" {
 		return
@@ -346,13 +309,11 @@ func (b *Bot) remember(u *discordgo.User) {
 	b.namesMu.Unlock()
 }
 
-// mentionRe matches Discord's user-mention tokens. The optional `!` is the
-// legacy nickname form; modern clients emit the plain form for both. Role
-// (`<@&id>`) and channel (`<#id>`) tokens deliberately don't match.
+// mentionRe matches user mentions only; `!` is the legacy nickname form.
+// Role (`<@&id>`) and channel (`<#id>`) tokens deliberately don't match.
 var mentionRe = regexp.MustCompile(`<@!?(\d+)>`)
 
-// rewriteMentions turns each `<@id>` in s into `@displayname` if the ID is
-// in the cache; otherwise the token is left untouched so the raw ID survives.
+// rewriteMentions leaves uncached IDs as raw tokens so the ID survives.
 func (b *Bot) rewriteMentions(s string) string {
 	if s == "" || !strings.Contains(s, "<@") {
 		return s
@@ -372,10 +333,8 @@ func (b *Bot) rewriteMentions(s string) string {
 	})
 }
 
-// rewriteOutboundMentions is the mirror of rewriteMentions: it turns
-// `@displayname` tokens emitted by the model back into `<@id>` so Discord
-// renders them as real pings. Longer names are matched first so a name that
-// is a prefix of another can't steal the shorter match.
+// rewriteOutboundMentions turns `@displayname` into real pings. Longer names
+// go first so a name that prefixes another can't steal its match.
 func (b *Bot) rewriteOutboundMentions(s string) string {
 	if s == "" || !strings.Contains(s, "@") {
 		return s
@@ -405,8 +364,7 @@ func (b *Bot) rewriteOutboundMentions(s string) string {
 	return s
 }
 
-// displayName prefers GlobalName (the new Discord display name) and falls
-// back to the legacy Username. Returns "" if the user has neither.
+// displayName prefers GlobalName (the new display name) over legacy Username.
 func displayName(u *discordgo.User) string {
 	if u == nil {
 		return ""

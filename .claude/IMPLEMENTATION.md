@@ -17,7 +17,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | 2026-07-02 | `d1a3864`, `c0bb476` | Progress reactions; generated content in code blocks. |
 | 2026-07-04 | `54e72ca` … `13ccc7a` | Strict tool-call protocol and no pre-loaded memory (D-025, D-026). LLM error retries. Per-message turns: sessions, summarizer, and janitor deleted (D-027). Prompts baked into the prod image. `prompts/persona` → `prompts/system` plus static tools catalogue (D-028). One `Conversation` per request with state templates (D-029). |
 | 2026-07-19 | `a974c76` … `1f2f5c5` | User text split from `<phase>` directives. Verbatim enforced in code, clock stamp, relative status `window` (D-030). Salvage parser added (D-031) then reverted. Temperature default 0.7 → 0.1, now configurable. Planner `direct_reply` fast path (D-032). |
-| 2026-09-28 | branch `mcp-platform` | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. |
+| 2026-09-28 | branch `mcp-platform` | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. Prompts cut to about a quarter of their size, with every `tool({args})` example removed. `llm.Model` interface; the OpenAI-compatible provider uses schema-constrained structured output instead of `tool_choice`, which Ollama ignores (D-041). |
 
 ## Major Refactors & Migrations
 
@@ -56,6 +56,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | D-024 (partial) | Text-wrap planner fallback; synthesis given only the plan; per-step tool scopes; mandatory steps for every turn | D-025, D-029, D-029, D-032 |
 | D-026 (partial) | Session summary still pre-loaded | D-027 |
 | D-031 | Salvage parser for tool calls written as text | Reverted in `3e818f9`; entry removed from the log |
+| D-001 (partial) | Native OpenAI `tools` with `tool_choice=required` | D-041. Calls are still structured, now via `response_format: json_schema`. |
 | D-004 | No vector search, reflection cron, or MCP | MCP: D-033. Vector search and reflection remain non-goals in [GOALS.md](GOALS.md#non-goals--out-of-scope). |
 | D-009 | Replies go through the `Replies` table, not a `send.*` tool | D-035. The reply to the origin is still code; other sends are tools. |
 | D-012 (partial) | Tools catalogue is the last system-prompt fragment | D-033. Fragment ordering stands. |
@@ -66,7 +67,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 ## Known Limitations
 
-- **Protocol violations from the local model.** Tool calls sometimes come back as text under `tool_choice=required`. Root cause undiagnosed; see [GOALS.md](GOALS.md#current-operational-priorities).
+- **Protocol violations were `tool_choice` being ignored.** Found 2026-09-28: Ollama's OpenAI endpoint has no `tool_choice` field, so `required` was never enforced. D-041 replaces it with constrained decoding. Checked against LM Studio (Qwen3 27B: a greeting got a direct reply, a lookup made a real tool call, zero violations). Prod Ollama with `qwen2.5:7b` is not yet verified; see [GOALS.md](GOALS.md#current-operational-priorities).
 - **Synthesis continuation risk.** Synthesis runs on the full transcript, so the model may keep talking instead of presenting results. It's held back by `synthesize.md` wording plus the forced `reply_commit`.
 - **Date stamping conflicts with canonical memory files.**
   - `datedname.Apply` rewrites every `memory_write` / `memory_append` / `workspace_write` path to `YYYY.MM.DD-<kebab>.<ext>`.
@@ -110,7 +111,8 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 Tests cover:
 
-- `internal/agent`: context builder, planner commit parsing, `renderReply`, and an end-to-end runtime test with a scripted LLM (ask → park → resume; verbatim delivery)
+- `internal/agent`: context builder, planner commit parsing, `renderReply`, and end-to-end runtime tests against a scripted `llm.Model` (ask → park → resume; verbatim delivery; the logged chain; unreadable output dropped)
+- `internal/llm/openai`: request shape (structured output, no `tools` / `tool_choice`), schema building, ordering, and sanitizing, the tool menu, invalid-output rejection, native-call acceptance
 - `internal/mcphost`: catalog, results, trust gating, server config
 - `internal/taskqueue`: persistence, poison tasks, park/resume, expiry, capacity
 - `internal/ingest`: dedup, allowlists, restart, runtime registration

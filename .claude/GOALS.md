@@ -40,7 +40,7 @@
 - **Dev:** Docker Compose (`docker-compose.yml`) or `go run ./cmd/tobee`, pointed at LM Studio on the developer's machine.
 - **External dependencies:**
   - Discord gateway and REST API (the bot needs the privileged Message Content intent)
-  - an OpenAI-compatible LLM that supports native tool calling (local Ollama in prod today)
+  - an OpenAI-compatible LLM that supports structured output (local Ollama in prod today)
   - optional: an IMAP/SMTP mailbox; external MCP servers
 - **No inbound ports.** tobee exposes no HTTP server or healthcheck. CI checks health by container status and the `tobee is running` log line.
 
@@ -68,10 +68,7 @@ Explicitly rejected:
 
 From the open questions in the former decision log and the latest commits (2026-07-19):
 
-1. **Diagnose protocol violations.** The model sometimes returns `finish="stop"` with the tool call written as text, even with `tool_choice="required"`. Temperature now defaults to `0.1`; whether that fixes it is unmeasured. Next steps:
-   - count violations at 0.1
-   - confirm `tool_choice` is honored by the deployed model and server
-   - check whether grammar-constrained output is available
+1. **Confirm structured output in prod** (D-041). The cause of the text-written tool calls was found on 2026-09-28: Ollama's OpenAI endpoint ignores `tool_choice`. Every call now uses a JSON-schema `response_format`, which Ollama enforces by grammar. Verify on the prod Ollama and `qwen2.5:7b` that `agent: PROTOCOL VIOLATION` no longer appears and that tool choice is sensible.
 2. **Decide on a smaller synthesizer context.** The unmerged branch `synth-slim-context-violations` builds the synthesizer's input as `[system, user request, directive]` instead of the full transcript.
 3. **Watch the direct-reply fast path** for wrong answers the model should have looked up (D-032).
 4. **Validate the MCP platform in prod** (2026-09-28). Confirm `qwen2.5:7b` handles the renamed tools and `user_ask`. Test the email connector against a real mailbox. Watch tool-choice accuracy as external servers are added.

@@ -1,8 +1,4 @@
-// Package datedname rewrites a model-supplied filename into a dated,
-// kebab-cased path. The contract: the model passes the filename it wants
-// (e.g. "My Notes.md" or "ideas/dream journal"), the backend stamps the
-// creation date and normalizes the basename so files land as
-// "<dir>/YYYY.MM.DD-kebab-name.ext".
+// Package datedname rewrites a model-supplied filename into "<dir>/YYYY.MM.DD-kebab-name.ext".
 package datedname
 
 import (
@@ -12,8 +8,7 @@ import (
 	"time"
 )
 
-// Apply rewrites rel into "<dir>/YYYY.MM.DD-<kebab>.<ext>".
-// Subdirectories are preserved; only the basename is rewritten.
+// Apply rewrites only the basename of rel; subdirectories are preserved.
 func Apply(rel string, now time.Time) (string, error) {
 	rel = strings.TrimSpace(rel)
 	rel = strings.Trim(rel, "/")

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 )
 
-// Role identifies who produced a message in a chat turn.
 type Role string
 
 const (
@@ -14,9 +13,7 @@ const (
 	RoleTool      Role = "tool"
 )
 
-// Message is a single entry in the chat transcript sent to the LLM.
-// For RoleTool, ToolCallID must be set and Content carries the tool output.
-// For RoleAssistant, ToolCalls may be populated when the model requested tools.
+// Message with RoleTool must set ToolCallID; Content carries the tool output.
 type Message struct {
 	Role       Role       `json:"role"`
 	Content    string     `json:"content,omitempty"`
@@ -25,11 +22,8 @@ type Message struct {
 	Name       string     `json:"name,omitempty"`
 }
 
-// MarshalJSON always emits a content field. OpenAI-compatible servers
-// (LM Studio in particular) reject assistant messages where content is
-// absent — an assistant turn that only made tool calls becomes
-// "content": null, never an omitted field. Other roles always emit
-// the string form.
+// MarshalJSON always emits content: LM Studio rejects assistant messages without it,
+// so a tool-call-only turn sends "content": null.
 func (m Message) MarshalJSON() ([]byte, error) {
 	type wire struct {
 		Role       Role            `json:"role"`
@@ -54,55 +48,14 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// ToolCall is a function invocation requested by the model.
 type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`
 }
 
-// FunctionCall is the inner payload of a ToolCall.
-// Arguments is a JSON-encoded string as emitted by OpenAI-compatible servers.
+// Arguments is a JSON-encoded string, as OpenAI-compatible servers emit it.
 type FunctionCall struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
-
-// ToolSpec describes a function the model is allowed to call.
-// InputSchema is a JSON-Schema object describing the Arguments payload.
-type ToolSpec struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
-}
-
-// Response is the parsed outcome of a single LLM call.
-type Response struct {
-	Text string // assistant's textual reply, if any
-	// Reasoning is the model's thinking, when the server returns it
-	// separately. It is logged, never sent back to the model.
-	Reasoning string
-	ToolCalls []ToolCall // tool invocations requested by the model
-	Finish    string     // e.g. "stop", "tool_calls", "length"
-	Usage     Usage
-}
-
-// Usage is the server-reported token count for one call. Zero when the
-// server does not report it.
-type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-}
-
-// ToolChoice controls whether the model may, must, or must not call a
-// tool on this call. Maps to the OpenAI `tool_choice` request field.
-// Unset omits the field; the server then defaults (typically "auto"
-// when tools are present, "none" when not).
-type ToolChoice string
-
-const (
-	ToolChoiceUnset    ToolChoice = ""
-	ToolChoiceAuto     ToolChoice = "auto"
-	ToolChoiceRequired ToolChoice = "required"
-	ToolChoiceNone     ToolChoice = "none"
-)

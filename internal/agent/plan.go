@@ -6,7 +6,6 @@ import (
 	"strings"
 )
 
-// StepStatus tracks one Step's progress through the turn's execution.
 type StepStatus string
 
 const (
@@ -14,13 +13,10 @@ const (
 	StepRunning StepStatus = "running"
 	StepDone    StepStatus = "done"
 	StepFailed  StepStatus = "failed"
-	StepSkipped StepStatus = "skipped" // set when an earlier step's finished=true short-circuits
+	StepSkipped StepStatus = "skipped" // an earlier step's finished=true short-circuited
 )
 
-// Step is one unit of work the planner committed to. Intent is the
-// outcome the executor must produce (state the result, not the
-// procedure). All registered tools are available on every step — plans
-// no longer scope tools per step (D-029).
+// Step's Intent is the outcome to produce, not the procedure; every tool is available (D-029).
 type Step struct {
 	ID       string     `json:"id"`
 	Intent   string     `json:"intent"`
@@ -28,27 +24,19 @@ type Step struct {
 	Result   string     `json:"result,omitempty"`
 	Error    string     `json:"error,omitempty"`
 	Attempts int        `json:"attempts,omitempty"`
-	// Finished records the `finished` boolean the LLM passed to
-	// step_finish. When true, the executor short-circuits any
-	// remaining steps and jumps to synth — the LLM is attesting that
-	// the whole user request is satisfied by what has run so far.
+	// Finished is the model attesting the whole request is satisfied; remaining steps are skipped.
 	Finished bool `json:"finished,omitempty"`
 }
 
-// Plan is the turn-scoped artifact the planner produces. Used both
-// for execution control and for the user-facing announcement.
 type Plan struct {
 	Goal  string `json:"goal"`
 	Steps []Step `json:"steps"`
-	// DirectReply is the planner's own answer, set only when Steps is
-	// empty. The loop delivers it verbatim and skips execute and synth
-	// (D-032). Never populated alongside steps.
+	// DirectReply is set only when Steps is empty; delivered as-is, skipping execute and synth (D-032).
 	DirectReply string `json:"direct_reply,omitempty"`
-	StepsRun    int    `json:"-"` // total executor LLM iterations across all steps
+	StepsRun    int    `json:"-"` // executor LLM iterations across all steps
 }
 
-// Next returns a pointer to the next pending step, or nil if none
-// remain. Mutations through the returned pointer write back to p.
+// Next returns the next pending step, or nil; mutations write back to p.
 func (p *Plan) Next() *Step {
 	if p == nil {
 		return nil
@@ -62,7 +50,6 @@ func (p *Plan) Next() *Step {
 	return nil
 }
 
-// Complete reports whether every step has reached a terminal state.
 func (p *Plan) Complete() bool {
 	if p == nil {
 		return true
@@ -83,7 +70,6 @@ const (
 	statusEmojiSkipped = "⏭️"
 )
 
-// emoji returns the unicode marker for a step's current status.
 func (s *Step) emoji() string {
 	switch s.Status {
 	case StepRunning:
@@ -99,9 +85,7 @@ func (s *Step) emoji() string {
 	}
 }
 
-// RenderAnnouncement returns the initial user-facing plan message. The
-// loop sends this immediately after the planner commits and stores the
-// returned message ID on the Turn so subsequent status edits land here.
+// RenderAnnouncement is the initial plan message; later status edits target its ID.
 func (p *Plan) RenderAnnouncement() string {
 	if p == nil || len(p.Steps) == 0 {
 		return ""
@@ -109,8 +93,7 @@ func (p *Plan) RenderAnnouncement() string {
 	return p.renderUserMessage()
 }
 
-// RenderStatus returns the user-facing plan message reflecting current
-// step statuses. Same layout as the announcement; only the emojis change.
+// RenderStatus matches the announcement's layout; only the emojis change.
 func (p *Plan) RenderStatus() string {
 	if p == nil || len(p.Steps) == 0 {
 		return ""
@@ -131,9 +114,7 @@ func (p *Plan) renderUserMessage() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// Render returns the <plan> block for injection into LLM prompts where
-// the plan is part of the context. The structured JSON form so the
-// model can reason over goal, ordering, statuses, and per-step results.
+// Render returns the <plan> JSON block for LLM prompts.
 func (p *Plan) Render() string {
 	if p == nil || len(p.Steps) == 0 {
 		return ""
@@ -152,8 +133,7 @@ func (p *Plan) Render() string {
 	return sb.String()
 }
 
-// assignIDs gives every step a stable ID (s1, s2, …) and a default
-// status. Idempotent.
+// assignIDs gives every step a stable ID (s1, s2, …) and a default status. Idempotent.
 func (p *Plan) assignIDs() {
 	for i := range p.Steps {
 		if p.Steps[i].ID == "" {

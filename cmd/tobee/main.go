@@ -22,6 +22,7 @@ import (
 	"github.com/runyanjake/tobee/internal/delivery"
 	"github.com/runyanjake/tobee/internal/ingest"
 	"github.com/runyanjake/tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/llm/openai"
 	"github.com/runyanjake/tobee/internal/mcphost"
 	"github.com/runyanjake/tobee/internal/mcpserver"
 	"github.com/runyanjake/tobee/internal/sandboxfs"
@@ -46,18 +47,8 @@ func main() {
 	dataDir := envOr("DATA_DIR", "data")
 	promptsDir := envOr("PROMPTS_DIR", "prompts")
 
-	// --- LLM client (D-039: any OpenAI-compatible backend) ----------------
-	aiURL := mustEnv("AI_PROVIDER_URL")
-	aiModel := envOr("AI_MODEL", "local-model")
-	aiTemp := mustFloat("AI_TEMPERATURE", llm.DefaultTemperature)
-	client := llm.NewClient(aiURL, aiModel, llm.Options{
-		Temperature: &aiTemp,
-		MaxTokens:   mustInt("AI_MAX_TOKENS", 2048),
-		Timeout:     mustDuration("AI_TIMEOUT", 10*time.Minute),
-		APIKey:      os.Getenv("AI_API_KEY"),
-	})
-	slog.Info("llm: configured", "url", aiURL, "model", aiModel, "temperature", aiTemp,
-		"api_key", os.Getenv("AI_API_KEY") != "")
+	// --- Model (D-039, D-041) ----------------------------------------------
+	model := newModel(envOr("AI_PROVIDER", "openai"))
 
 	// --- Storage ------------------------------------------------------------
 	memFS, err := sandboxfs.NewFS(dataDir+"/memory", 64*1024)
@@ -66,8 +57,7 @@ func main() {
 	}
 	areas, err := workspace.LoadAreas(os.Environ(), int64(mustInt("WORKSPACE_MAX_FILE_SIZE", 262144)))
 	if err != nil {
-		// Orphan _DESC/_READONLY entries log a warning but don't abort —
-		// LoadAreas still returns a usable Areas registry.
+		// Orphan _DESC/_READONLY entries are non-fatal; the registry is still usable.
 		slog.Warn("workspace: load issues", "err", err)
 	}
 
@@ -167,9 +157,7 @@ func main() {
 	slog.Info("mcphost: catalog ready", "tools", len(host.ToolNames()))
 
 	// --- Prompts ------------------------------------------------------------
-	// prompts/system/*.md is the single system prompt, loaded once, at
-	// Messages[0] of every per-request Conversation (D-029). Server
-	// sections come from each server's instructions (D-033).
+	// One system prompt for every turn (D-029); server sections come from instructions (D-033).
 	systemPrompt := readSystemPrompt(promptsDir + "/system")
 	states, err := agent.LoadStateTemplates(promptsDir + "/state")
 	if err != nil {
@@ -179,7 +167,7 @@ func main() {
 
 	// --- Agent ----------------------------------------------------------------
 	ctxb := &agent.ContextBuilder{Persona: systemPrompt, Servers: host}
-	strategy := newStrategy(envOr("AGENT_STRATEGY", "plan_execute"), client, host, states, out)
+	strategy := newStrategy(envOr("AGENT_STRATEGY", "plan_execute"), model, host, states, out)
 	runtime := agent.NewRuntime(queue, ctxb, out, strategy, agent.Config{
 		TurnBudget: mustDuration("AGENT_TURN_BUDGET", 2*time.Minute),
 	})
@@ -200,15 +188,37 @@ func main() {
 	host.Close()
 }
 
+// newModel builds the AI_PROVIDER backend; wire quirks stay inside it (D-041).
+func newModel(name string) llm.Model {
+	switch name {
+	case "openai":
+		temp := mustFloat("AI_TEMPERATURE", openai.DefaultTemperature)
+		url, modelName := mustEnv("AI_PROVIDER_URL"), envOr("AI_MODEL", "local-model")
+		slog.Info("llm: configured", "provider", name, "url", url, "model", modelName,
+			"temperature", temp, "api_key", os.Getenv("AI_API_KEY") != "")
+		return openai.New(openai.Options{
+			BaseURL:     url,
+			Model:       modelName,
+			APIKey:      os.Getenv("AI_API_KEY"),
+			Temperature: &temp,
+			MaxTokens:   mustInt("AI_MAX_TOKENS", 2048),
+			Timeout:     mustDuration("AI_TIMEOUT", 10*time.Minute),
+		})
+	default:
+		fatal("AI_PROVIDER: unknown provider", fmt.Errorf("%q (known: openai)", name))
+		return nil
+	}
+}
+
 // newStrategy builds the reasoning strategy named by AGENT_STRATEGY (D-037).
-func newStrategy(name string, client *llm.Client, host *mcphost.Host, states *agent.StateTemplates, out *delivery.Router) agent.Strategy {
+func newStrategy(name string, model llm.Model, host *mcphost.Host, states *agent.StateTemplates, out *delivery.Router) agent.Strategy {
 	switch name {
 	case "plan_execute":
 		return agent.NewPlanExecute(
-			agent.NewPlanner(client, states),
-			agent.NewExecutor(client, host, states,
+			agent.NewPlanner(model, states),
+			agent.NewExecutor(model, host, states,
 				mustInt("PLAN_MAX_STEPS_PER_STEP", 4), mustInt("PLAN_MAX_STEPS_TOTAL", 12)),
-			agent.NewSynthesizer(client, states),
+			agent.NewSynthesizer(model, states),
 			out,
 		)
 	default:
@@ -228,9 +238,7 @@ func fatal(msg string, err error) {
 	os.Exit(1)
 }
 
-// setupLogging installs the process logger: LOG_FORMAT picks text or JSON,
-// LOG_LEVEL the threshold, LOG_CONTENT_LIMIT the cap on logged content.
-// telemetry.Handler tags every record with a category (D-040).
+// setupLogging applies LOG_FORMAT, LOG_LEVEL, and LOG_CONTENT_LIMIT (D-040).
 func setupLogging() {
 	raw := strings.TrimSpace(os.Getenv("LOG_LEVEL"))
 	level, levelErr := parseLogLevel(raw)
@@ -322,7 +330,6 @@ func mustDuration(key string, fallback time.Duration) time.Duration {
 	return v
 }
 
-// splitList parses a comma-separated env value, dropping blanks.
 func splitList(s string) []string {
 	var out []string
 	for _, v := range strings.Split(s, ",") {
@@ -333,9 +340,7 @@ func splitList(s string) []string {
 	return out
 }
 
-// readServerPrompt loads prompts/servers/<name>.md, a built-in server's
-// MCP instructions. Missing is not fatal — the server still works, the
-// model just gets no guidance for it.
+// readServerPrompt loads prompts/servers/<name>.md; a missing file just means no guidance.
 func readServerPrompt(dir, name string) string {
 	path := filepath.Join(dir, "servers", name+".md")
 	body, err := os.ReadFile(path)
@@ -346,10 +351,7 @@ func readServerPrompt(dir, name string) string {
 	return strings.TrimSpace(string(body))
 }
 
-// readSystemPrompt loads every *.md file in dir, sorted lexicographically,
-// and joins their contents with blank lines. The numeric prefix on each
-// filename (00-, 01-, …) is the load-order contract — see .claude/DESIGN.md
-// D-012.
+// readSystemPrompt joins dir/*.md in filename order; the numeric prefix is the contract (D-012).
 func readSystemPrompt(dir string) string {
 	matches, err := filepath.Glob(filepath.Join(dir, "*.md"))
 	if err != nil || len(matches) == 0 {
@@ -369,11 +371,8 @@ func readSystemPrompt(dir string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// logPromptsLoaded emits a startup summary of what prompt content was
-// actually loaded from PROMPTS_DIR, plus a loud ERROR if anything the
-// agent depends on came back empty. When a container is misconfigured
-// and prompts don't mount, this is the first sign — the running
-// binary otherwise looks healthy while the LLM sees no instructions.
+// logPromptsLoaded errors loudly on empty prompts: an unmounted prompts dir
+// otherwise looks healthy while the LLM runs with no instructions.
 func logPromptsLoaded(dir, system string, stateNames []string) {
 	slog.Info("prompts: loaded",
 		"prompts_dir", dir,

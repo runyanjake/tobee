@@ -27,7 +27,7 @@ flowchart LR
         ctxb["ContextBuilder"]
         strat["Strategy: PlanExecute<br/>Planner → Executor → Synthesizer"]
     end
-    llm["llm.Client"]
+    llm["llm.Model<br/>openai provider · json_schema"]
     host["mcphost.Host<br/>catalog · trust · _meta"]
     subgraph builtin["Built-in MCP servers (in-memory)"]
         mem["memory"]
@@ -73,7 +73,8 @@ flowchart LR
 | Email connector | `internal/connectors/email` | IMAP poller source (allowlisted senders, unseen only, ≤20 per poll, quoted history stripped), SMTP channel with `In-Reply-To` threading, `email_send`, `email` Reporter. |
 | `JobManager` | `internal/scheduler` | Model-created jobs as an ingest source: robfig cron for recurring, `time.AfterFunc` for one-shots, one JSON file per job, `schedules` Reporter. |
 | `delivery.Router` | `internal/delivery` | Connector name → `Channel`; optional `Editor` and `Reactor` interfaces. |
-| `llm.Client` | `internal/llm` | Non-streaming `POST /v1/chat/completions` with `tools`, `tool_choice`, temperature, `max_tokens`, optional bearer key. |
+| `llm.Model` | `internal/llm` | The agent's only interface to a model: `Decide(ctx, msgs, tools)` returns exactly one tool call. `ErrInvalidDecision` marks unreadable output (D-041). |
+| OpenAI-compatible provider | `internal/llm/openai` | Implements `llm.Model` with `response_format: json_schema` — no `tools`, no `tool_choice`. Builds the decision schema, sanitizes tool schemas to grammar-safe keywords, appends the tool menu, parses the choice, and reads reasoning and token usage. Bearer key optional. |
 | `abilities.Registry` | `internal/abilities` | Collects `Reporter.Render` output from each subsystem, sorted by name. |
 | `sandboxfs.FS` | `internal/sandboxfs` | Filesystem rooted at one directory. Rejects paths that escape it. Per-instance file size cap. |
 | `telemetry` | `internal/telemetry` | Log categories, a context-carried logger for correlation attributes, content truncation, and the handler that tags untagged records `cat=system` (D-040). |
@@ -170,17 +171,17 @@ flowchart LR
 0    system  prompts/system/*.md + <servers> + <context>
 1    user    the user's message, verbatim, untagged     (resumed: request, assistant question, answer)
 2    user    <phase name="plan">…</phase>
-3    asst    plan_commit({goal, steps, direct_reply})   tools=[plan_commit]            tool_choice=required
+3    asst    tool call: plan_commit                     offered: plan_commit
 4    tool    ok
              ── if direct_reply and zero steps: deliver it and stop (1 LLM call) ──
 5    user    <phase name="execute_step">…</phase>       (step 1 of N)
-6    asst    <tool call>                                tools=catalog + step_finish    tool_choice=required
+6    asst    tool call: <one tool>                      offered: catalog + step_finish
 7    tool    <result or "error: …">
 …    asst    step_finish({result, finished})
 …    tool    ok
              ── repeat per step; finished=true skips the remaining steps; user_ask parks ──
 N    user    <phase name="synthesize">…</phase>
-N+1  asst    reply_commit({spoken, artifacts})          tools=[reply_commit]           tool_choice=required
+N+1  asst    tool call: reply_commit                    offered: reply_commit
 N+2  tool    ok
 ```
 
@@ -218,7 +219,7 @@ N+2  tool    ok
 | Executor LLM calls per step | 4 | `PLAN_MAX_STEPS_PER_STEP` |
 | Executor LLM calls per turn | 12 | `PLAN_MAX_STEPS_TOTAL`. Counted before each call, so failed calls count. |
 | LLM HTTP timeout / max tokens | 10m / 2048 | `AI_TIMEOUT` / `AI_MAX_TOKENS` (the turn context cancels first) |
-| Temperature | 0.1 | `AI_TEMPERATURE` (`llm.DefaultTemperature`) |
+| Temperature | 0.1 | `AI_TEMPERATURE` (`openai.DefaultTemperature`) |
 | Tool call timeout | 30s | `MCP_SERVER_<NAME>_TIMEOUT`; built-ins use the default |
 | Tool result size | 32 KiB | `mcphost.maxResultBytes` |
 | Task queue capacity | 256 pending | `main.go` |
@@ -241,8 +242,8 @@ N+2  tool    ok
 | **Direct-answer fast path** | `direct_reply` in `plan_commit`. The route is decided inside the planning call, not by a separate classifier. |
 | **Human-in-the-loop clarification** | `user_ask` suspends the task and resumes on the answer, like LangGraph's `interrupt`, with state limited to request + question. |
 | **Final synthesis** | A separate call that presents results instead of continuing the conversation. |
-| **Structured output via forced tool calls** | Every phase uses `tool_choice=required` with a virtual tool whose schema defines the output. |
-| **Corrective retry ("re-asking")** | A protocol violation adds a `PROTOCOL VIOLATION: …` nudge and retries once. |
+| **Constrained decoding (structured output)** | Every call sends a JSON Schema admitting exactly one call to one offered tool; the server enforces it by grammar. Phase outputs are virtual tools whose schema defines the output. |
+| **Corrective retry ("re-asking")** | Unreadable output is dropped, a short nudge is appended, and the call is retried once. |
 | **Tool errors returned to the model** | A tool error becomes the tool result (`error: …`) and the model decides what to do next. |
 | **Content/presentation separation** | The model provides `spoken` and `artifacts`; Go writes the code fences. |
 | **Return-direct passthrough** | Output from verbatim tools is appended by code and never rewritten by the model. Same idea as LangChain's `return_direct`. |
@@ -261,7 +262,19 @@ N+2  tool    ok
 | Task | Redelivered after a crash, up to 2 attempts | — | Dropped at boot with an ERROR |
 | Announce, edit, react, send | No retry | — | Logged; turn continues |
 
-Violations are logged at ERROR as `agent: PROTOCOL VIOLATION` (`cat=llm`) with fields `phase`, `attempt`, `expected_tool`, `finish`, `text_chars`, `text_preview`, `tool_calls`.
+Violations (output that was not a valid tool choice, `llm.ErrInvalidDecision`) are logged at ERROR as `agent: PROTOCOL VIOLATION` (`cat=llm`) with `phase`, `err`, `raw_chars`, `raw_preview`. With constrained decoding they mean the server ignored the schema. The unreadable output is never appended to the conversation.
+
+### Model calls (D-041)
+
+Each call is `llm.Model.Decide(ctx, messages, tools)`. The OpenAI-compatible provider:
+
+1. Builds a schema: `{"call": {"tool": <const name>, "arguments": <that tool's schema>}}`, with one `anyOf` branch per offered tool. `tool` precedes `arguments` so the model names its choice first. The root is an object because hosted APIs require one.
+2. Sanitizes each tool schema to `type`, `properties`, `required`, `items`, `enum`, `const`, `anyOf` (from `oneOf`), bounds, and boolean `additionalProperties`. `$ref`, `pattern`, `format`, and descriptions are dropped.
+3. Appends a `<tools>` menu as the last user message: each tool's name, description, and arguments in compact form. The schema constrains the output, but the model never sees it. The menu is per-request and never stored.
+4. Sends `response_format: {type: "json_schema", json_schema: {schema, strict: false}}`, with no `tools` and no `tool_choice`. On Ollama this becomes the grammar-constrained `format`.
+5. Parses `call` into a tool call with a fresh ID. A native `tool_calls` answer from a server is accepted as the same choice. Anything else is `ErrInvalidDecision`.
+
+The conversation keeps standard tool-call form (an assistant message with `tool_calls`, then `tool` results), so it is valid history for every OpenAI-compatible server.
 
 ## Logging (D-040)
 
@@ -277,7 +290,7 @@ Every record has a `cat` attribute. Records from a turn also carry `task`, and w
 | `action` | INFO / WARN | `agent: tool call` / `tool result` | `tool`, `call_id`, `args`; `status` (`ok` / `verbatim` / `await` / `error` / `failed`), `duration_ms`, `content` |
 | `output` | INFO | `agent: output` | `kind` (`reply` / `plan` / `question`), destination, `content` |
 | `llm` | INFO | `agent: llm call` | `duration_ms`, `prompt_tokens`, `completion_tokens`, `finish`, `tool_calls` |
-| `llm` | ERROR | `agent: llm call failed`, `agent: PROTOCOL VIOLATION` | Error or violation details |
+| `llm` | ERROR | `agent: llm call failed`, `agent: PROTOCOL VIOLATION` | Error, or the unreadable output's preview |
 | `llm` | DEBUG | `agent: llm message` / `llm response` | Each message added since the previous call, and the raw response, unabridged |
 | `system` | any | everything else | Lifecycle, connectors, ingest, MCP host |
 
@@ -296,10 +309,11 @@ Every record has a `cat` attribute. Records from a turn also carry `task`, and w
 ## Prompt Architecture
 
 - **System message** (built once per request, `ContextBuilder.ComposeSystem`), in order:
-  1. `prompts/system/*.md`, sorted by filename and joined: identity, tone, behaviour, output, safety, tools.
+  1. `prompts/system/*.md`, sorted by filename and joined: identity, voice, behaviour, safety, tools.
   2. `<servers>`: each connected server's name, trusted instructions, and tool names. Built-in instructions are `prompts/servers/<name>.md`. The workspace server appends its area list.
   3. `<context>`: `now` (RFC3339 plus a readable date), source, kind, connector, channel, thread, and user name and ID, or `user=none`.
 - **Phase directives** are user-role messages rendered from `prompts/state/{plan,execute_step,synthesize}.md` with `StateData` (`Plan`, `Step`, `StepNumber`, `StepTotal`, `AvailableTools`, `HasVerbatim`).
+- **Prompts carry no call syntax.** No `tool({args})` examples anywhere: the local model copied them as text instead of making a tool call (2026-09-28). Tool names appear bare; schemas come with the request.
 - **What each file owns.**
   - `prompts/system/` holds rules true in every phase.
   - `prompts/servers/` holds how to use one server.
@@ -336,7 +350,7 @@ data/
    └─ parked/<id>.json               # questions waiting on an answer
 ```
 
-- The prompts (`02-behaviour.md`, `servers/memory.md`) direct this structure within each scope: `INDEX.md`, `user.md`, `preferences.md`, `facts/<topic>.md`, `feedback/<date>-<slug>.md`.
+- The prompts name only `INDEX.md` as the table of contents. File layout within a scope is left to the model.
 - Filenames actually written are rewritten by `datedname.Apply` to `<dir>/YYYY.MM.DD-<kebab-name><ext>`. See [IMPLEMENTATION.md](IMPLEMENTATION.md#known-limitations).
 - Email users get their own tree, keyed by address: `users/email/me_example_com/`. The same person on Discord is a different user.
 
@@ -384,7 +398,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 
 | ID | Decision | Why | Cost / constraint |
 |---|---|---|---|
-| D-001 | Native OpenAI tool calling; never JSON embedded in text. | The earlier JSON-in-text protocol needed retry loops for fences, `<think>` leaks, and drift. | The model and server must support function calling. |
+| D-001 | Tool calls are structured, never parsed out of prose. (Transport superseded by D-041: structured output rather than native `tools`.) | The earlier JSON-in-text protocol needed retry loops for fences, `<think>` leaks, and drift. | The model and server must support function calling. |
 | D-002, D-018 | Packages under `internal/`; binary at `cmd/tobee`; module `github.com/runyanjake/tobee`. | Idiomatic Go layout. | — |
 | D-003 | Memory is sandboxed under `data/memory` through `sandboxfs`. | The agent writes without approval, so damage must be bounded. | No arbitrary host-file access except through workspace areas. |
 | D-005 | Single serial agent worker, now draining the task queue. | No races on memory writes; replies stay in order. | One turn blocks all others for up to the turn budget. |
@@ -411,12 +425,15 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-038 | Trust is per MCP server. Built-ins are trusted; external servers are untrusted unless `_TRUSTED=true`: no scope in `_meta`, no instructions in the prompt, no verbatim/await, no subscriptions. Stdio servers get a minimal environment. Email is allowlisted inbound and outbound. | Third-party servers and inboxes are the widest prompt-injection surface; the system prompt is the most privileged place text can land. | Untrusted servers get less context and may be less useful. |
 | D-039 | The LLM backend is configuration: `AI_PROVIDER_URL`, `AI_MODEL`, `AI_API_KEY`, `AI_TEMPERATURE`, `AI_MAX_TOKENS`, `AI_TIMEOUT`. The OpenAI-compatible chat API is the contract. | Switching models or hosts is planned; no code change should be needed. | Backends without an OpenAI-compatible endpoint need a proxy. |
 | D-040 | Logs are categorized by the reasoning chain: `input`, `thinking`, `action`, `output`, plus `llm` and `system`, with `task` / `phase` / `step` correlation from a context logger. The INFO trail carries content (capped by `LOG_CONTENT_LIMIT`); DEBUG adds the exact prompts, logged incrementally. | One turn's input, reasoning, actions, and output must be reconstructable and filterable without DEBUG; the old DEBUG dump re-printed the whole transcript per call and dropped model reasoning. | User messages and tool output are in INFO logs; lower `LOG_CONTENT_LIMIT` to trim them. |
+| D-041 | The agent reaches a model only through `llm.Model.Decide`, which returns exactly one call to one offered tool. The OpenAI-compatible provider enforces this with `response_format: json_schema` (grammar-constrained on Ollama), not `tools` / `tool_choice`; a per-request tool menu describes the options. Unreadable output is never kept. `AI_PROVIDER` selects the provider. | Ollama ignores `tool_choice`, so the model answered in prose or wrote calls as text (the long-standing protocol violations). Constrained decoding makes that impossible, and one interface keeps request shape and server quirks out of the agent. | One tool call per model call. The tool menu adds prompt tokens at the tail of every request. Needs a server with `json_schema` support. `llm.Model` has one implementation, by choice. |
 
 ## Rejected Alternatives
 
 | Alternative | Why rejected | Ref |
 |---|---|---|
-| JSON embedded in text instead of tool calls | Brittle parsing and a retry-loop tax | D-001 |
+| Free-form JSON embedded in text instead of tool calls | Brittle parsing and a retry-loop tax. Schema-constrained JSON is different: the server guarantees the shape. | D-001, D-041 |
+| Native `tools` + `tool_choice=required` | Ollama's OpenAI endpoint ignores `tool_choice`, so nothing prevented prose or text-written calls | D-041 |
+| Two calls per step (choose tool, then fill arguments) | Doubles latency; one `anyOf` schema does both | D-041 |
 | Separate triage/classifier call before planning | `tool_choice=required` didn't hold on the local model; adds a round trip | D-022 → D-023, D-030, D-032 |
 | Pure ReAct loop with always-on synthesis | Synthesis continued the conversation instead of presenting results; no plan to announce | D-023 → D-024, D-029 |
 | Planner with `plan.revise` replanning | Removed when the plan/execute shape was restored; failures are reported instead | D-020 → D-024 |
@@ -439,7 +456,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 
 ## Open Questions
 
-- **Why the model writes tool calls as text.** See [GOALS.md](GOALS.md#current-operational-priorities).
+- **Grammar cost of large catalogs.** An `anyOf` over many external tools may be slow to compile on Ollama. Watch `agent: llm call` latency as servers are added.
 - **Synthesizer context.** Full transcript (current) or `[system, request, directive]` (branch `synth-slim-context-violations`)?
 - **Catalog size.** 13 built-in tools with Discord only, up to 19 with every built-in. Watch for tool-choice errors as external servers are added; per-source toolsets may be needed.
 - **Streaming replies** vs. single-shot delivery.

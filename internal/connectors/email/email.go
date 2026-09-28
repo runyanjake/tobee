@@ -1,14 +1,5 @@
-// Package email is the email connector. One Mailbox plays three roles:
-//
-//   - ingest.Source: polls an IMAP inbox for unseen mail from allowed
-//     senders and emits each as a message event;
-//   - delivery.Channel: replies over SMTP, threaded with In-Reply-To;
-//   - an MCP server ("email") with a send tool for writing to anyone
-//     else on the allowlist.
-//
-// Mail is the easiest way to put third-party text in front of the model,
-// so both directions are allowlisted: only allowed senders are admitted,
-// and only allowed addresses can be written to (D-038).
+// Package email is the IMAP/SMTP connector. Mail admits third-party text, so
+// both directions are allowlisted in code (D-038).
 package email
 
 import (
@@ -25,10 +16,8 @@ import (
 	"github.com/runyanjake/tobee/internal/mcpserver"
 )
 
-// Name is the connector name.
 const Name = "email"
 
-// Config configures a Mailbox.
 type Config struct {
 	IMAPAddr string // host:port; port 993 dials implicit TLS, anything else STARTTLS
 	SMTPAddr string // host:port; port 465 dials implicit TLS, anything else STARTTLS
@@ -40,7 +29,6 @@ type Config struct {
 	Interval time.Duration
 }
 
-// Mailbox is the email connector.
 type Mailbox struct {
 	cfg     Config
 	allowed map[string]bool
@@ -54,7 +42,6 @@ type Mailbox struct {
 	lastErr  string
 }
 
-// New validates cfg and creates a Mailbox.
 func New(cfg Config) (*Mailbox, error) {
 	if cfg.IMAPAddr == "" || cfg.SMTPAddr == "" || cfg.Username == "" || cfg.Password == "" || cfg.From == "" {
 		return nil, fmt.Errorf("email: IMAP address, SMTP address, username, password, and from address are required")
@@ -75,10 +62,8 @@ func New(cfg Config) (*Mailbox, error) {
 	return &Mailbox{cfg: cfg, allowed: allowed, subjects: make(map[string]string)}, nil
 }
 
-// Name implements ingest.Source.
 func (m *Mailbox) Name() string { return Name }
 
-// Allowed returns the normalized allowlist, for the ingest engine.
 func (m *Mailbox) Allowed() []string {
 	out := make([]string, 0, len(m.allowed))
 	for a := range m.allowed {
@@ -87,9 +72,8 @@ func (m *Mailbox) Allowed() []string {
 	return out
 }
 
-// Run implements ingest.Source: it polls until ctx is cancelled. A failed
-// poll is logged and retried on the next tick rather than restarting the
-// source — mail servers drop idle connections routinely.
+// Run retries a failed poll on the next tick instead of restarting the
+// source: mail servers drop idle connections routinely.
 func (m *Mailbox) Run(ctx context.Context, emit ingest.Emit) error {
 	slog.Info("email: polling", "mailbox", m.cfg.Mailbox, "interval", m.cfg.Interval)
 	ticker := time.NewTicker(m.cfg.Interval)
@@ -127,9 +111,7 @@ func (m *Mailbox) pollOnce(emit ingest.Emit) {
 	}
 }
 
-// Send implements delivery.Channel. to.Channel is the recipient address;
-// to.Thread, when set, is the Message-ID being answered. Returns the
-// Message-ID of the sent mail so an answer to it can resume a parked task.
+// Send returns the sent Message-ID so a reply to it can resume a parked task.
 func (m *Mailbox) Send(_ context.Context, to event.Address, text string) (string, error) {
 	m.mu.Lock()
 	subject, ok := m.subjects[to.Thread]
@@ -159,7 +141,6 @@ func (m *Mailbox) send(to, subject, body, inReplyTo string) (string, error) {
 	return id, nil
 }
 
-// Server builds the connector's MCP server.
 func (m *Mailbox) Server(instructions string) *mcpserver.Server {
 	srv := mcpserver.New(Name, instructions)
 	srv.Add(mcpserver.Tool{

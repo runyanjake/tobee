@@ -1,6 +1,1 @@
-Read-only view of tobee's own subsystems. Both tools render finished text that the delivery code puts in front of the user for you. Calling one *is* answering the question; don't repeat or summarise what it returned.
-
-- `status_summary`: a few sentences, for "how are things?" / "what are you up to?".
-- `status_report`: full detail per subsystem, for specifics (failures, schedules, next-fire times).
-
-`window` is an optional duration (`"1h"`, `"24h"`, `"7d"`; default 1h). Set it only when the user named a period.
+Tobee's own current state. The output is shown to the user as-is; don't restate it. Use summary for general questions, report for details.

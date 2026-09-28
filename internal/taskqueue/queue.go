@@ -1,12 +1,5 @@
-// Package taskqueue is the durable FIFO between the ingest engine and the
-// agent runtime. Every admitted event becomes a Task written to disk
-// before it is acknowledged, so an event that arrives while a long turn
-// runs, or just before a restart, is not lost (D-034).
-//
-// The queue also holds parked tasks: a turn that asked the user a
-// question ends, and the task waits here until an event that answers it
-// arrives (D-036). Only the original request and the question are kept —
-// never a transcript — and a parked task expires after ParkTTL.
+// Package taskqueue is the durable FIFO from ingest to the agent (D-034), and
+// holds parked tasks: a request and question, never a transcript (D-036).
 package taskqueue
 
 import (
@@ -27,17 +20,13 @@ import (
 	"github.com/runyanjake/tobee/internal/event"
 )
 
-// ParkTTL is how long a question waits for an answer.
 const ParkTTL = 24 * time.Hour
 
-// maxAttempts drops a task that has been dequeued this many times without
-// completing — a turn that crashes the process must not loop at boot.
+// maxAttempts stops a turn that crashes the process from looping at boot.
 const maxAttempts = 2
 
-// ErrFull is returned by Enqueue when the queue is at capacity.
 var ErrFull = errors.New("taskqueue: full")
 
-// Task is one unit of work for the agent.
 type Task struct {
 	ID       string      `json:"id"`
 	Event    event.Event `json:"event"`
@@ -46,11 +35,10 @@ type Task struct {
 	Attempts int         `json:"attempts"`
 }
 
-// Resume is attached to a task whose event answers a parked question.
 type Resume struct {
 	TaskID   string    `json:"taskId"`
-	Request  string    `json:"request"`  // the original request, as the user wrote it
-	Question string    `json:"question"` // what tobee asked
+	Request  string    `json:"request"`
+	Question string    `json:"question"`
 	Asked    time.Time `json:"asked"`
 }
 
@@ -62,18 +50,16 @@ type parked struct {
 	Asked    time.Time `json:"asked"`
 }
 
-// Queue is the task queue. Create with Open.
 type Queue struct {
 	dir      string
 	capacity int
 
 	mu      sync.Mutex
 	pending []*Task
-	parked  map[string]*parked // task ID → record
+	parked  map[string]*parked // by task ID
 	notify  chan struct{}
 }
 
-// Open loads the queue persisted under dir, creating it if needed.
 func Open(dir string, capacity int) (*Queue, error) {
 	if capacity <= 0 {
 		capacity = 256
@@ -136,8 +122,7 @@ func (q *Queue) load() error {
 	return nil
 }
 
-// Enqueue persists an event as a new task. If the event answers a parked
-// question, the task carries a Resume and the parked record is consumed.
+// Enqueue consumes the parked record the event answers, if any, into t.Resume.
 func (q *Queue) Enqueue(ev event.Event) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -183,8 +168,7 @@ func (q *Queue) matchParked(ev event.Event) *parked {
 	return nil
 }
 
-// Next blocks until a task is available or ctx is done. The task stays on
-// disk until Done or Park.
+// Next leaves the task on disk until Done or Park.
 func (q *Queue) Next(ctx context.Context) (*Task, error) {
 	for {
 		q.mu.Lock()
@@ -207,15 +191,12 @@ func (q *Queue) Next(ctx context.Context) (*Task, error) {
 	}
 }
 
-// Done removes a finished task.
 func (q *Queue) Done(t *Task) {
 	if err := os.Remove(q.pendingPath(t)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn("taskqueue: remove failed", "id", t.ID, "err", err)
 	}
 }
 
-// Park completes t and records it as waiting for an answer that matches
-// one of keys.
 func (q *Queue) Park(t *Task, question string, keys []string) error {
 	request := t.Event.Content
 	if t.Resume != nil {
@@ -233,7 +214,6 @@ func (q *Queue) Park(t *Task, question string, keys []string) error {
 	return nil
 }
 
-// Stats returns the pending and parked counts.
 func (q *Queue) Stats() (pending, parkedN int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -262,7 +242,6 @@ func newID() string {
 	return "t-" + hex.EncodeToString(b[:])
 }
 
-// writeJSON writes atomically: temp file, then rename.
 func writeJSON(path string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

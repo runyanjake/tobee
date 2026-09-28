@@ -1,6 +1,5 @@
-// Package schedule is the built-in "schedule" MCP server: the model sets
-// timers and recurring jobs for itself. When a job fires, the JobManager
-// emits a timer event routed back to the channel and user that created it.
+// Package schedule is the built-in "schedule" MCP server for model-created timers and
+// recurring jobs; a fired job replies to the channel and user that created it.
 package schedule
 
 import (
@@ -16,7 +15,6 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
-// New builds the schedule server backed by m.
 func New(instructions string, m *scheduler.JobManager) *mcpserver.Server {
 	srv := mcpserver.New("schedule", instructions)
 	srv.Add(mcpserver.Tool{
@@ -155,7 +153,7 @@ func listHandler(m *scheduler.JobManager) mcpserver.Handler {
 	}
 }
 
-// parseAt accepts either RFC3339 or "in <duration>" (e.g. "in 10m").
+// parseAt accepts RFC3339 or "in <duration>" (e.g. "in 10m").
 func parseAt(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if rest, ok := strings.CutPrefix(s, "in "); ok {

@@ -25,9 +25,7 @@ func TestPlanFromCommitArgsFastPath(t *testing.T) {
 	if len(plan.Steps) != 0 {
 		t.Errorf("Steps = %d, want 0", len(plan.Steps))
 	}
-	// A zero-step plan must render nothing: the loop keys the
-	// announcement off this, so a non-empty string here would put a
-	// stray plan message back on every trivial turn.
+	// The loop keys the announcement off this; non-empty would announce every trivial turn.
 	if got := plan.RenderAnnouncement(); got != "" {
 		t.Errorf("RenderAnnouncement = %q, want empty", got)
 	}

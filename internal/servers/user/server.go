@@ -1,7 +1,5 @@
-// Package user is the built-in "user" MCP server: the model's way to talk
-// to the person it is working for mid-task. Its one tool, ask, sends a
-// clarifying question to the channel the task came from and ends the turn;
-// the task is parked until the user answers (D-036).
+// Package user is the built-in "user" MCP server; ask sends a clarifying question
+// and parks the task until the user answers (D-036).
 package user
 
 import (
@@ -16,7 +14,6 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
-// New builds the user server, delivering questions through out.
 func New(instructions string, out *delivery.Router) *mcpserver.Server {
 	srv := mcpserver.New("user", instructions)
 	srv.Add(mcpserver.Tool{

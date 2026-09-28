@@ -1,1 +1,1 @@
-The Discord bot you speak through. Use `discord_send_message` only to post somewhere other than the conversation you're in: another channel, or a notice the user asked you to leave. Mention people as `@displayname`.
+discord_send_message posts to another Discord channel. Not for replying here.

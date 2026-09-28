@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -41,27 +42,21 @@ type replyCommitArgs struct {
 	Artifacts []replyArtifact `json:"artifacts"`
 }
 
-const synthNudge = "PROTOCOL VIOLATION: your previous response was not a reply_commit tool call. You must call reply_commit exactly once with the reply's spoken text and any artifacts. Free-form text is not accepted. Retry."
+const synthNudge = "Your last response could not be read as a reply_commit call. Call reply_commit."
 
-// Synthesizer runs against the shared Conversation to produce the
-// user-facing reply. Appends the rendered synthesize state template
-// as a user message, then requires reply_commit with
-// tool_choice=required. The reply text is composed in Go by
-// renderReply from the structured output — spoken + fenced artifacts.
+// Synthesizer offers only reply_commit; renderReply composes the reply text in Go.
 type Synthesizer struct {
-	client *llm.Client
+	model  llm.Model
 	states *StateTemplates
 }
 
-func NewSynthesizer(client *llm.Client, states *StateTemplates) *Synthesizer {
-	return &Synthesizer{client: client, states: states}
+func NewSynthesizer(model llm.Model, states *StateTemplates) *Synthesizer {
+	return &Synthesizer{model: model, states: states}
 }
 
-// Finalize appends the synth state message to the conversation, runs
-// the LLM call, and returns the rendered reply. On protocol violation
-// it retries once with a nudge and then fails.
+// Finalize retries once with a nudge on a protocol violation, then fails.
 func (s *Synthesizer) Finalize(t *Turn) (string, error) {
-	if s == nil || s.client == nil {
+	if s == nil || s.model == nil {
 		return "", fmt.Errorf("synthesizer: not configured")
 	}
 	ctx := telemetry.With(t.Ctx, "phase", "synthesize")
@@ -83,7 +78,14 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := callLLM(ctx, s.client, t.Conversation, toolSpec, llm.ToolChoiceRequired)
+		d, err := decide(ctx, s.model, t.Conversation, toolSpec)
+		if errors.Is(err, llm.ErrInvalidDecision) {
+			lastErr = err
+			if attempt == 0 {
+				t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: synthNudge})
+			}
+			continue
+		}
 		if err != nil {
 			lastErr = err
 			if ctx.Err() != nil {
@@ -92,51 +94,26 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 			continue
 		}
 
-		asst := llm.Message{
-			Role:      llm.RoleAssistant,
-			Content:   resp.Text,
-			ToolCalls: resp.ToolCalls,
+		tc := d.Call
+		t.Conversation.Append(llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{tc}})
+		var args replyCommitArgs
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return "", fmt.Errorf("synthesizer: decode %s args: %w", replyCommitTool, err)
 		}
-		t.Conversation.Append(asst)
-
-		for _, tc := range resp.ToolCalls {
-			if tc.Function.Name != replyCommitTool {
-				continue
-			}
-			var args replyCommitArgs
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-				return "", fmt.Errorf("synthesizer: decode %s args: %w", replyCommitTool, err)
-			}
-			t.Conversation.Append(llm.Message{
-				Role:       llm.RoleTool,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    "ok",
-			})
-			return renderReply(args, t.Verbatim), nil
-		}
-
-		logViolation(ctx, attempt, replyCommitTool, resp)
-		lastErr = fmt.Errorf("protocol violation: no %s call", replyCommitTool)
-
-		if attempt == 0 {
-			t.Conversation.Append(llm.Message{Role: llm.RoleUser, Content: synthNudge})
-		}
+		t.Conversation.Append(llm.Message{
+			Role:       llm.RoleTool,
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+			Content:    "ok",
+		})
+		return renderReply(args, t.Verbatim), nil
 	}
 
 	return "", fmt.Errorf("synthesizer: exhausted retries: %w", lastErr)
 }
 
-// renderReply composes the final reply text from the structured
-// reply_commit output: spoken text on top, each artifact as a fenced
-// block with an optional language hint, then any verbatim tool output
-// appended by code. Empty spoken + empty artifacts + no verbatim yields
-// an empty string, which the deliver step logs as a failure.
-//
-// Verbatim blocks are appended here rather than passed through the
-// model. Single-line output (status_summary) reads as prose and goes in
-// bare; multi-line output (status_report, with its `## subsystem`
-// headings) is fenced so it renders as written.
+// renderReply appends verbatim blocks in code (D-030): single-line bare, multi-line fenced.
+// An empty result is logged as a failure by deliver.
 func renderReply(args replyCommitArgs, verbatim []VerbatimBlock) string {
 	var sb strings.Builder
 	spoken := strings.TrimSpace(args.Spoken)

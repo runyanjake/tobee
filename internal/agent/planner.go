@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,13 +14,7 @@ import (
 
 const planCommitTool = "plan_commit"
 
-// planCommitSchema is the structured plan shape the planner LLM emits
-// via the plan_commit virtual tool. Simplified under D-029: steps no
-// longer carry `tools` or `memory_paths` — every step has every
-// registered tool available. Status, IDs, and run counts are owned by
-// the loop, not the model.
-//
-// Empty `steps` plus a `direct_reply` is the fast path (D-032).
+// planCommitSchema: steps carry no tool scoping (D-029); empty steps plus direct_reply is the fast path (D-032).
 var planCommitSchema = json.RawMessage(`{
   "type": "object",
   "required": ["goal", "steps"],
@@ -40,38 +35,26 @@ var planCommitSchema = json.RawMessage(`{
   }
 }`)
 
-// Planner commits a structured plan via plan_commit on an LLM call
-// with tool_choice=required. Free-form text is a protocol violation:
-// the planner retries once with a stricter nudge and then fails the
-// turn. There is no text-wrap fallback — the format is enforced.
+// Planner offers only plan_commit; invalid output is retried once, then fails the turn (D-025, D-041).
 type Planner struct {
-	client *llm.Client
+	model  llm.Model
 	states *StateTemplates
 }
 
-// plannerNudge is the transcript-appended reminder used after a
-// protocol violation. Kept short — the LLM already read the plan
-// state template; this is just the "you broke the contract, do it
-// right" note.
-const plannerNudge = "PROTOCOL VIOLATION: your previous response was not a plan_commit tool call. You must call plan_commit exactly once. Free-form text is not accepted. Retry."
+const plannerNudge = "Your last response could not be read as a plan_commit call. Call plan_commit."
 
-func NewPlanner(client *llm.Client, states *StateTemplates) *Planner {
-	return &Planner{client: client, states: states}
+func NewPlanner(model llm.Model, states *StateTemplates) *Planner {
+	return &Planner{model: model, states: states}
 }
 
-// Run appends the request messages and the rendered plan-state message
-// to the conversation, makes the planning LLM call, and appends the
-// resulting assistant message. On success, conv.Plan is set. Retries once
-// on either a transient LLM call error or a protocol violation.
+// Run sets conv.Plan, retrying once on an LLM error or protocol violation.
 func (p *Planner) Run(ctx context.Context, conv *Conversation, request []llm.Message) error {
-	if p == nil || p.client == nil {
+	if p == nil || p.model == nil {
 		return fmt.Errorf("planner: not configured")
 	}
 	ctx = telemetry.With(ctx, "phase", "plan")
 
-	// The user's own words are their own messages; the phase directive
-	// is a separate, tagged one. Never fuse them — the model must be
-	// able to tell what the user said from what the harness said.
+	// Never fuse user text with the phase directive; the model must tell them apart (D-029).
 	for _, m := range request {
 		conv.Append(m)
 	}
@@ -90,7 +73,15 @@ func (p *Planner) Run(ctx context.Context, conv *Conversation, request []llm.Mes
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := callLLM(ctx, p.client, conv, toolSpec, llm.ToolChoiceRequired)
+		d, err := decide(ctx, p.model, conv, toolSpec)
+		if errors.Is(err, llm.ErrInvalidDecision) {
+			// Unreadable output is dropped; keeping it teaches the next call to repeat it.
+			lastErr = err
+			if attempt == 0 {
+				conv.Append(llm.Message{Role: llm.RoleUser, Content: plannerNudge})
+			}
+			continue
+		}
 		if err != nil {
 			lastErr = err
 			if ctx.Err() != nil {
@@ -99,51 +90,31 @@ func (p *Planner) Run(ctx context.Context, conv *Conversation, request []llm.Mes
 			continue
 		}
 
-		asst := llm.Message{
-			Role:      llm.RoleAssistant,
-			Content:   resp.Text,
-			ToolCalls: resp.ToolCalls,
+		tc := d.Call
+		conv.Append(llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{tc}})
+		var args commitArgs
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return fmt.Errorf("planner: decode %s args: %w", planCommitTool, err)
 		}
-		conv.Append(asst)
-
-		for _, tc := range resp.ToolCalls {
-			if tc.Function.Name != planCommitTool {
-				continue
-			}
-			var args commitArgs
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-				return fmt.Errorf("planner: decode %s args: %w", planCommitTool, err)
-			}
-			plan, perr := planFromCommitArgs(args)
-			if perr != nil {
-				return fmt.Errorf("planner: %w", perr)
-			}
-			// Ack the tool call in the conversation so the next
-			// LLM turn sees a valid tool exchange rather than a
-			// dangling assistant tool_call.
-			conv.Append(llm.Message{
-				Role:       llm.RoleTool,
-				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
-				Content:    "ok",
-			})
-			conv.Plan = plan
-			logPlan(ctx, plan)
-			return nil
+		plan, perr := planFromCommitArgs(args)
+		if perr != nil {
+			return fmt.Errorf("planner: %w", perr)
 		}
-
-		logViolation(ctx, attempt, planCommitTool, resp)
-		lastErr = fmt.Errorf("protocol violation: no %s call", planCommitTool)
-
-		if attempt == 0 {
-			conv.Append(llm.Message{Role: llm.RoleUser, Content: plannerNudge})
-		}
+		// Ack the call so the next request has no dangling assistant tool call.
+		conv.Append(llm.Message{
+			Role:       llm.RoleTool,
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+			Content:    "ok",
+		})
+		conv.Plan = plan
+		logPlan(ctx, plan)
+		return nil
 	}
 
 	return fmt.Errorf("planner: exhausted retries: %w", lastErr)
 }
 
-// logPlan records the committed plan as the model's thinking.
 func logPlan(ctx context.Context, plan *Plan) {
 	if plan.DirectReply != "" {
 		telemetry.Log(ctx, slog.LevelInfo, telemetry.Thinking, "agent: plan",
@@ -158,7 +129,6 @@ func logPlan(ctx context.Context, plan *Plan) {
 		"goal", plan.Goal, "route", "steps", "steps", intents)
 }
 
-// commitArgs is the JSON shape plan_commit emits.
 type commitArgs struct {
 	Goal        string `json:"goal"`
 	DirectReply string `json:"direct_reply"`
@@ -167,9 +137,7 @@ type commitArgs struct {
 	} `json:"steps"`
 }
 
-// planFromCommitArgs builds a *Plan from the decoded JSON, trimming
-// intents and skipping empty steps. Zero steps is legal only on the
-// fast path, where direct_reply carries the answer instead (D-032).
+// planFromCommitArgs: zero steps is legal only with a direct_reply (D-032).
 func planFromCommitArgs(args commitArgs) (*Plan, error) {
 	plan := &Plan{
 		Goal:        strings.TrimSpace(args.Goal),
@@ -191,8 +159,7 @@ func planFromCommitArgs(args commitArgs) (*Plan, error) {
 		}
 		return plan, nil
 	}
-	// Steps and a pre-baked answer are mutually exclusive: a plan that
-	// needs execution must not ship a reply written before it ran.
+	// A plan that needs execution must not ship a reply written before it ran.
 	plan.DirectReply = ""
 	plan.assignIDs()
 	return plan, nil

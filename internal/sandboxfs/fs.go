@@ -1,11 +1,5 @@
-// Package sandboxfs is a typed filesystem rooted at a single directory.
-// Every path handed to an FS method is validated and resolved inside Root;
-// attempts to escape via .., absolute paths, or volume prefixes are rejected.
-//
-// It backs two distinct callers today: long-term agent memory under
-// data/memory (see internal/tools/memory) and configurable host-file areas
-// (see internal/workspace). The implementation is agnostic to what the root
-// contains.
+// Package sandboxfs is a filesystem confined to one root directory; it backs
+// memory and workspace areas. Paths escaping Root are rejected (D-003).
 package sandboxfs
 
 import (
@@ -19,17 +13,13 @@ import (
 	"strings"
 )
 
-// FS is a sandboxed filesystem rooted at a single directory. All paths
-// passed to its methods are interpreted relative to Root. MaxFileSize caps
-// both Write and Append on this instance.
+// FS interprets every path relative to Root; MaxFileSize caps Write and Append.
 type FS struct {
 	Root        string
 	MaxFileSize int64
 }
 
-// NewFS resolves root to an absolute path, ensures it exists, and pairs it
-// with the per-instance maxFileSize. A non-positive maxFileSize disables
-// the cap (use only when the caller has its own bounds).
+// NewFS creates root if needed. A non-positive maxFileSize disables the cap.
 func NewFS(root string, maxFileSize int64) (*FS, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -41,8 +31,8 @@ func NewFS(root string, maxFileSize int64) (*FS, error) {
 	return &FS{Root: abs, MaxFileSize: maxFileSize}, nil
 }
 
-// resolve converts a caller-supplied relative path into an absolute
-// filesystem path under Root, rejecting anything that would escape.
+// resolve is the security boundary: it rejects absolute, volume-qualified,
+// and ..-escaping paths so model input can never leave Root (D-003).
 func (m *FS) resolve(rel string) (string, error) {
 	if rel == "" {
 		return "", errors.New("empty path")
@@ -50,7 +40,7 @@ func (m *FS) resolve(rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("absolute paths not allowed: %q", rel)
 	}
-	// Forbid volume references on Windows (e.g. C:\foo, C:foo).
+	// Windows volume references (C:\foo, C:foo) are not absolute but still escape.
 	if vol := filepath.VolumeName(rel); vol != "" {
 		return "", fmt.Errorf("volume-qualified paths not allowed: %q", rel)
 	}
@@ -66,7 +56,6 @@ func (m *FS) resolve(rel string) (string, error) {
 	return abs, nil
 }
 
-// Read returns the contents of a file relative to Root.
 func (m *FS) Read(rel string) (string, error) {
 	abs, err := m.resolve(rel)
 	if err != nil {
@@ -79,8 +68,7 @@ func (m *FS) Read(rel string) (string, error) {
 	return string(data), nil
 }
 
-// Write replaces the contents of a file relative to Root. Rejects writes
-// exceeding MaxFileSize. Intermediate directories are created.
+// Write creates intermediate directories.
 func (m *FS) Write(rel, content string) error {
 	if m.MaxFileSize > 0 && int64(len(content)) > m.MaxFileSize {
 		return fmt.Errorf("content exceeds %d bytes", m.MaxFileSize)
@@ -95,8 +83,7 @@ func (m *FS) Write(rel, content string) error {
 	return os.WriteFile(abs, []byte(content), 0o644)
 }
 
-// Append adds content to the end of a file, creating it if necessary.
-// The combined file size must not exceed MaxFileSize.
+// Append checks MaxFileSize against the combined size.
 func (m *FS) Append(rel, content string) error {
 	abs, err := m.resolve(rel)
 	if err != nil {
@@ -122,7 +109,6 @@ func (m *FS) Append(rel, content string) error {
 	return err
 }
 
-// Exists reports whether the given relative path refers to a readable file.
 func (m *FS) Exists(rel string) bool {
 	abs, err := m.resolve(rel)
 	if err != nil {
@@ -132,8 +118,7 @@ func (m *FS) Exists(rel string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// List returns the relative paths of all regular files under the given
-// relative directory, sorted lexicographically. Pass "" to list the root.
+// List returns sorted regular-file paths under relDir; "" lists the root.
 func (m *FS) List(relDir string) ([]string, error) {
 	start := m.Root
 	if relDir != "" {
@@ -165,21 +150,18 @@ func (m *FS) List(relDir string) ([]string, error) {
 	return files, nil
 }
 
-// SearchHit is one ripgrep-style match.
 type SearchHit struct {
 	Path    string
 	Line    int
 	Snippet string
 }
 
-// Search walks the root, returning substring matches (case-insensitive)
-// across all regular files. Up to `limit` hits are returned.
+// Search returns up to limit case-insensitive substring matches.
 func (m *FS) Search(query string, limit int) ([]SearchHit, error) {
 	return m.SearchUnder(query, limit, "")
 }
 
-// SearchUnder walks a subdirectory of the root. relDir="" matches Search.
-// Used to scope a search to a subtree.
+// SearchUnder is Search scoped to relDir.
 func (m *FS) SearchUnder(query string, limit int, relDir string) ([]SearchHit, error) {
 	if query == "" {
 		return nil, errors.New("empty query")

@@ -28,7 +28,6 @@ func (s *sink) len() int {
 	return len(s.got)
 }
 
-// fixed emits a fixed list of events, then blocks until cancelled.
 type fixed struct {
 	name   string
 	events []event.Event

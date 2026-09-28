@@ -1,21 +1,5 @@
-// Package workspace exposes one or more host-filesystem "areas" the agent
-// can list, read, search, and (when not read-only) write.
-//
-// Each area is configured via environment variables:
-//
-//	WORKSPACE_AREA_<NAME>          = /abs/path/to/dir   (required)
-//	WORKSPACE_AREA_<NAME>_DESC     = human-readable purpose (optional)
-//	WORKSPACE_AREA_<NAME>_READONLY = true | 1 | yes        (optional)
-//
-// The <NAME> suffix is lowercased to form the area's identifier (the string
-// the model passes to workspace_* tools). Each area's filesystem is a
-// sandboxfs.FS rooted at the configured path; the resolve() guard prevents
-// the model from escaping that root via .., absolute paths, or volume
-// prefixes — exactly the same safety story as long-term memory (D-003).
-//
-// LoadAreas does not create directories outside what sandboxfs.NewFS would
-// create (which is the root itself via os.MkdirAll). Configure paths that
-// already exist if you want to avoid that.
+// Package workspace parses WORKSPACE_AREA_<NAME>[_DESC|_READONLY] env vars into
+// host-directory areas, each a sandboxfs.FS so the model cannot escape it (D-003).
 package workspace
 
 import (
@@ -33,7 +17,6 @@ const (
 	suffixReadOnl = "_READONLY"
 )
 
-// Area is one configured slice of the host filesystem the agent may access.
 type Area struct {
 	Name        string
 	Description string
@@ -41,22 +24,18 @@ type Area struct {
 	FS          *sandboxfs.FS
 }
 
-// AreaInfo is the metadata projection used for discovery (workspace_areas
-// tool, system-prompt injection). It deliberately omits FS / root paths
-// so callers cannot accidentally leak the host-side location.
+// AreaInfo omits the root path on purpose so discovery never leaks the host location.
 type AreaInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	ReadOnly    bool   `json:"readonly,omitempty"`
 }
 
-// Areas is the registry of all configured workspace areas.
 type Areas struct {
 	byName map[string]*Area
 	order  []string // areas in declaration order, lowercased
 }
 
-// Get returns the area with the given name and whether it exists.
 func (a *Areas) Get(name string) (*Area, bool) {
 	if a == nil {
 		return nil, false
@@ -65,8 +44,7 @@ func (a *Areas) Get(name string) (*Area, bool) {
 	return ar, ok
 }
 
-// Len returns the number of configured areas. Zero means the workspace
-// feature should be treated as disabled — the tool pack should not register.
+// Len of zero means the workspace server should not be registered.
 func (a *Areas) Len() int {
 	if a == nil {
 		return 0
@@ -74,7 +52,6 @@ func (a *Areas) Len() int {
 	return len(a.order)
 }
 
-// List returns AreaInfo for every area, sorted by name.
 func (a *Areas) List() []AreaInfo {
 	if a == nil || len(a.order) == 0 {
 		return nil
@@ -93,12 +70,8 @@ func (a *Areas) List() []AreaInfo {
 	return out
 }
 
-// LoadAreas parses workspace area definitions from env (typically os.Environ())
-// and builds a sandboxfs.FS per area with maxFileSize as the per-file cap.
-//
-// Entries without a corresponding root (e.g. _DESC for an undefined area)
-// are skipped — the returned error reports them so the operator can fix the
-// config. Areas whose root path is empty are likewise skipped.
+// LoadAreas skips entries with no root and reports orphans in the error
+// alongside a usable registry.
 func LoadAreas(env []string, maxFileSize int64) (*Areas, error) {
 	type raw struct {
 		root        string
@@ -161,8 +134,7 @@ func LoadAreas(env []string, maxFileSize int64) (*Areas, error) {
 	var orphanErrs []string
 
 	for _, name := range order {
-		// order was populated with lowercase names; recover the matching key.
-		// We keep both keys identical so the suffix lookup is just uppercase.
+		// order holds lowercase names; bySuffix keys are the env suffix, assumed uppercase.
 		raw := bySuffix[strings.ToUpper(name)]
 		if raw == nil {
 			continue

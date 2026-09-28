@@ -12,11 +12,9 @@ import (
 	"github.com/runyanjake/tobee/internal/event"
 )
 
-// maxPerPoll bounds how many messages one poll admits, so a flooded inbox
-// cannot fill the task queue in one go. The rest wait for the next poll.
+// maxPerPoll keeps a flooded inbox from filling the task queue; the rest wait.
 const maxPerPoll = 20
 
-// message is one fetched mail, reduced to what tobee uses.
 type message struct {
 	MessageID string
 	InReplyTo string
@@ -44,8 +42,7 @@ func (msg message) event() event.Event {
 	}
 }
 
-// poll fetches unseen mail from allowed senders and marks it seen. Mail
-// from anyone else is left untouched: unread, and never parsed.
+// poll leaves mail from other senders untouched: unread, and never parsed.
 func (m *Mailbox) poll() ([]message, error) {
 	c, err := m.dial()
 	if err != nil {
@@ -138,7 +135,7 @@ func (m *Mailbox) poll() ([]message, error) {
 	if len(done) > 0 {
 		store := &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagSeen}}
 		if err := c.Store(imap.UIDSetNum(done...), store, nil).Close(); err != nil {
-			// Dedup in the ingest engine absorbs the repeat on the next poll.
+			// Ingest dedup absorbs the repeat on the next poll.
 			slog.Warn("email: mark seen failed", "err", err)
 		}
 	}

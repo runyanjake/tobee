@@ -12,8 +12,7 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
-// testServer builds a built-in server exercising every path the agent
-// depends on: plain output, errors, verbatim, await, and scope.
+// testServer covers every path the agent depends on: output, errors, verbatim, await, scope.
 func testServer() *mcpserver.Server {
 	s := mcpserver.New("probe", "Probe instructions.")
 	s.Add(mcpserver.Tool{Name: "echo", Handler: func(_ context.Context, args json.RawMessage) (string, error) {

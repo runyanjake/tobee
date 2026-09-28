@@ -16,21 +16,10 @@ import (
 	"github.com/runyanjake/tobee/internal/event"
 )
 
-// External servers are configured with MCP_SERVER_<NAME>_* variables, the
-// same shape as workspace areas. <NAME> is lowercased to form the server
-// name and tool namespace.
-//
-//	MCP_SERVER_<NAME>_COMMAND      stdio server: command line, split on spaces
-//	MCP_SERVER_<NAME>_URL          Streamable HTTP endpoint (instead of COMMAND)
-//	MCP_SERVER_<NAME>_BEARER_TOKEN sent as Authorization on HTTP requests
-//	MCP_SERVER_<NAME>_ENV_<VAR>    environment for a stdio server
-//	MCP_SERVER_<NAME>_TRUSTED      true to trust the server (D-038)
-//	MCP_SERVER_<NAME>_TIMEOUT      per-call timeout, Go duration (default 30s)
-//	MCP_SERVER_<NAME>_SUBSCRIBE    resource URIs to watch, comma-separated
-//	MCP_SERVER_<NAME>_REPLY_TO     <connector>:<channel> that notifications answer to
+// External servers are configured with MCP_SERVER_<NAME>_* variables (see .env.example);
+// the lowercased <NAME> is the server name and tool namespace.
 const envPrefix = "MCP_SERVER_"
 
-// ServerConfig is one configured external server.
 type ServerConfig struct {
 	Name        string
 	Command     []string
@@ -45,9 +34,7 @@ type ServerConfig struct {
 
 var suffixes = []string{"_COMMAND", "_URL", "_BEARER_TOKEN", "_TRUSTED", "_TIMEOUT", "_SUBSCRIBE", "_REPLY_TO"}
 
-// LoadServers parses MCP_SERVER_* entries from environ (os.Environ()).
-// Entries that fail to parse are reported in the joined error and skipped;
-// the valid ones are still returned.
+// LoadServers returns the valid servers even when others fail; failures are joined into err.
 func LoadServers(environ []string) ([]ServerConfig, error) {
 	vals := map[string]map[string]string{} // NAME → suffix → value
 	envs := map[string][]string{}          // NAME → KEY=VALUE
@@ -125,8 +112,7 @@ func parseServer(raw string, v map[string]string, env []string) (ServerConfig, e
 		}
 	}
 	if len(c.Subscribe) > 0 {
-		// A notification's content becomes a task with every tool
-		// available; only a server the operator vouches for may start one.
+		// A notification becomes a task with every tool available; only a trusted server may start one.
 		if !c.Trusted {
 			return c, fmt.Errorf("%s%s_SUBSCRIBE requires _TRUSTED=true", envPrefix, raw)
 		}
@@ -139,7 +125,6 @@ func parseServer(raw string, v map[string]string, env []string) (ServerConfig, e
 	return c, nil
 }
 
-// Transport builds the MCP transport for c.
 func (c ServerConfig) Transport() mcp.Transport {
 	if c.URL != "" {
 		t := &mcp.StreamableClientTransport{Endpoint: c.URL}
@@ -149,13 +134,11 @@ func (c ServerConfig) Transport() mcp.Transport {
 		return t
 	}
 	cmd := exec.Command(c.Command[0], c.Command[1:]...)
-	// A third-party process gets PATH and HOME plus what the operator
-	// listed — never tobee's own environment, which holds its secrets.
+	// Never pass tobee's own environment to a third-party process: it holds tobee's secrets.
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, c.Env...)
 	return &mcp.CommandTransport{Command: cmd}
 }
 
-// Options returns the host options for c.
 func (c ServerConfig) Options() Options {
 	return Options{Trusted: c.Trusted, Timeout: c.Timeout}
 }

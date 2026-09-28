@@ -8,7 +8,6 @@ import (
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
-// Reporter exposes mailbox activity via abilities.Reporter.
 func (m *Mailbox) Reporter() abilities.Reporter { return mailReporter{m: m} }
 
 type mailReporter struct{ m *Mailbox }

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-tobee is a self-hosted personal AI assistant, written in Go as one long-running process. It is an MCP host. Input comes from pluggable ingest sources (Discord, email, its own scheduled jobs, MCP resource notifications) through a durable task queue. A single serial runtime runs each task through a reasoning strategy (today: plan → execute → synthesize) against an OpenAI-compatible LLM with native tool calling. Every tool, built-in or third-party, is served by an MCP server. The reply goes back to where the event came from. Everything it remembers is plain text under `data/`. There is no database, no vector store, and no chat history carried between turns; only a parked clarifying question survives a turn.
+tobee is a self-hosted personal AI assistant, written in Go as one long-running process. It is an MCP host. Input comes from pluggable ingest sources (Discord, email, its own scheduled jobs, MCP resource notifications) through a durable task queue. A single serial runtime runs each task through a reasoning strategy (today: plan → execute → synthesize) against an LLM behind the `llm.Model` interface, where every call is a schema-constrained choice of one tool. Every tool, built-in or third-party, is served by an MCP server. The reply goes back to where the event came from. Everything it remembers is plain text under `data/`. There is no database, no vector store, and no chat history carried between turns; only a parked clarifying question survives a turn.
 
 ## Tech Stack & Tooling
 
@@ -14,7 +14,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
   - `github.com/joho/godotenv` v1.5.1
   - `github.com/robfig/cron/v3` v3.0.1
 - **Package manager:** Go modules. There is no Makefile, task runner, or external linter config.
-- **LLM backend:** any server exposing `/v1/chat/completions` with `tools` and `tool_choice`. Selected entirely by `AI_*` env vars, including `AI_API_KEY` for hosted APIs (D-039).
+- **LLM backend:** any server exposing `/v1/chat/completions` with `response_format: json_schema` (structured output; grammar-constrained on Ollama). Selected entirely by `AI_*` env vars, including `AI_PROVIDER` and `AI_API_KEY` (D-039, D-041).
   - Dev: LM Studio on the host (`docker-compose.yml`, `host.docker.internal:1234`).
   - Prod: Ollama container with an Nvidia GPU (`docker-compose.prod.yml`). The Jenkinsfile deploys `qwen2.5:7b`.
 - **Container images:** build on `golang:1.25-alpine`, run on `alpine:3.20`.
@@ -34,7 +34,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
 | `internal/servers/` | Built-in MCP servers: `memory/`, `workspace/`, `schedule/`, `status/`, `user/`. |
 | `internal/connectors/` | `discord/` and `email/`: each is a source, a delivery channel, and an MCP server. |
 | `internal/delivery/` | `Router` from connector name to `Channel` / `Editor` / `Reactor`. |
-| `internal/llm/` | OpenAI-compatible chat client and wire types. |
+| `internal/llm/` | `Model` interface (`Decide`: choose one tool), message types. `openai/`: the OpenAI-compatible provider (structured output, schema sanitizer, tool menu). |
 | `internal/scheduler/` | `JobManager`: model-created jobs, an ingest source. |
 | `internal/abilities/` | `Reporter` contract and registry behind the `status_*` tools. |
 | `internal/sandboxfs/` | Path-sandboxed filesystem backing memory and workspace areas. |
@@ -88,7 +88,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 - Don't build deferred features without discussing them first: vector search, reflection passes, exposing tobee as an MCP server, streaming replies, a non-OpenAI provider abstraction. See [GOALS.md](GOALS.md#non-goals--out-of-scope).
 - No backwards-compatibility shims or parallel old/new code paths. Pick one path.
-- Don't add an interface until a second implementation exists. There is one `llm.Client` and one `sandboxfs.FS`. `agent.Strategy` is the deliberate exception (D-037).
+- Don't add an interface until a second implementation exists. There is one `sandboxfs.FS`. `agent.Strategy` (D-037) and `llm.Model` (D-041) are deliberate exceptions.
 - Don't add parsers that recover tool calls the model wrote as text, and don't accept prose where a phase requires a tool call (D-025). A salvage parser was built and reverted in `3e818f9`.
 
 ### Go style
@@ -98,7 +98,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Wrap errors at package boundaries: `fmt.Errorf("<context>: %w", err)`.
 - Log with `log/slog` using structured fields. Prefix messages with the subsystem: `"agent: …"`, `"discord: …"`, `"jobs: …"`.
 - Log prefixes for the new layers: `"ingest: …"`, `"taskqueue: …"`, `"mcphost: …"`, `"mcpserver: …"`, `"email: …"`.
-- Anything in the reasoning chain logs through `telemetry.Log(ctx, level, telemetry.<Category>, …)` with the turn's `ctx`, so it carries `cat`, `task`, `phase`, and `step`. Wrap message and tool text in `telemetry.Content` so it is capped. Plain `slog` calls are fine elsewhere; they are tagged `cat=system` automatically. Don't log the whole conversation per LLM call; `callLLM` logs only new messages (D-040).
+- Anything in the reasoning chain logs through `telemetry.Log(ctx, level, telemetry.<Category>, …)` with the turn's `ctx`, so it carries `cat`, `task`, `phase`, and `step`. Wrap message and tool text in `telemetry.Content` so it is capped. Plain `slog` calls are fine elsewhere; they are tagged `cat=system` automatically. Don't log the whole conversation per LLM call; `decide` logs only new messages (D-040).
 - Tools live on an MCP server and are exposed as `<server>_<tool>` (`memory_read`). Server names are lowercase `[a-z0-9_-]`. Never use dots: hosted APIs reject them (D-033).
 
 ### Filesystem & memory
@@ -112,7 +112,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - No chat history carries across turns (D-027). Don't reintroduce session buffers or summarizers. Persistence goes through `memory_*`. The only exception is a parked task, which holds the request and the question, never a transcript (D-036).
 - New reasoning schemes implement `agent.Strategy` and are selected by `AGENT_STRATEGY` (D-037). The runtime owns scope, budget, delivery, and parking; a strategy only fills `Turn.Reply` or `Turn.Await`.
 - Keep the turn budget and the per-step / total step budgets. Don't raise or remove them to make one case work.
-- Every model-authored output is a required virtual tool call: `plan_commit`, `step_finish`, `reply_commit`.
+- Every model call goes through `llm.Model.Decide`: the model picks exactly one of the offered tools. Phases offer virtual tools (`plan_commit`, `step_finish`, `reply_commit`); the executor also offers the MCP catalog. Never call a provider directly, and keep request shape, output mode, and wire quirks inside `internal/llm/<provider>` (D-041).
+- Output that isn't a valid choice is never appended to the conversation; the phase appends its nudge and retries once.
 - Anything that must be shown to the user word for word is enforced in code (`mcpserver.Tool.Verbatim` → `tobee/verbatim`), never by prompt instruction (D-030).
 - Never merge the user's text into a phase template. Directives go in `<phase>` tags (D-029).
 
@@ -130,6 +131,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Prompt text lives in `prompts/`, not in Go string literals. Existing exceptions:
   - protocol nudges and virtual-tool schemas in `planner.go`, `executor.go`, `synthesizer.go`
   - tool `Description` fields
+  - the tool menu the provider appends to each request (`internal/llm/openai/schema.go`)
   - the `<servers>` / `<context>` scaffolding in `context.go`
   - the workspace area list appended to its instructions
 - Prompts are baked into the prod image (a rebuild ships changes). Dev compose bind-mounts them (a restart picks up changes).
@@ -145,7 +147,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-041**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-042**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

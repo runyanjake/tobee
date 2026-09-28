@@ -4,9 +4,7 @@ import "strings"
 
 const maxMessageLen = 2000
 
-// splitMessage breaks s into chunks of at most maxMessageLen characters,
-// preferring to split after closing code fences, then paragraph breaks,
-// then sentence endings, then newlines, falling back to a hard cut.
+// splitMessage fits Discord's length cap, preferring natural breaks in bestSplit's order.
 func splitMessage(s string) []string {
 	if len(s) <= maxMessageLen {
 		return []string{s}
@@ -24,15 +22,14 @@ func splitMessage(s string) []string {
 	return chunks
 }
 
-// bestSplit returns the index at which to split s, no greater than max.
 func bestSplit(s string, max int) int {
 	candidates := []string{
-		"```\n", // after a closing code fence
-		"\n\n",  // paragraph break
-		". ",    // sentence end
+		"```\n",
+		"\n\n",
+		". ",
 		"! ",
 		"? ",
-		"\n", // any newline
+		"\n",
 	}
 	for _, sep := range candidates {
 		if idx := lastIndex(s, sep, max); idx > 0 {
@@ -42,7 +39,6 @@ func bestSplit(s string, max int) int {
 	return max
 }
 
-// lastIndex returns the start of the last occurrence of sep in s[:limit].
 func lastIndex(s, sep string, limit int) int {
 	if limit > len(s) {
 		limit = len(s)

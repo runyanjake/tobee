@@ -59,9 +59,7 @@ func TestRenderReplyVerbatim(t *testing.T) {
 	}
 }
 
-// The verbatim block must survive even when the model ignores the
-// instruction to stay quiet — that is the whole point of moving the
-// guarantee out of the prompt and into code.
+// The verbatim block survives even when the model ignores the prompt (D-030).
 func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 	const body = "Discord is connected and saw 1 inbound message in the window."
 	got := renderReply(
@@ -73,9 +71,7 @@ func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 	}
 }
 
-// When the synthesiser dies, the loop falls back to whatever the tools
-// already rendered. On 2026-07-19 that path did not exist and the user
-// received an empty message despite status_summary having succeeded.
+// When the synthesiser dies, the loop falls back to what the tools already rendered.
 func TestRenderReplyVerbatimOnlyIsDeliverable(t *testing.T) {
 	const body = "Discord is connected and saw 2 inbound messages in the window."
 	got := renderReply(replyCommitArgs{}, []VerbatimBlock{{Tool: "status_summary", Body: body}})
@@ -103,8 +99,7 @@ func TestAddVerbatim(t *testing.T) {
 	}
 }
 
-// The synthesize template branches on HasVerbatim. Parse and render it
-// from disk so a broken action fails here rather than at boot.
+// Render the real template from disk so a broken action fails here, not at boot.
 func TestSynthesizeTemplateBranches(t *testing.T) {
 	states, err := LoadStateTemplates(filepath.Join("..", "..", "prompts", "state"))
 	if err != nil {

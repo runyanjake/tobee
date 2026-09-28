@@ -1,13 +1,5 @@
-// Package mcpserver builds tobee's built-in MCP servers. Each built-in
-// capability (memory, workspace, schedule, status, user, and the
-// connectors' own tools) is an ordinary MCP server that the MCP host
-// connects to over an in-memory transport, exactly as it would connect to
-// an external server over stdio or HTTP (D-033).
-//
-// The package keeps tool definitions close to the old registry shape — a
-// name, a description, a JSON Schema, and a string-returning handler — and
-// handles the MCP plumbing: scope re-attachment from `_meta`, error
-// results, panic recovery, and the tobee-specific result metadata.
+// Package mcpserver builds tobee's built-in MCP servers, which the host connects to
+// in memory exactly like external ones (D-033).
 package mcpserver
 
 import (
@@ -22,44 +14,33 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
-// Metadata keys tobee reads from trusted servers. External servers can
-// set them too; the host ignores them unless the server is trusted (D-038).
+// The host honors these metadata keys only from trusted servers (D-038).
 const (
-	// MetaVerbatim on a tool definition marks its output as finished,
-	// user-facing text that the agent appends to the reply in code (D-030).
+	// On a tool definition: output is user-facing text appended to the reply in code (D-030).
 	MetaVerbatim = "tobee/verbatim"
-	// MetaAwait on a tool result pauses the task until the user answers.
-	// The value is an Await (D-036).
+	// On a tool result: pause the task until the user answers; the value is an Await (D-036).
 	MetaAwait = "tobee/await"
 )
 
-// Await is the MetaAwait payload: the question that was sent and the
-// keys an answering event may match (see event.ReplyKey, event.ActorKey).
+// Keys are the resume keys an answering event may match (event.ReplyKey, event.ActorKey).
 type Await struct {
 	Question string   `json:"question"`
 	Keys     []string `json:"keys"`
 }
 
-// Handler executes a tool call. Arguments arrive as a JSON object matching
-// the tool's InputSchema; the returned string becomes the tool's content
-// block in the next LLM turn. A returned error becomes an error result the
-// model sees, not a protocol error.
+// Handler returns the tool's text; a returned error becomes an error result the model sees.
 type Handler func(ctx context.Context, args json.RawMessage) (string, error)
 
-// Tool describes one tool a built-in server exposes.
 type Tool struct {
 	Name        string // bare name; the host namespaces it as <server>_<name>
 	Description string
 	InputSchema json.RawMessage // JSON Schema, type "object"
 	Handler     Handler
 
-	// ReadOnly sets the MCP readOnlyHint annotation.
 	ReadOnly bool
-	// Verbatim marks output as already user-facing (see MetaVerbatim).
 	Verbatim bool
 }
 
-// Server is one built-in MCP server.
 type Server struct {
 	name string
 	srv  *mcp.Server
@@ -68,8 +49,7 @@ type Server struct {
 	names map[string]bool
 }
 
-// New creates a server. instructions become the MCP `instructions` the
-// host shows the model; load them from prompts/servers/<name>.md.
+// New takes instructions loaded from prompts/servers/<name>.md.
 func New(name, instructions string) *Server {
 	return &Server{
 		name: name,
@@ -81,14 +61,11 @@ func New(name, instructions string) *Server {
 	}
 }
 
-// Name is the server name; the host uses it as the tool namespace.
 func (s *Server) Name() string { return s.name }
 
-// MCP returns the underlying SDK server for the host to connect to.
 func (s *Server) MCP() *mcp.Server { return s.srv }
 
-// Add registers a tool. Duplicate or malformed tools are programmer
-// errors and panic, like the registry this replaces.
+// Add panics on duplicate or malformed tools: they are programmer errors.
 func (s *Server) Add(t Tool) {
 	if t.Name == "" || t.Handler == nil {
 		panic(fmt.Sprintf("mcpserver %s: tool needs a name and a handler", s.name))
@@ -117,12 +94,9 @@ func (s *Server) Add(t Tool) {
 	s.srv.AddTool(def, s.wrap(t))
 }
 
-// resultMeta is the per-call holder SetResultMeta writes into.
 type resultMetaKey struct{}
 
-// SetResultMeta attaches a `_meta` entry to the result of the tool call
-// running on ctx. Used by tools that signal the agent through metadata,
-// such as user_ask setting MetaAwait.
+// SetResultMeta attaches a `_meta` entry to the result of the tool call running on ctx.
 func SetResultMeta(ctx context.Context, key string, value any) {
 	if m, ok := ctx.Value(resultMetaKey{}).(mcp.Meta); ok {
 		m[key] = value

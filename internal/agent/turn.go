@@ -12,50 +12,36 @@ import (
 	"github.com/runyanjake/tobee/internal/telemetry"
 )
 
-// Turn carries the per-task state threaded through a strategy, from
-// dequeue to deliver. Created once by the runtime, mutated in place by
-// the strategy. Nothing on it outlives the turn except what Await hands
-// to the queue (D-036).
+// Turn is per-task state; nothing outlives it except what Await hands to the queue (D-036).
 type Turn struct {
 	Ctx          context.Context
 	Task         *taskqueue.Task
 	Event        event.Event
 	Conversation *Conversation
 
-	// PlanMessageID is the connector's message ID for the user-facing
-	// plan announcement. Set when the announcement is sent; used to edit
-	// the message in place as step statuses change.
+	// PlanMessageID is the announcement to edit as step statuses change.
 	PlanMessageID string
 
-	// Reply is the text the runtime delivers to the event's origin.
 	Reply string
 
-	// Await is set when a tool asked the user a question. The runtime
-	// parks the task instead of delivering a reply (D-036).
+	// Await set means the runtime parks the task instead of replying (D-036).
 	Await *mcpserver.Await
 
-	// Verbatim collects output from tools marked verbatim, in call order.
-	// The synthesizer appends these blocks to the reply itself rather than
-	// letting the model restate them (D-030).
+	// Verbatim is appended to the reply by code, not restated by the model (D-030).
 	Verbatim []VerbatimBlock
 
-	// Reactions are the emoji reactions added to the inbound message so
-	// far, in order. On success the runtime clears them; on failure it
-	// adds a failure marker and leaves the trail.
+	// Reactions are cleared on success; on failure the trail stays.
 	Reactions []string
 
 	out *delivery.Router
 }
 
-// VerbatimBlock is one tool's pre-rendered, user-facing output.
 type VerbatimBlock struct {
-	Tool string // tool that produced it, for logging
+	Tool string // for logging
 	Body string
 }
 
-// AddVerbatim records pre-rendered tool output, skipping blanks and
-// exact duplicates — a model that calls status_summary twice in a turn
-// should not produce the block twice.
+// AddVerbatim skips blanks and exact duplicates, e.g. status_summary called twice.
 func (t *Turn) AddVerbatim(tool, body string) {
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -69,8 +55,7 @@ func (t *Turn) AddVerbatim(tool, body string) {
 	t.Verbatim = append(t.Verbatim, VerbatimBlock{Tool: tool, Body: body})
 }
 
-// Plan returns the plan from the conversation once the planner phase
-// has committed it, or nil if it hasn't.
+// Plan is nil until the planner commits.
 func (t *Turn) Plan() *Plan {
 	if t == nil || t.Conversation == nil {
 		return nil
@@ -78,9 +63,7 @@ func (t *Turn) Plan() *Plan {
 	return t.Conversation.Plan
 }
 
-// Request is the conversation opening for this turn: the user's own
-// words as their own message (D-029). A resumed task replays the original
-// request, the question tobee asked, and the answer, as a normal chat.
+// Request is the user's words as their own message (D-029); a resume replays request, question, answer.
 func (t *Turn) Request() []llm.Message {
 	if r := t.Task.Resume; r != nil {
 		return []llm.Message{
@@ -92,10 +75,7 @@ func (t *Turn) Request() []llm.Message {
 	return []llm.Message{{Role: llm.RoleUser, Content: t.Event.Content}}
 }
 
-// React adds an emoji reaction to the inbound message and records it so
-// the runtime can clear it later. Best-effort: no message ID (timers), a
-// connector without reactions, or a transport error all degrade to a
-// debug log — reactions are feedback, never load-bearing.
+// React is best-effort: reactions are feedback, never load-bearing.
 func (t *Turn) React(emoji string) {
 	if t.Event.MessageID == "" || t.out == nil {
 		return
@@ -107,7 +87,6 @@ func (t *Turn) React(emoji string) {
 	t.Reactions = append(t.Reactions, emoji)
 }
 
-// clearReactions removes every reaction React added, in order.
 func (t *Turn) clearReactions() {
 	if t.Event.MessageID == "" || t.out == nil {
 		return

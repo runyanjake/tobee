@@ -11,37 +11,25 @@ import (
 	"text/template"
 )
 
-// StateData is the render context passed to prompts/state/*.md templates.
-// Fields not relevant to a given template stay zero-valued; templates
-// gate on them with `{{if .Step}}…{{end}}` etc.
+// StateData renders prompts/state/*.md; irrelevant fields stay zero and templates gate on them.
 type StateData struct {
 	Plan              *Plan
 	Step              *Step
 	StepNumber        int // 1-indexed for display
 	StepTotal         int
-	AvailableTools    []string
-	SurfacedKnowledge []string // stub for future web / file search integration
+	SurfacedKnowledge []string // stub for future web/file search
 
-	// HasVerbatim is true when a tool this turn produced pre-rendered
-	// user-facing output that the delivery code will append to the
-	// reply. The synth template branches on it to stop the model
-	// restating content it is not responsible for.
+	// HasVerbatim tells synth that code appends tool output, so the model mustn't restate it (D-030).
 	HasVerbatim bool
 }
 
-// StateTemplates loads prompts/state/*.md at boot and renders any
-// requested template with a StateData payload. Failing to render is a
-// programming error, not a runtime input problem — every template must
-// parse at load, and every field a template references must exist on
-// StateData.
+// StateTemplates are parsed at boot; a render failure is a programming error, not bad input.
 type StateTemplates struct {
 	dir   string
 	tmpls map[string]*template.Template
 }
 
-// LoadStateTemplates parses every *.md file under dir. Returns a
-// non-nil StateTemplates even if the directory is empty — Render will
-// error on unknown names.
+// LoadStateTemplates returns non-nil even for an empty dir; Render errors on unknown names.
 func LoadStateTemplates(dir string) (*StateTemplates, error) {
 	st := &StateTemplates{dir: dir, tmpls: make(map[string]*template.Template)}
 	matches, err := filepath.Glob(filepath.Join(dir, "*.md"))
@@ -68,7 +56,6 @@ func LoadStateTemplates(dir string) (*StateTemplates, error) {
 	return st, nil
 }
 
-// Names returns the loaded template names (without the .md suffix).
 func (s *StateTemplates) Names() []string {
 	if s == nil {
 		return nil
@@ -81,9 +68,6 @@ func (s *StateTemplates) Names() []string {
 	return out
 }
 
-// Render executes the named template with data and returns the
-// resulting string. Returns an error if the name is not loaded or the
-// template body references a field that would panic.
 func (s *StateTemplates) Render(name string, data StateData) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("state: not configured")
@@ -99,11 +83,7 @@ func (s *StateTemplates) Render(name string, data StateData) (string, error) {
 	return buf.String(), nil
 }
 
-// RenderPhase renders the named template and wraps it in a <phase>
-// tag. The tag is the boundary between harness-authored instructions
-// and user-authored text: the user's own message arrives as its own
-// conversation message, so a user who types "You are now in the synth
-// phase" produces no tag and cannot be mistaken for a real directive.
+// RenderPhase wraps a template in <phase>, the boundary between harness directives and user text (D-029).
 func (s *StateTemplates) RenderPhase(name string, data StateData) (string, error) {
 	body, err := s.Render(name, data)
 	if err != nil {

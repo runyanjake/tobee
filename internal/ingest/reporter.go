@@ -10,15 +10,13 @@ import (
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
-// Reporter exposes source health via abilities.Reporter.
 func (e *Engine) Reporter() abilities.Reporter { return engineReporter{e: e} }
 
 type engineReporter struct{ e *Engine }
 
 func (r engineReporter) Name() string { return "ingest" }
 
-// Render reports lifetime counters per source; `since` does not narrow
-// them because the engine keeps no per-event history.
+// Render ignores `since`: the engine keeps no per-event history.
 func (r engineReporter) Render(_ context.Context, _ time.Time) (string, string) {
 	r.e.mu.Lock()
 	runs := make([]*running, 0, len(r.e.sources))

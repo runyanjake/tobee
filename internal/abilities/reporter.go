@@ -1,17 +1,5 @@
-// Package abilities holds cross-cutting plumbing for things tobee *does*
-// outside the LLM turn — surfacing what subsystems are up to, scheduled
-// work, recent background activity, and (later) higher-level capabilities
-// composed from them.
-//
-// The first primitive here is the Reporter contract used by the status
-// server. Any subsystem (a connector, the ingest engine, the MCP host, …)
-// can register a Reporter; the status tools call Render and compose
-// deterministic text — full detail for status_report, a brief overview
-// for status_summary.
-//
-// Determinism is the load-bearing property: the composed text is appended
-// to the reply verbatim in code (D-030), so wording variability belongs in
-// the reporter, not the model.
+// Package abilities holds the Reporter contract behind the status tools.
+// Output is appended to replies verbatim (D-030), so it must be deterministic.
 package abilities
 
 import (
@@ -23,28 +11,13 @@ import (
 	"time"
 )
 
-// Reporter is implemented by anything that wants to surface state through
-// the status server. Name is used as the section key and must be unique
-// within a Registry.
-//
-// Render returns two deterministic views over the subsystem's state:
-//
-//   - full:    multi-line strict format used by status_report. Should
-//     include every relevant Doing / Done / Waiting fact for the
-//     window. Return "" when the subsystem genuinely has nothing
-//     to say.
-//   - summary: one short sentence used by status_summary. Return "" when
-//     the subsystem is uninteresting (idle, no recent activity)
-//     so the composed summary stays tight.
-//
-// Both strings are emitted verbatim to the user; the same state must
-// always yield the same text.
+// Reporter's Render returns full (status_report) and one-sentence summary (status_summary)
+// text, shown verbatim; return "" when there is nothing to say. Name must be unique.
 type Reporter interface {
 	Name() string
 	Render(ctx context.Context, since time.Time) (full, summary string)
 }
 
-// Registry holds the Reporters the status tools aggregate over.
 type Registry struct {
 	mu   sync.RWMutex
 	reps map[string]Reporter
@@ -54,16 +27,13 @@ func NewRegistry() *Registry {
 	return &Registry{reps: make(map[string]Reporter)}
 }
 
-// Register adds a Reporter. Later registrations under the same name
-// overwrite earlier ones — convenient for testing, harmless in main
-// wiring where names are programmer-chosen.
+// Register replaces any earlier Reporter with the same name.
 func (r *Registry) Register(rep Reporter) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reps[rep.Name()] = rep
 }
 
-// Names returns registered reporter names, sorted.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -75,9 +45,7 @@ func (r *Registry) Names() []string {
 	return out
 }
 
-// RenderReport composes the strict full-detail status block. Sections
-// are ordered by reporter name; a reporter with nothing to say still
-// gets a header line and "(idle)" so the user sees it was asked.
+// RenderReport shows silent reporters as "(idle)" so the user sees they were asked.
 func (r *Registry) RenderReport(ctx context.Context, since time.Time) string {
 	now := time.Now().UTC()
 	var b strings.Builder
@@ -99,10 +67,7 @@ func (r *Registry) RenderReport(ctx context.Context, since time.Time) string {
 	return b.String()
 }
 
-// RenderSummary composes the brief few-sentence overview. Per-reporter
-// summaries that come back empty are dropped so the joined text stays
-// tight; if every reporter is quiet, a single "Everything quiet." is
-// returned.
+// RenderSummary drops empty summaries and falls back to "Everything quiet.".
 func (r *Registry) RenderSummary(ctx context.Context, since time.Time) string {
 	var parts []string
 	for _, rep := range r.sorted() {

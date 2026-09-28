@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,46 +22,45 @@ import (
 	"github.com/runyanjake/tobee/internal/telemetry"
 )
 
-// scriptedLLM is an OpenAI-compatible server that answers each request
-// with the next scripted tool call and records what it was sent.
+// scriptedLLM answers each Decide with the next scripted call and records what it was sent.
 type scriptedLLM struct {
 	mu       sync.Mutex
 	calls    []call
 	requests [][]llm.Message
 }
 
-type call struct{ name, args, reasoning string }
+// call.invalid simulates output that could not be read as a tool call.
+type call struct {
+	name, args, reasoning string
+	invalid               bool
+}
 
-func (s *scriptedLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Messages []llm.Message `json:"messages"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+func (s *scriptedLLM) Decide(_ context.Context, msgs []llm.Message, tools []llm.ToolSpec) (*llm.Decision, error) {
 	s.mu.Lock()
-	s.requests = append(s.requests, req.Messages)
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, append([]llm.Message(nil), msgs...))
 	if len(s.calls) == 0 {
-		s.mu.Unlock()
-		http.Error(w, "script exhausted", http.StatusInternalServerError)
-		return
+		return nil, fmt.Errorf("script exhausted")
 	}
 	c := s.calls[0]
 	s.calls = s.calls[1:]
-	n := len(s.requests)
-	s.mu.Unlock()
-
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"choices": []map[string]any{{
-			"finish_reason": "tool_calls",
-			"message": map[string]any{
-				"role":              "assistant",
-				"reasoning_content": c.reasoning,
-				"tool_calls": []map[string]any{{
-					"id": fmt.Sprintf("call-%d", n), "type": "function",
-					"function": map[string]any{"name": c.name, "arguments": c.args},
-				}},
-			},
-		}},
-	})
+	if c.invalid {
+		return &llm.Decision{Raw: "some prose"}, fmt.Errorf("%w: prose", llm.ErrInvalidDecision)
+	}
+	offered := false
+	for _, t := range tools {
+		offered = offered || t.Name == c.name
+	}
+	if !offered {
+		return nil, fmt.Errorf("scripted %s was not offered", c.name)
+	}
+	return &llm.Decision{
+		Call: llm.ToolCall{
+			ID: fmt.Sprintf("call-%d", len(s.requests)), Type: "function",
+			Function: llm.FunctionCall{Name: c.name, Arguments: c.args},
+		},
+		Reasoning: c.reasoning,
+	}, nil
 }
 
 func (s *scriptedLLM) script(calls ...call) {
@@ -72,7 +69,6 @@ func (s *scriptedLLM) script(calls ...call) {
 	s.calls = append(s.calls, calls...)
 }
 
-// chat is a delivery.Channel that records sends and numbers messages.
 type chat struct {
 	mu   sync.Mutex
 	sent []string
@@ -95,8 +91,6 @@ type harness struct {
 func newHarness(t *testing.T, extra ...*mcpserver.Server) *harness {
 	t.Helper()
 	fake := &scriptedLLM{}
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
 
 	out := delivery.NewRouter()
 	ch := &chat{}
@@ -114,9 +108,8 @@ func newHarness(t *testing.T, extra ...*mcpserver.Server) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := llm.NewClient(srv.URL, "test", llm.Options{})
-	strategy := NewPlanExecute(NewPlanner(client, states), NewExecutor(client, host, states, 4, 12),
-		NewSynthesizer(client, states), out)
+	strategy := NewPlanExecute(NewPlanner(fake, states), NewExecutor(fake, host, states, 4, 12),
+		NewSynthesizer(fake, states), out)
 	q, err := taskqueue.Open(t.TempDir(), 10)
 	if err != nil {
 		t.Fatal(err)
@@ -192,8 +185,7 @@ func TestAskParksAndAnswerResumes(t *testing.T) {
 	}
 }
 
-// Verbatim tool output reaches the user even when the model's own words
-// say something else (D-030), and it flows through MCP metadata now.
+// Verbatim tool output reaches the user even when the model says otherwise (D-030).
 func TestVerbatimToolOutputIsDelivered(t *testing.T) {
 	status := mcpserver.New("status", "")
 	status.Add(mcpserver.Tool{Name: "summary", Verbatim: true, Handler: func(context.Context, json.RawMessage) (string, error) {
@@ -218,9 +210,7 @@ func TestVerbatimToolOutputIsDelivered(t *testing.T) {
 	}
 }
 
-// The reasoning chain is reconstructable from the log alone: input, the
-// model's thinking, its actions, and the output, in order, all tagged with
-// the task (D-040).
+// The reasoning chain is reconstructable, in order, from task-tagged logs alone (D-040).
 func TestTurnLogsTheReasoningChain(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -272,5 +262,29 @@ func TestTurnLogsTheReasoningChain(t *testing.T) {
 	}
 	if strings.Join(chain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("chain =\n%s\nwant\n%s", strings.Join(chain, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// Unreadable output is retried once with a nudge and never kept in the
+// transcript, so later phases can't continue it (D-041).
+func TestInvalidOutputIsNotKept(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(
+		call{invalid: true},
+		call{name: "plan_commit", args: `{"goal":"Greet.","steps":[],"direct_reply":"Hey."}`},
+	)
+	h.runNext(t, chatEvent("e1", "hey", ""))
+
+	if got := h.chat.sent; len(got) != 1 || got[0] != "Hey." {
+		t.Fatalf("sent = %q", got)
+	}
+	retry := h.llm.requests[1]
+	for _, m := range retry {
+		if strings.Contains(m.Content, "some prose") {
+			t.Fatal("invalid output was kept in the conversation")
+		}
+	}
+	if last := retry[len(retry)-1]; last.Content != plannerNudge {
+		t.Fatalf("retry did not end with the nudge: %+v", last)
 	}
 }

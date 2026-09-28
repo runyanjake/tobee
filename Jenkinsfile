@@ -17,7 +17,8 @@ pipeline {
     DISCORD_WEBHOOK = credentials('discord-pws-builds-channel-webhook')
 
     // Non-secret instance config. Edit here to retarget the deploy.
-    // AI_MODEL must support native tool-use (see .claude/DESIGN.md D-001).
+    // AI_MODEL: any instruction-tuned Ollama model; output is schema-constrained
+    // (see .claude/DESIGN.md D-041).
     // To move off the bundled Ollama, point AI_PROVIDER_URL at another
     // OpenAI-compatible server and add AI_API_KEY as a Secret text credential.
     AI_PROVIDER_URL    = 'http://ollama:11434'

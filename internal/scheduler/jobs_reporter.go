@@ -10,7 +10,6 @@ import (
 	"github.com/runyanjake/tobee/internal/abilities"
 )
 
-// Reporter exposes scheduled-job state via abilities.Reporter.
 func (m *JobManager) Reporter() abilities.Reporter { return jobsReporter{m: m} }
 
 type jobsReporter struct{ m *JobManager }
