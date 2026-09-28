@@ -1,0 +1,1 @@
+The mailbox you read and send from. Use `email_send` only to write to someone other than the sender you're answering, or to start a new thread the user asked for. You can only send to addresses the operator has allowed.

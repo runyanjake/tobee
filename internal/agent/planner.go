@@ -8,12 +8,13 @@ import (
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/telemetry"
 )
 
-const planCommitTool = "plan.commit"
+const planCommitTool = "plan_commit"
 
 // planCommitSchema is the structured plan shape the planner LLM emits
-// via the plan.commit virtual tool. Simplified under D-029: steps no
+// via the plan_commit virtual tool. Simplified under D-029: steps no
 // longer carry `tools` or `memory_paths` — every step has every
 // registered tool available. Status, IDs, and run counts are owned by
 // the loop, not the model.
@@ -39,7 +40,7 @@ var planCommitSchema = json.RawMessage(`{
   }
 }`)
 
-// Planner commits a structured plan via plan.commit on an LLM call
+// Planner commits a structured plan via plan_commit on an LLM call
 // with tool_choice=required. Free-form text is a protocol violation:
 // the planner retries once with a stricter nudge and then fails the
 // turn. There is no text-wrap fallback — the format is enforced.
@@ -52,25 +53,28 @@ type Planner struct {
 // protocol violation. Kept short — the LLM already read the plan
 // state template; this is just the "you broke the contract, do it
 // right" note.
-const plannerNudge = "PROTOCOL VIOLATION: your previous response was not a plan.commit tool call. You must call plan.commit exactly once. Free-form text is not accepted. Retry."
+const plannerNudge = "PROTOCOL VIOLATION: your previous response was not a plan_commit tool call. You must call plan_commit exactly once. Free-form text is not accepted. Retry."
 
 func NewPlanner(client *llm.Client, states *StateTemplates) *Planner {
 	return &Planner{client: client, states: states}
 }
 
-// Run appends the rendered plan-state message to the conversation,
-// makes the planning LLM call, and appends the resulting assistant
-// message. On success, conv.Plan is set. Retries once on either a
-// transient LLM call error or a protocol violation.
-func (p *Planner) Run(ctx context.Context, conv *Conversation, userInput string) error {
+// Run appends the request messages and the rendered plan-state message
+// to the conversation, makes the planning LLM call, and appends the
+// resulting assistant message. On success, conv.Plan is set. Retries once
+// on either a transient LLM call error or a protocol violation.
+func (p *Planner) Run(ctx context.Context, conv *Conversation, request []llm.Message) error {
 	if p == nil || p.client == nil {
 		return fmt.Errorf("planner: not configured")
 	}
+	ctx = telemetry.With(ctx, "phase", "plan")
 
-	// The user's own words are their own message; the phase directive
+	// The user's own words are their own messages; the phase directive
 	// is a separate, tagged one. Never fuse them — the model must be
 	// able to tell what the user said from what the harness said.
-	conv.Append(llm.Message{Role: llm.RoleUser, Content: userInput})
+	for _, m := range request {
+		conv.Append(m)
+	}
 
 	phaseMsg, err := p.states.RenderPhase("plan", StateData{})
 	if err != nil {
@@ -86,18 +90,14 @@ func (p *Planner) Run(ctx context.Context, conv *Conversation, userInput string)
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		logPrompt("agent: planner: prompt", conv.Messages)
-		resp, err := p.client.Call(ctx, conv.Messages, toolSpec, llm.ToolChoiceRequired)
+		resp, err := callLLM(ctx, p.client, conv, toolSpec, llm.ToolChoiceRequired)
 		if err != nil {
-			slog.Error("agent: planner: LLM ERROR",
-				"attempt", attempt, "err", err, "ctx_err", ctx.Err())
 			lastErr = err
 			if ctx.Err() != nil {
 				return fmt.Errorf("planner: llm: %w", err)
 			}
 			continue
 		}
-		logResponse("agent: planner: llm response", resp, "attempt", attempt)
 
 		asst := llm.Message{
 			Role:      llm.RoleAssistant,
@@ -128,17 +128,11 @@ func (p *Planner) Run(ctx context.Context, conv *Conversation, userInput string)
 				Content:    "ok",
 			})
 			conv.Plan = plan
+			logPlan(ctx, plan)
 			return nil
 		}
 
-		slog.Error("agent: planner: PROTOCOL VIOLATION",
-			"attempt", attempt,
-			"expected_tool", planCommitTool,
-			"finish", resp.Finish,
-			"text_chars", len(resp.Text),
-			"text_preview", oneLine(resp.Text),
-			"tool_calls_count", len(resp.ToolCalls),
-			"tool_calls", renderToolCalls(resp.ToolCalls))
+		logViolation(ctx, attempt, planCommitTool, resp)
 		lastErr = fmt.Errorf("protocol violation: no %s call", planCommitTool)
 
 		if attempt == 0 {
@@ -149,7 +143,22 @@ func (p *Planner) Run(ctx context.Context, conv *Conversation, userInput string)
 	return fmt.Errorf("planner: exhausted retries: %w", lastErr)
 }
 
-// commitArgs is the JSON shape plan.commit emits.
+// logPlan records the committed plan as the model's thinking.
+func logPlan(ctx context.Context, plan *Plan) {
+	if plan.DirectReply != "" {
+		telemetry.Log(ctx, slog.LevelInfo, telemetry.Thinking, "agent: plan",
+			"goal", plan.Goal, "route", "direct_reply")
+		return
+	}
+	intents := make([]string, len(plan.Steps))
+	for i, s := range plan.Steps {
+		intents[i] = fmt.Sprintf("%s: %s", s.ID, s.Intent)
+	}
+	telemetry.Log(ctx, slog.LevelInfo, telemetry.Thinking, "agent: plan",
+		"goal", plan.Goal, "route", "steps", "steps", intents)
+}
+
+// commitArgs is the JSON shape plan_commit emits.
 type commitArgs struct {
 	Goal        string `json:"goal"`
 	DirectReply string `json:"direct_reply"`

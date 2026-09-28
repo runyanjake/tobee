@@ -24,8 +24,12 @@ WORKDIR /app
 COPY --from=builder /app/tobee .
 COPY prompts ./prompts
 
-# Create mountpoints; data/ is expected to be a bind-mount so the agent's
-# memory survives container restarts.
-RUN mkdir -p data/memory data/sessions
+# Create mountpoints; data/ is expected to be a bind-mount so memory, jobs,
+# and queued tasks survive container restarts.
+#
+# External stdio MCP servers (MCP_SERVER_<NAME>_COMMAND) run inside this
+# image, which has no Node or Python. Use an HTTP server (_URL) or extend
+# the image with the runtime the server needs.
+RUN mkdir -p data/memory data/tasks data/scheduler/jobs
 
 CMD ["./tobee"]

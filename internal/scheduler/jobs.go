@@ -1,39 +1,44 @@
+// Package scheduler runs model-created jobs. The JobManager is an ingest
+// source: when a job fires it emits a timer event routed back to the
+// channel and user that created the job.
 package scheduler
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/runyanjake/tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/event"
+	"github.com/runyanjake/tobee/internal/ingest"
 )
 
 const firedJobRingSize = 32
 
-// JobManager owns the set of model-scheduled jobs. It loads persisted jobs
-// at Start, registers recurring entries with a robfig cron, registers one-
-// shot entries as time.AfterFunc timers, and publishes a synthetic Envelope
-// onto the agent bus when a job fires.
+// JobManager owns the set of model-scheduled jobs. Load reads persisted
+// jobs and schedules them — recurring entries on a robfig cron, one-shots
+// as time.AfterFunc timers. Run makes it an ingest.Source: fires are
+// emitted as timer events while it runs.
 //
 // Concurrency: the embedded cron.Cron runs its own goroutine and dispatches
-// each fire in a goroutine of its own. mu guards the per-manager maps and
-// the recent-fires ring buffer.
+// each fire in a goroutine of its own. mu guards the per-manager maps, the
+// emit function, and the recent-fires ring buffer.
 type JobManager struct {
-	bus   *integrations.Bus
 	store *JobStore
 	cron  *cron.Cron
 
 	mu      sync.Mutex
+	emit    ingest.Emit         // nil while the source is not running
 	entries map[string]canceler // job id → handle for cancelling its next fire
 	jobs    map[string]Job      // job id → snapshot (for List / reporter)
 	recent  []firedJobEvent
 	head    int
 	filled  bool
-	started bool
+	loaded  bool
 }
 
 type firedJobEvent struct {
@@ -65,9 +70,8 @@ var cronParser = cron.NewParser(
 	cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 )
 
-func NewJobManager(bus *integrations.Bus, store *JobStore) *JobManager {
+func NewJobManager(store *JobStore) *JobManager {
 	return &JobManager{
-		bus:     bus,
 		store:   store,
 		cron:    cron.New(cron.WithParser(cronParser)),
 		entries: make(map[string]canceler),
@@ -76,17 +80,19 @@ func NewJobManager(bus *integrations.Bus, store *JobStore) *JobManager {
 	}
 }
 
-// Start loads persisted jobs, schedules the survivors, launches the cron
-// dispatcher, and registers a shutdown watcher on ctx. One-shot jobs whose
-// At time has already passed are dropped from disk (misfire policy: skip,
-// see .claude/DESIGN.md D-015).
-func (m *JobManager) Start(ctx context.Context) error {
+// Name implements ingest.Source.
+func (m *JobManager) Name() string { return "schedule" }
+
+// Load reads persisted jobs and schedules the survivors. One-shot jobs
+// whose At time has already passed are dropped from disk (misfire policy:
+// skip, D-015). Idempotent.
+func (m *JobManager) Load() error {
 	m.mu.Lock()
-	if m.started {
+	if m.loaded {
 		m.mu.Unlock()
 		return nil
 	}
-	m.started = true
+	m.loaded = true
 	m.mu.Unlock()
 
 	jobs, err := m.store.LoadAll()
@@ -107,21 +113,31 @@ func (m *JobManager) Start(ctx context.Context) error {
 		}
 		loaded++
 	}
+	slog.Info("jobs: loaded", "loaded", loaded, "skippedMissed", dropped)
+	return nil
+}
 
+// Run implements ingest.Source: it runs the cron dispatcher and emits
+// fires until ctx is cancelled. A one-shot that comes due while the
+// source is stopped fires into nothing and is logged.
+func (m *JobManager) Run(ctx context.Context, emit ingest.Emit) error {
+	if err := m.Load(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.emit = emit
+	m.mu.Unlock()
 	m.cron.Start()
-	slog.Info("jobs: started", "loaded", loaded, "skippedMissed", dropped)
+	slog.Info("jobs: running")
 
-	go func() {
-		<-ctx.Done()
-		stopCtx := m.cron.Stop()
-		<-stopCtx.Done()
-		m.mu.Lock()
-		for _, e := range m.entries {
-			e.cancel()
-		}
-		m.mu.Unlock()
-		slog.Info("jobs: stopped")
-	}()
+	<-ctx.Done()
+
+	stopCtx := m.cron.Stop()
+	<-stopCtx.Done()
+	m.mu.Lock()
+	m.emit = nil
+	m.mu.Unlock()
+	slog.Info("jobs: stopped")
 	return nil
 }
 
@@ -145,7 +161,7 @@ func (m *JobManager) Create(j Job) (Job, error) {
 		return Job{}, err
 	}
 	slog.Info("jobs: created", "id", j.ID, "name", j.Name,
-		"cron", j.Cron, "at", j.At, "integration", j.Integration, "channel", j.Channel)
+		"cron", j.Cron, "at", j.At, "connector", j.Connector, "channel", j.Channel)
 	return j, nil
 }
 
@@ -211,12 +227,13 @@ func (m *JobManager) schedule(j Job) error {
 	return nil
 }
 
-// fire publishes the envelope, records the event, and—if this was a one-shot
+// fire emits the timer event, records it, and—if this was a one-shot
 // —removes the job from the schedule and disk. Errors here are logged, not
 // returned: the timer callback has nowhere to surface them.
 func (m *JobManager) fire(id string) {
 	m.mu.Lock()
 	j, ok := m.jobs[id]
+	emit := m.emit
 	m.mu.Unlock()
 	if !ok {
 		// Job was cancelled between scheduling and firing. Cron entries should
@@ -224,21 +241,26 @@ func (m *JobManager) fire(id string) {
 		return
 	}
 
-	env := integrations.Envelope{
-		Integration: j.Integration,
-		User:        j.User,
-		UserName:    j.UserName,
-		Channel:     j.Channel,
-		Thread:      j.Thread,
-		Content:     formatPrompt(j),
-		Received:    time.Now(),
+	if emit == nil {
+		// The job stays on disk; the next Load applies the misfire policy.
+		slog.Warn("jobs: fired while the schedule source is stopped; skipped", "id", j.ID)
+		return
 	}
-	m.bus.Publish(env)
+	now := time.Now()
+	emit(event.Event{
+		ID:       j.ID + "@" + strconv.FormatInt(now.Unix(), 10),
+		Source:   m.Name(),
+		Kind:     event.KindTimer,
+		Actor:    event.Actor{ID: j.User, Name: j.UserName},
+		Origin:   event.Address{Connector: j.Connector, Channel: j.Channel, Thread: j.Thread},
+		Content:  formatPrompt(j),
+		Received: now,
+	})
 	slog.Info("jobs: fired", "id", j.ID, "name", j.Name, "recurring", j.IsRecurring())
 
 	m.mu.Lock()
 	m.recent[m.head] = firedJobEvent{
-		ID: j.ID, Name: j.Name, At: env.Received, OneShot: !j.IsRecurring(),
+		ID: j.ID, Name: j.Name, At: now, OneShot: !j.IsRecurring(),
 	}
 	m.head = (m.head + 1) % len(m.recent)
 	if m.head == 0 {
@@ -272,8 +294,8 @@ func validate(j *Job) error {
 	if j.Prompt == "" {
 		return fmt.Errorf("jobs: prompt is required")
 	}
-	if j.Integration == "" || j.Channel == "" {
-		return fmt.Errorf("jobs: integration and channel are required (the fired envelope routes back here)")
+	if j.Connector == "" || j.Channel == "" {
+		return fmt.Errorf("jobs: connector and channel are required (the fired event routes back here)")
 	}
 	hasCron := j.Cron != ""
 	hasAt := !j.At.IsZero()

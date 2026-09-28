@@ -3,14 +3,15 @@
 // work, recent background activity, and (later) higher-level capabilities
 // composed from them.
 //
-// The first primitive here is the Reporter contract used by the status.*
-// tools. Any subsystem (scheduler, janitor, integration, …) can register
-// a Reporter; the status tools call Render and compose deterministic text
-// — full detail for status.report, a brief overview for status.summary.
+// The first primitive here is the Reporter contract used by the status
+// server. Any subsystem (a connector, the ingest engine, the MCP host, …)
+// can register a Reporter; the status tools call Render and compose
+// deterministic text — full detail for status_report, a brief overview
+// for status_summary.
 //
-// Determinism is the load-bearing property: the LLM is told to relay the
-// composed text verbatim, so wording variability belongs in the reporter,
-// not the model.
+// Determinism is the load-bearing property: the composed text is appended
+// to the reply verbatim in code (D-030), so wording variability belongs in
+// the reporter, not the model.
 package abilities
 
 import (
@@ -23,16 +24,16 @@ import (
 )
 
 // Reporter is implemented by anything that wants to surface state through
-// the status ability. Name is used as the section key and must be unique
+// the status server. Name is used as the section key and must be unique
 // within a Registry.
 //
 // Render returns two deterministic views over the subsystem's state:
 //
-//   - full:    multi-line strict format used by status.report. Should
+//   - full:    multi-line strict format used by status_report. Should
 //     include every relevant Doing / Done / Waiting fact for the
 //     window. Return "" when the subsystem genuinely has nothing
 //     to say.
-//   - summary: one short sentence used by status.summary. Return "" when
+//   - summary: one short sentence used by status_summary. Return "" when
 //     the subsystem is uninteresting (idle, no recent activity)
 //     so the composed summary stays tight.
 //
@@ -43,7 +44,7 @@ type Reporter interface {
 	Render(ctx context.Context, since time.Time) (full, summary string)
 }
 
-// Registry holds the Reporters status.* tools aggregate over.
+// Registry holds the Reporters the status tools aggregate over.
 type Registry struct {
 	mu   sync.RWMutex
 	reps map[string]Reporter

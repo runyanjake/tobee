@@ -2,8 +2,8 @@ package agent
 
 import "github.com/runyanjake/tobee/internal/llm"
 
-// Conversation is the growing chat state for one Discord message from
-// receipt through delivery. Every phase (plan, execute per step, synth)
+// Conversation is the growing chat state for one task from dequeue
+// through delivery. Every phase (plan, execute per step, synth)
 // appends to the same Messages list — LM Studio is stateless on the
 // wire, so we resend the whole list on each call, but from our code's
 // view this is one continuous conversation.
@@ -18,7 +18,9 @@ type Conversation struct {
 	Plan              *Plan
 	StepCursor        int      // index of the step being executed (0-indexed)
 	SurfacedKnowledge []string // stub — populated by future web/file search hooks
-	Finished          bool     // set when a step.finish signals the whole turn is done
+	Finished          bool     // set when step_finish or user_ask ends the whole turn
+
+	logged int // Messages already written to the debug log (see callLLM)
 }
 
 // NewConversation seeds the chat with a system message and returns

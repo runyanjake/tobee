@@ -86,3 +86,10 @@ func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string
 	}
 	return full.String(), summary
 }
+
+func schedPlural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}

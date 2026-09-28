@@ -11,11 +11,13 @@ import (
 )
 
 // Client is a minimal OpenAI-compatible chat client that speaks the
-// native tool-calling protocol. Targets LM Studio but works against any
-// server implementing /v1/chat/completions with tools.
+// native tool-calling protocol. Works against any server implementing
+// /v1/chat/completions with tools — LM Studio, Ollama, vLLM, or a hosted
+// API — so switching backends is configuration, not code (D-039).
 type Client struct {
 	baseURL     string
 	model       string
+	apiKey      string
 	temperature float64
 	maxTokens   int
 	http        *http.Client
@@ -37,12 +39,16 @@ type Options struct {
 	Temperature *float64
 	MaxTokens   int
 	Timeout     time.Duration
+	// APIKey is sent as a bearer token. Local servers ignore it; hosted
+	// APIs require it.
+	APIKey string
 }
 
 func NewClient(baseURL, model string, opts Options) *Client {
 	c := &Client{
 		baseURL:     baseURL,
 		model:       model,
+		apiKey:      opts.APIKey,
 		temperature: DefaultTemperature,
 		maxTokens:   opts.MaxTokens,
 		http:        &http.Client{Timeout: opts.Timeout},
@@ -99,6 +105,9 @@ func (c *Client) Call(ctx context.Context, messages []Message, tools []ToolSpec,
 		return nil, fmt.Errorf("new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -120,10 +129,16 @@ func (c *Client) Call(ctx context.Context, messages []Message, tools []ToolSpec,
 	}
 
 	ch := cr.Choices[0]
+	reasoning := ch.Message.ReasoningContent
+	if reasoning == "" {
+		reasoning = ch.Message.Reasoning
+	}
 	return &Response{
 		Text:      ch.Message.Content,
+		Reasoning: reasoning,
 		ToolCalls: ch.Message.ToolCalls,
 		Finish:    ch.FinishReason,
+		Usage:     cr.Usage,
 	}, nil
 }
 
@@ -151,14 +166,24 @@ type toolFunction struct {
 }
 
 type chatResponse struct {
-	ID      string         `json:"id"`
-	Model   string         `json:"model"`
-	Choices []chatChoice   `json:"choices"`
-	Usage   map[string]any `json:"usage,omitempty"`
+	ID      string       `json:"id"`
+	Model   string       `json:"model"`
+	Choices []chatChoice `json:"choices"`
+	Usage   Usage        `json:"usage"`
 }
 
 type chatChoice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason string  `json:"finish_reason"`
+	Index        int             `json:"index"`
+	Message      responseMessage `json:"message"`
+	FinishReason string          `json:"finish_reason"`
+}
+
+// responseMessage is the assistant message as servers return it. Reasoning
+// models add their thinking under one of two non-standard keys: vLLM, LM
+// Studio, and DeepSeek use reasoning_content; Ollama uses reasoning.
+type responseMessage struct {
+	Content          string     `json:"content"`
+	ToolCalls        []ToolCall `json:"tool_calls"`
+	ReasoningContent string     `json:"reasoning_content"`
+	Reasoning        string     `json:"reasoning"`
 }

@@ -29,7 +29,7 @@ type Step struct {
 	Error    string     `json:"error,omitempty"`
 	Attempts int        `json:"attempts,omitempty"`
 	// Finished records the `finished` boolean the LLM passed to
-	// step.finish. When true, the executor short-circuits any
+	// step_finish. When true, the executor short-circuits any
 	// remaining steps and jumps to synth — the LLM is attesting that
 	// the whole user request is satisfied by what has run so far.
 	Finished bool `json:"finished,omitempty"`

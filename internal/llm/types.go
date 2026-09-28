@@ -78,9 +78,20 @@ type ToolSpec struct {
 
 // Response is the parsed outcome of a single LLM call.
 type Response struct {
-	Text      string     // assistant's textual reply, if any
+	Text string // assistant's textual reply, if any
+	// Reasoning is the model's thinking, when the server returns it
+	// separately. It is logged, never sent back to the model.
+	Reasoning string
 	ToolCalls []ToolCall // tool invocations requested by the model
 	Finish    string     // e.g. "stop", "tool_calls", "length"
+	Usage     Usage
+}
+
+// Usage is the server-reported token count for one call. Zero when the
+// server does not report it.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
 }
 
 // ToolChoice controls whether the model may, must, or must not call a

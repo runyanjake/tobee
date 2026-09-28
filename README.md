@@ -1,143 +1,73 @@
 # tobee
 
-A self-hosted personal AI assistant (named after the family cat 🐾). It talks through Discord, reasons with a local tool-calling LLM, and keeps its memory in plain text files.
+A self-hosted personal AI agent (named after the family cat 🐾): it takes tasks from Discord, email, and its own timers, acts on them through MCP tools with a local tool-calling LLM, and keeps its memory in plain text files.
 
 ## Key Features
 
-- **Plan → execute → synthesize loop.** Tool-using requests get a live-edited plan checklist, a ReAct loop for each step, and one composed reply. Simple messages get a one-call direct answer.
-- **Strict tool-call protocol.** Every model output is a required tool call (`plan.commit`, `step.finish`, `reply.commit`). Formatting and exact tool output are enforced in code, not by prompt instructions.
-- **Plain-text memory.** Separate per-user and shared memory trees under `data/memory/`, reached only through sandboxed `memory.*` tools. No database, no vector store, no chat history kept between messages.
-- **Self-scheduling.** The model creates one-shot or cron jobs that survive restarts and fire back into the originating channel.
-- **Status reporting.** `status.*` tools return fixed, pre-formatted text about Discord and scheduler activity.
-- **Optional workspace access.** Sandboxed read/search/write over host directories the operator opts in to.
+- **Pluggable inputs.** Discord, an IMAP inbox, scheduled jobs, and MCP resource notifications all feed one durable task queue. Sources restart on failure and can be registered at runtime.
+- **MCP tool platform.** Built-in capabilities (memory, workspace, schedules, status, messaging) are MCP servers. Add third-party servers over stdio or HTTP with env vars alone. External servers are sandboxed by default.
+- **Plan → execute → synthesize.** Tool-using requests get a live-edited plan checklist, a ReAct loop for each step, and one composed reply. Simple messages get a one-call answer. Every model output is a forced tool call.
+- **Asks when unsure.** The agent can send a clarifying question, pause the task, and resume when the user answers.
+- **Plain-text memory.** Per-user and shared trees under `data/memory/`. No database, no vector store, no chat history.
+- **Swappable model and reasoning.** Any OpenAI-compatible backend, local or hosted, chosen by env. The reasoning strategy is an interface.
+- **Traceable reasoning.** Every log line is tagged `input`, `thinking`, `action`, `output`, `llm`, or `system`, and turn logs carry a task ID.
 
 ## System Design
 
 ```mermaid
 flowchart LR
-    %% ───────────── External actors & systems ─────────────
-    user(["👤 User<br/>(Discord client)"])
-    discordAPI[["Discord Platform<br/>Gateway WS + REST API"]]
+    user(["👤 User"])
+    discordAPI[["Discord<br/>Gateway + REST"]]
+    mail[["Mail server<br/>IMAP + SMTP"]]
+    extMCP[["External MCP servers<br/>stdio · Streamable HTTP"]]
 
-    %% ───────────── Prod host ─────────────
-    subgraph host["🖥️ Prod Host — Linux + Nvidia GPU (docker compose)"]
-        direction LR
-
-        %% ── tobee container ──
-        subgraph tobee["📦 tobee container — Go service (single process)"]
+    subgraph host["🖥️ Prod host — Linux + Nvidia GPU (docker compose)"]
+        subgraph tobee["📦 tobee — Go service"]
             direction TB
-
-            subgraph ioEngine["Integration Engine"]
-                direction TB
-                discordInt["Discord Integration<br/>gateway listener · message split<br/>reply sender · reactor · editor"]
-                schedInt["Scheduler<br/>static ticks + JobManager<br/>(cron & one-shot jobs)"]
-                bus{{"Event Bus<br/>buffered chan (64)<br/>non-blocking, drop-on-full"}}
-                replies["Reply Router<br/>integration → ReplySender table"]
-            end
-
-            subgraph agentCore["Agent Core"]
-                direction TB
-                loop["Agent Loop<br/>serial worker, 1 goroutine<br/>2m turn budget"]
-                ctxb["Context Builder<br/>system prompt + workspace areas"]
-                phases["Conversation Phases<br/>Planner → Executor → Synthesizer"]
-                llmClient["LLM Client<br/>OpenAI-compatible<br/>native tool-use"]
-            end
-
-            subgraph toolLayer["Tool Layer"]
-                direction TB
-                registry["Tool Registry<br/>JSON-Schema · timeouts<br/>panic recovery"]
-                packs["Tool Packs<br/>memory.* · workspace.*<br/>schedule.* · status.*"]
-                abilities["Abilities Registry<br/>Reporters: discord,<br/>scheduler, jobs"]
-                sandbox["SandboxFS<br/>path-escape guard<br/>size limits"]
-            end
-
-            prompts[/"Prompts (baked into image)<br/>prompts/system/*.md<br/>prompts/state/*.md"/]
+            ingest["Ingest engine<br/>sources: discord · email · schedule · mcp"]
+            queue["Task queue<br/>durable · parked questions"]
+            runtime["Agent runtime<br/>serial · Strategy: plan → execute → synthesize"]
+            mcphost["MCP host<br/>tool catalog · trust"]
+            builtin["Built-in MCP servers<br/>memory · workspace · schedule<br/>status · user · discord · email"]
+            delivery["Delivery router<br/>reply to origin"]
         end
-
-        %% ── LLM containers ──
-        subgraph llmStack["🧠 LLM Serving"]
-            direction TB
-            ollama["📦 ollama container<br/>GPU-backed · :11434<br/>/v1/chat/completions"]
-            ollamaPull["📦 ollama-pull<br/>one-shot: pull AI_MODEL"]
-        end
-
-        %% ── Storage ──
-        subgraph storage["💾 Persistent Storage"]
-            direction TB
-            dataVol[("Host bind mount<br/>/pwspool/software/tobee → /app/data<br/>───<br/>memory/shared/<br/>memory/users/&lt;integration&gt;/&lt;id&gt;/<br/>scheduler/jobs/&lt;id&gt;.json")]
-            modelVol[("Named volume<br/>ollama-models")]
-            wsAreas[("Workspace Areas<br/>WORKSPACE_AREA_* host dirs<br/>(optional)")]
-        end
+        ollama["📦 ollama<br/>GPU · /v1/chat/completions"]
+        data[("/pwspool/software/tobee → /app/data<br/>memory · scheduler/jobs · tasks")]
     end
 
-    %% ───────────── Inbound flow ─────────────
-    user <-->|chat| discordAPI
-    discordAPI -->|MESSAGE_CREATE events| discordInt
-    discordInt -->|Envelope| bus
-    schedInt -->|synthetic Envelope| bus
-    bus -->|consume| loop
-
-    %% ───────────── Turn execution ─────────────
-    loop --> ctxb
-    prompts -.->|loaded at boot| ctxb
-    prompts -.->|state templates| phases
-    loop --> phases
-    phases --> llmClient
-    llmClient <-->|HTTP chat completions| ollama
-    phases -->|tool calls| registry
-    registry --> packs
-
-    %% ───────────── Tool backends ─────────────
-    packs -->|memory.* / workspace.*| sandbox
-    packs -->|schedule.*| schedInt
-    packs -->|status.*| abilities
-    abilities -.->|Render| discordInt
-    abilities -.->|Render| schedInt
-
-    sandbox <-->|read/write| dataVol
-    sandbox <-->|read / write*| wsAreas
-    schedInt <-->|job persistence| dataVol
-
-    %% ───────────── Outbound flow ─────────────
-    loop -->|final reply| replies
-    replies --> discordInt
-    discordInt -->|send / edit / react| discordAPI
-
-    %% ───────────── LLM infra ─────────────
-    ollamaPull -->|pull model| ollama
-    ollama <--> modelVol
-
-    %% ───────────── Styling ─────────────
-    classDef ext fill:#5865F2,stroke:#3b45a8,color:#fff
-    classDef io fill:#e8f1ff,stroke:#4a7bd0,color:#111
-    classDef core fill:#fff4e0,stroke:#d08a2a,color:#111
-    classDef tool fill:#eaf7ea,stroke:#4a9a4a,color:#111
-    classDef store fill:#f3e8ff,stroke:#8a4ad0,color:#111
-    classDef llm fill:#ffe8ec,stroke:#c94a64,color:#111
-
-    class user,discordAPI ext
-    class discordInt,schedInt,bus,replies io
-    class loop,ctxb,phases,llmClient,prompts core
-    class registry,packs,abilities,sandbox tool
-    class dataVol,modelVol,wsAreas store
-    class ollama,ollamaPull llm
+    user <--> discordAPI
+    user <--> mail
+    discordAPI --> ingest
+    mail --> ingest
+    extMCP -. notifications .-> ingest
+    ingest --> queue --> runtime
+    runtime <-->|chat completions| ollama
+    runtime -->|tools/call| mcphost
+    mcphost --> builtin
+    mcphost <--> extMCP
+    runtime --> delivery
+    delivery --> discordAPI
+    delivery --> mail
+    builtin <--> data
+    queue <--> data
 ```
 
-- Integrations (Discord, scheduler) publish `Envelope`s onto one bus. A single worker processes them in order.
-- Each turn is one growing conversation: the planner commits a plan, the executor runs the steps with tools, and the synthesizer commits the reply. The Reply Router sends it back through the originating integration.
+- Every input becomes an event. The ingest engine dedups events, checks sender allowlists, and queues them. One worker runs one task at a time.
+- The agent reaches every capability through the MCP host. The reply to the sender is sent by code; messages anywhere else are tool calls.
 - Dev points at LM Studio on the host instead of the bundled Ollama container.
 
-Architecture, reasoning patterns, and decisions: [.claude/DESIGN.md](.claude/DESIGN.md).
+Architecture, the turn lifecycle, trust rules, and decisions are in [.claude/DESIGN.md](.claude/DESIGN.md).
 
 ## Local Dev Prerequisites
 
-- **Go 1.25+** (for native runs and tests).
+- **Go 1.25+** for native runs and tests.
 - **Docker** with **Docker Compose v2**. The prod compose file uses `env_file` entries with `required:`.
 - **An OpenAI-compatible LLM server with native tool calling.** Dev uses [LM Studio](https://lmstudio.ai/) on port 1234 with a tool-capable model loaded.
-- **A Discord bot application** with the privileged **Message Content** intent enabled in the developer portal.
+- **At least one connector:**
+  - a Discord bot with the privileged **Message Content** intent enabled, and/or
+  - a mailbox with IMAP and SMTP access (an app password).
 - **Prod only:** Linux host with an Nvidia driver and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-
-Install Go dependencies:
+- **Optional:** the runtime for any stdio MCP server you add (for example Node for `npx` servers). The prod image doesn't include one.
 
 ```bash
 go mod download
@@ -145,23 +75,33 @@ go mod download
 
 ## Configuration & Environment Variables
 
-Read from `.env` (dev) or `.env.prod` (prod compose). Templates: `.env.example`, `.env.prod.example`.
+Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every variable with comments.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `DISCORD_TOKEN` | yes | — | Discord bot token. |
-| `AI_PROVIDER_URL` | yes | — | LLM base URL; `/v1/chat/completions` is appended. Dev: `http://host.docker.internal:1234`. Prod: `http://ollama:11434`. |
-| `AI_MODEL` | no | `local-model` | Model name sent to the server. Must support tool calling (prod: `qwen2.5:7b`). |
-| `AI_TEMPERATURE` | no | `0.1` | Sampling temperature. Keep it low; higher values increase protocol violations. |
+| `AI_PROVIDER_URL` | yes | — | OpenAI-compatible base URL; `/v1/chat/completions` is appended. |
+| `AI_MODEL` | no | `local-model` | Model name. Must support tool calling (prod: `qwen2.5:7b`). |
+| `AI_API_KEY` | no | — | Bearer token for hosted APIs. |
+| `AI_TEMPERATURE` | no | `0.1` | Keep low; higher values increase protocol violations. |
+| `AI_MAX_TOKENS` / `AI_TIMEOUT` | no | `2048` / `10m` | Per-completion token cap and HTTP timeout. |
+| `AGENT_STRATEGY` | no | `plan_execute` | Reasoning strategy. |
+| `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn. |
+| `PLAN_MAX_STEPS_PER_STEP` / `PLAN_MAX_STEPS_TOTAL` | no | `4` / `12` | Executor LLM calls per step / per turn. |
+| `DISCORD_TOKEN` | one connector | — | Enables the Discord connector. |
 | `DISCORD_CHANNEL_ID` | no | *(all)* | Only handle this channel. |
-| `DATA_DIR` | no | `data` | Root for `memory/` and `scheduler/jobs/`. |
-| `PROMPTS_DIR` | no | `prompts` | Root for `system/` and `state/` prompt files. |
-| `PLAN_MAX_STEPS_PER_STEP` | no | `4` | Executor LLM calls allowed per plan step. |
-| `PLAN_MAX_STEPS_TOTAL` | no | `12` | Executor LLM calls allowed per turn. |
-| `WORKSPACE_AREA_<NAME>` | no | — | Host directory exposed as workspace area `<name>`. Add `_DESC` for a description, `_READONLY=true` to block writes. |
+| `DISCORD_ALLOWED_USERS` | no | *(all)* | Comma-separated user IDs to accept. |
+| `EMAIL_IMAP_ADDR` | one connector | — | Enables the email connector (`host:993` for TLS). |
+| `EMAIL_SMTP_ADDR`, `EMAIL_USERNAME`, `EMAIL_PASSWORD`, `EMAIL_FROM` | with email | — | Mailbox credentials and sender address. |
+| `EMAIL_ALLOWED` | with email | — | Comma-separated addresses tobee reads from and may send to. |
+| `EMAIL_MAILBOX` / `EMAIL_POLL_INTERVAL` | no | `INBOX` / `1m` | Folder and poll rate. |
+| `MCP_SERVER_<NAME>_COMMAND` or `_URL` | no | — | External MCP server over stdio or HTTP. Companions: `_BEARER_TOKEN`, `_ENV_<VAR>`, `_TRUSTED`, `_TIMEOUT`, `_SUBSCRIBE`, `_REPLY_TO`. |
+| `WORKSPACE_AREA_<NAME>` | no | — | Host directory exposed as workspace area `<name>`. `_DESC` for a description, `_READONLY=true` to block writes. |
 | `WORKSPACE_MAX_FILE_SIZE` | no | `262144` | Per-file byte cap for workspace areas. |
-| `LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error`. `debug` logs full prompts and responses. |
-| `OLLAMA_KEEP_ALIVE` | no | `5m` (Ollama) | Prod compose only. How long the model stays loaded in VRAM. |
+| `DATA_DIR` / `PROMPTS_DIR` | no | `data` / `prompts` | State and prompt roots. |
+| `LOG_LEVEL` | no | `info` | `info` logs the reasoning chain; `debug` adds every prompt message and raw response. |
+| `LOG_FORMAT` | no | `text` | `text` or `json`. |
+| `LOG_CONTENT_LIMIT` | no | `4000` | Max bytes of content per log field; `0` = unlimited. |
+| `OLLAMA_KEEP_ALIVE` | no | `5m` (Ollama) | Prod compose only. How long the model stays in VRAM. |
 
 Prod secrets in Jenkins: `tobee-discord-token`, `tobee-log-level`, `discord-pws-builds-channel-webhook`.
 
@@ -172,7 +112,7 @@ Prod secrets in Jenkins: `tobee-discord-token`, `tobee-log-level`, `discord-pws-
 ```bash
 git clone git@github.com:runyanjake/tobee.git
 cd tobee
-cp .env.example .env                       # set DISCORD_TOKEN; start LM Studio with a tool-capable model
+cp .env.example .env                       # set DISCORD_TOKEN and/or EMAIL_*; start LM Studio with a tool-capable model
 docker compose up --build                  # prompts and data are bind-mounted; restart to pick up prompt edits
 # or run natively:
 AI_PROVIDER_URL=http://localhost:1234 go run ./cmd/tobee
@@ -182,6 +122,7 @@ AI_PROVIDER_URL=http://localhost:1234 go run ./cmd/tobee
 
 ```bash
 go test ./...
+go test -race ./...
 gofmt -l .                                 # must print nothing
 go vet ./...
 docker build --target lint .               # same lint stage Jenkins runs
@@ -203,18 +144,31 @@ Jenkins (`Jenkinsfile`) runs the same flow: lint → render `.env.prod` → GPU 
 # Tail logs (dev: docker compose logs -f tobee)
 docker compose -f docker-compose.prod.yml logs -f tobee
 
-# Confirm boot (the CI smoke test looks for this line)
-docker compose -f docker-compose.prod.yml logs tobee | grep "tobee is running"
+# Confirm boot: both lines must appear
+docker compose -f docker-compose.prod.yml logs tobee | grep -E "tobee is running|discord: connected"
 
-# Find protocol violations
-docker compose -f docker-compose.prod.yml logs tobee | grep "PROTOCOL VIOLATION"
+# See which MCP servers connected and how many tools the model has
+docker compose -f docker-compose.prod.yml logs tobee | grep -E "mcphost: (connected|catalog ready)"
+
+# Follow one category of the reasoning chain (input | thinking | action | output | llm | system)
+docker compose -f docker-compose.prod.yml logs -f tobee | grep "cat=thinking"
+
+# Replay one turn end to end (task id from any of its lines)
+docker compose -f docker-compose.prod.yml logs tobee | grep "task=t-1a2b3c4d"
+
+# With LOG_FORMAT=json
+docker compose -f docker-compose.prod.yml logs --no-log-prefix tobee | jq -c 'select(.cat=="action")'
+
+# Find protocol violations and failing sources
+docker compose -f docker-compose.prod.yml logs tobee | grep -E "PROTOCOL VIOLATION|ingest: source stopped"
+
+# Inspect queued and parked tasks, memory, and scheduled jobs on the prod host
+ls /pwspool/software/tobee/tasks/pending /pwspool/software/tobee/tasks/parked
+ls -R /pwspool/software/tobee/memory
+cat /pwspool/software/tobee/scheduler/jobs/*.json
 
 # Check which models Ollama has pulled
 docker compose -f docker-compose.prod.yml exec ollama ollama list
-
-# Inspect memory and scheduled jobs on the prod host
-ls -R /pwspool/software/tobee/memory
-cat /pwspool/software/tobee/scheduler/jobs/*.json
 
 # Restart after prompt or config changes (prod prompts are baked in: rebuild)
 docker compose -f docker-compose.prod.yml up -d --build tobee

@@ -18,7 +18,10 @@ pipeline {
 
     // Non-secret instance config. Edit here to retarget the deploy.
     // AI_MODEL must support native tool-use (see .claude/DESIGN.md D-001).
-    AI_MODEL          = 'qwen2.5:7b'
+    // To move off the bundled Ollama, point AI_PROVIDER_URL at another
+    // OpenAI-compatible server and add AI_API_KEY as a Secret text credential.
+    AI_PROVIDER_URL    = 'http://ollama:11434'
+    AI_MODEL           = 'qwen2.5:7b'
     DISCORD_CHANNEL_ID = '1479309607724650649'
   }
 
@@ -54,15 +57,13 @@ pipeline {
           set -eu
           umask 077
           cat > .env.prod <<EOF
-AI_PROVIDER_URL=http://ollama:11434
+AI_PROVIDER_URL=${AI_PROVIDER_URL}
 AI_MODEL=${AI_MODEL}
 OLLAMA_KEEP_ALIVE=24h
 DISCORD_TOKEN=${DISCORD_TOKEN}
 DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID}
 DATA_DIR=data
 PROMPTS_DIR=prompts
-SESSION_IDLE_TIMEOUT=4h
-SESSION_TTL=168h
 LOG_LEVEL=${LOG_LEVEL}
 EOF
         '''
@@ -134,18 +135,21 @@ EOF
           tcid="$(docker compose -f "$COMPOSE_FILE" ps -q tobee)"
           [ -n "$tcid" ] || { echo "tobee container not found" >&2; exit 1; }
 
-          # cmd/tobee/main.go logs this line only after memory, the LLM client, and the
-          # Discord gateway have all initialised — a real end-to-end boot signal.
+          # "tobee is running" means every MCP server connected and every source
+          # started. Sources retry on failure instead of exiting, so a bad token
+          # would still boot: "discord: connected" is the end-to-end signal that
+          # the gateway actually authenticated.
           deadline=$(( $(date +%s) + 60 ))
           while :; do
-            if docker logs "$tcid" 2>&1 | grep -q "tobee is running"; then
+            logs="$(docker logs "$tcid" 2>&1)"
+            if echo "$logs" | grep -q "tobee is running" && echo "$logs" | grep -q "discord: connected"; then
               echo "tobee booted"; break
             fi
             st="$(docker inspect -f '{{.State.Status}}' "$tcid")"
             case "$st" in
               exited|dead) echo "tobee exited during boot" >&2; docker logs --tail=50 "$tcid" >&2; exit 1 ;;
             esac
-            [ "$(date +%s)" -ge "$deadline" ] && { echo "timed out waiting for tobee boot log" >&2; exit 1; }
+            [ "$(date +%s)" -ge "$deadline" ] && { echo "timed out waiting for tobee boot log" >&2; echo "$logs" | tail -50 >&2; exit 1; }
             sleep 2
           done
           echo "smoke test passed"

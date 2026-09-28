@@ -19,19 +19,19 @@ func TestRenderReplyVerbatim(t *testing.T) {
 		{
 			name:     "single-line verbatim goes in bare",
 			args:     replyCommitArgs{Spoken: "Here's where things stand."},
-			verbatim: []VerbatimBlock{{Tool: "status.summary", Body: summary}},
+			verbatim: []VerbatimBlock{{Tool: "status_summary", Body: summary}},
 			want:     "Here's where things stand.\n\n" + summary,
 		},
 		{
 			name:     "empty spoken yields the block alone",
 			args:     replyCommitArgs{},
-			verbatim: []VerbatimBlock{{Tool: "status.summary", Body: summary}},
+			verbatim: []VerbatimBlock{{Tool: "status_summary", Body: summary}},
 			want:     summary,
 		},
 		{
 			name:     "multi-line verbatim is fenced",
 			args:     replyCommitArgs{},
-			verbatim: []VerbatimBlock{{Tool: "status.report", Body: report}},
+			verbatim: []VerbatimBlock{{Tool: "status_report", Body: report}},
 			want:     "```\n" + report + "\n```",
 		},
 		{
@@ -40,7 +40,7 @@ func TestRenderReplyVerbatim(t *testing.T) {
 				Spoken:    "Done.",
 				Artifacts: []replyArtifact{{Lang: "go", Body: "package main"}},
 			},
-			verbatim: []VerbatimBlock{{Tool: "status.summary", Body: summary}},
+			verbatim: []VerbatimBlock{{Tool: "status_summary", Body: summary}},
 			want:     "Done.\n\n```go\npackage main\n```\n\n" + summary,
 		},
 		{
@@ -66,7 +66,7 @@ func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 	const body = "Discord is connected and saw 1 inbound message in the window."
 	got := renderReply(
 		replyCommitArgs{Spoken: "Discord checked and found 1 inbound message in the last hour."},
-		[]VerbatimBlock{{Tool: "status.summary", Body: body}},
+		[]VerbatimBlock{{Tool: "status_summary", Body: body}},
 	)
 	if !strings.Contains(got, body) {
 		t.Fatalf("renderReply() dropped the verbatim block:\n%s", got)
@@ -75,10 +75,10 @@ func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 
 // When the synthesiser dies, the loop falls back to whatever the tools
 // already rendered. On 2026-07-19 that path did not exist and the user
-// received an empty message despite status.summary having succeeded.
+// received an empty message despite status_summary having succeeded.
 func TestRenderReplyVerbatimOnlyIsDeliverable(t *testing.T) {
 	const body = "Discord is connected and saw 2 inbound messages in the window."
-	got := renderReply(replyCommitArgs{}, []VerbatimBlock{{Tool: "status.summary", Body: body}})
+	got := renderReply(replyCommitArgs{}, []VerbatimBlock{{Tool: "status_summary", Body: body}})
 	if got != body {
 		t.Fatalf("renderReply() = %q, want %q", got, body)
 	}
@@ -90,10 +90,10 @@ func TestRenderReplyVerbatimOnlyIsDeliverable(t *testing.T) {
 func TestAddVerbatim(t *testing.T) {
 	var turn Turn
 
-	turn.AddVerbatim("status.summary", "  all quiet  ")
-	turn.AddVerbatim("status.summary", "all quiet") // duplicate
-	turn.AddVerbatim("status.report", "")           // blank
-	turn.AddVerbatim("status.report", "details")
+	turn.AddVerbatim("status_summary", "  all quiet  ")
+	turn.AddVerbatim("status_summary", "all quiet") // duplicate
+	turn.AddVerbatim("status_report", "")           // blank
+	turn.AddVerbatim("status_report", "details")
 
 	if len(turn.Verbatim) != 2 {
 		t.Fatalf("Verbatim = %v, want 2 entries", turn.Verbatim)
@@ -126,7 +126,7 @@ func TestSynthesizeTemplateBranches(t *testing.T) {
 	if strings.Contains(without, "already handled") {
 		t.Fatalf("HasVerbatim=false leaked the pre-rendered section:\n%s", without)
 	}
-	if !strings.Contains(without, "reply.commit") {
+	if !strings.Contains(without, "reply_commit") {
 		t.Fatalf("base contract missing from synthesize template:\n%s", without)
 	}
 }

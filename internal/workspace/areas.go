@@ -8,7 +8,7 @@
 //	WORKSPACE_AREA_<NAME>_READONLY = true | 1 | yes        (optional)
 //
 // The <NAME> suffix is lowercased to form the area's identifier (the string
-// the model passes to workspace.* tools). Each area's filesystem is a
+// the model passes to workspace_* tools). Each area's filesystem is a
 // sandboxfs.FS rooted at the configured path; the resolve() guard prevents
 // the model from escaping that root via .., absolute paths, or volume
 // prefixes — exactly the same safety story as long-term memory (D-003).
@@ -41,7 +41,7 @@ type Area struct {
 	FS          *sandboxfs.FS
 }
 
-// AreaInfo is the metadata projection used for discovery (workspace.areas
+// AreaInfo is the metadata projection used for discovery (workspace_areas
 // tool, system-prompt injection). It deliberately omits FS / root paths
 // so callers cannot accidentally leak the host-side location.
 type AreaInfo struct {

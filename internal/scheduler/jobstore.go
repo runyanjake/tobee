@@ -17,21 +17,22 @@ import (
 // is set: Cron means recurring (any expression robfig/cron accepts, including
 // "@every 5m"), At means one-shot at that wall-clock time.
 //
-// Integration / Channel / Thread / User / UserName describe the originating
-// scope, so the synthetic Envelope published when the job fires routes back
-// to the same conversation and the active user-scope is preserved.
+// Connector / Channel / Thread / User / UserName describe the originating
+// scope, so the timer event emitted when the job fires routes back to the
+// same conversation and the active user-scope is preserved. Connector keeps
+// the "integration" JSON key so jobs saved before the rename still load.
 type Job struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name,omitempty"`
-	Cron        string    `json:"cron,omitempty"`
-	At          time.Time `json:"at,omitempty"`
-	Prompt      string    `json:"prompt"`
-	Integration string    `json:"integration"`
-	Channel     string    `json:"channel"`
-	Thread      string    `json:"thread,omitempty"`
-	User        string    `json:"user,omitempty"`
-	UserName    string    `json:"userName,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name,omitempty"`
+	Cron      string    `json:"cron,omitempty"`
+	At        time.Time `json:"at,omitempty"`
+	Prompt    string    `json:"prompt"`
+	Connector string    `json:"integration"`
+	Channel   string    `json:"channel"`
+	Thread    string    `json:"thread,omitempty"`
+	User      string    `json:"user,omitempty"`
+	UserName  string    `json:"userName,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 func (j Job) IsRecurring() bool { return j.Cron != "" }

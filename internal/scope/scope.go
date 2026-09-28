@@ -1,57 +1,63 @@
 // Package scope carries the active user identity through a turn.
 //
 // One UserScope is attached to the per-turn context.Context by the agent
-// loop; downstream tool handlers, reporters, and abilities read it back
-// to route memory writes, filter reports, and label outputs.
-//
-// Scope is intentionally context-bound, not a shared mutable singleton —
-// the serial worker model (D-005) makes either work, but context is the
-// idiomatic Go choice and survives any future move away from serial.
+// runtime. In-process MCP servers cannot see that context, so the MCP
+// host also sends the scope as request metadata (ToMeta / FromMeta) and
+// each built-in server re-attaches it before running a tool handler.
 package scope
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
-	"github.com/runyanjake/tobee/internal/integrations"
+	"github.com/runyanjake/tobee/internal/event"
 )
 
-// UserScope identifies the originating turn: the user, the integration that
+// MetaKey is the `_meta` key the scope travels under on tools/call. It
+// is only sent to trusted servers (D-038).
+const MetaKey = "tobee/scope"
+
+// UserScope identifies the originating turn: the user, the connector that
 // delivered the inbound event, and the channel/thread the reply will land in.
-// Empty User means no user is attached (e.g. scheduler ticks). Channel and
-// Thread are pure routing hints — they do not affect Key() / Dir(), which
-// remain user-only and safe for filesystem use.
+// Empty User means no user is attached (e.g. a resource notification).
+// Channel and Thread are pure routing hints — they do not affect Key() /
+// Dir(), which remain user-only and safe for filesystem use.
 type UserScope struct {
-	Integration string
-	User        string
-	UserName    string
-	Channel     string
-	Thread      string
+	Connector string `json:"connector"`
+	User      string `json:"user,omitempty"`
+	UserName  string `json:"userName,omitempty"`
+	Channel   string `json:"channel"`
+	Thread    string `json:"thread,omitempty"`
 }
 
-// FromEnvelope derives a scope from an inbound envelope. Returns the
-// zero value if the envelope has no user attached.
-func FromEnvelope(e integrations.Envelope) UserScope {
+// FromEvent derives a scope from an inbound event.
+func FromEvent(e event.Event) UserScope {
 	return UserScope{
-		Integration: e.Integration,
-		User:        e.User,
-		UserName:    e.UserName,
-		Channel:     e.Channel,
-		Thread:      e.Thread,
+		Connector: e.Origin.Connector,
+		User:      e.Actor.ID,
+		UserName:  e.Actor.Name,
+		Channel:   e.Origin.Channel,
+		Thread:    e.Origin.Thread,
 	}
+}
+
+// Address is the delivery address of the turn this scope belongs to.
+func (s UserScope) Address() event.Address {
+	return event.Address{Connector: s.Connector, Channel: s.Channel, Thread: s.Thread}
 }
 
 // HasUser reports whether the scope identifies a specific user.
 func (s UserScope) HasUser() bool { return s.User != "" }
 
-// Key returns a sanitized "<integration>/<user>" identifier safe for
+// Key returns a sanitized "<connector>/<user>" identifier safe for
 // use as a filesystem path component. Characters outside [a-zA-Z0-9-_]
 // are replaced with '_'.
 func (s UserScope) Key() string {
 	if !s.HasUser() {
 		return ""
 	}
-	return sanitize(s.Integration) + "/" + sanitize(s.User)
+	return sanitize(s.Connector) + "/" + sanitize(s.User)
 }
 
 // Dir returns the memory.FS-relative directory for this scope's user
@@ -75,6 +81,35 @@ func With(ctx context.Context, s UserScope) context.Context {
 func From(ctx context.Context) (UserScope, bool) {
 	s, ok := ctx.Value(ctxKey{}).(UserScope)
 	return s, ok
+}
+
+// ToMeta renders s as a `_meta` value.
+func (s UserScope) ToMeta() map[string]any {
+	return map[string]any{
+		"connector": s.Connector,
+		"user":      s.User,
+		"userName":  s.UserName,
+		"channel":   s.Channel,
+		"thread":    s.Thread,
+	}
+}
+
+// FromMeta reads a scope back out of a request's `_meta`. The second
+// return is false when none was sent.
+func FromMeta(meta map[string]any) (UserScope, bool) {
+	raw, ok := meta[MetaKey]
+	if !ok {
+		return UserScope{}, false
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return UserScope{}, false
+	}
+	var s UserScope
+	if err := json.Unmarshal(b, &s); err != nil {
+		return UserScope{}, false
+	}
+	return s, true
 }
 
 func sanitize(s string) string {

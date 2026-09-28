@@ -3,13 +3,13 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/llm"
+	"github.com/runyanjake/tobee/internal/telemetry"
 )
 
-const replyCommitTool = "reply.commit"
+const replyCommitTool = "reply_commit"
 
 var replyCommitSchema = json.RawMessage(`{
   "type": "object",
@@ -41,12 +41,12 @@ type replyCommitArgs struct {
 	Artifacts []replyArtifact `json:"artifacts"`
 }
 
-const synthNudge = "PROTOCOL VIOLATION: your previous response was not a reply.commit tool call. You must call reply.commit exactly once with the reply's spoken text and any artifacts. Free-form text is not accepted. Retry."
+const synthNudge = "PROTOCOL VIOLATION: your previous response was not a reply_commit tool call. You must call reply_commit exactly once with the reply's spoken text and any artifacts. Free-form text is not accepted. Retry."
 
 // Synthesizer runs against the shared Conversation to produce the
 // user-facing reply. Appends the rendered synthesize state template
-// as a user message, then requires reply.commit with
-// tool_choice=required. The Discord message text is composed in Go by
+// as a user message, then requires reply_commit with
+// tool_choice=required. The reply text is composed in Go by
 // renderReply from the structured output — spoken + fenced artifacts.
 type Synthesizer struct {
 	client *llm.Client
@@ -64,6 +64,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 	if s == nil || s.client == nil {
 		return "", fmt.Errorf("synthesizer: not configured")
 	}
+	ctx := telemetry.With(t.Ctx, "phase", "synthesize")
 
 	userMsg, err := s.states.RenderPhase("synthesize", StateData{
 		Plan:        t.Conversation.Plan,
@@ -80,22 +81,16 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 		InputSchema: replyCommitSchema,
 	}}
 
-	slog.Debug("agent: synthesizer: begin", "plan_steps", len(t.Conversation.Plan.Steps))
-
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		logPrompt("agent: synthesizer: prompt", t.Conversation.Messages)
-		resp, err := s.client.Call(t.Ctx, t.Conversation.Messages, toolSpec, llm.ToolChoiceRequired)
+		resp, err := callLLM(ctx, s.client, t.Conversation, toolSpec, llm.ToolChoiceRequired)
 		if err != nil {
-			slog.Error("agent: synthesizer: LLM ERROR",
-				"attempt", attempt, "err", err, "ctx_err", t.Ctx.Err())
 			lastErr = err
-			if t.Ctx.Err() != nil {
+			if ctx.Err() != nil {
 				return "", fmt.Errorf("synthesizer: llm: %w", err)
 			}
 			continue
 		}
-		logResponse("agent: synthesizer: llm response", resp, "attempt", attempt)
 
 		asst := llm.Message{
 			Role:      llm.RoleAssistant,
@@ -121,14 +116,7 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 			return renderReply(args, t.Verbatim), nil
 		}
 
-		slog.Error("agent: synthesizer: PROTOCOL VIOLATION",
-			"attempt", attempt,
-			"expected_tool", replyCommitTool,
-			"finish", resp.Finish,
-			"text_chars", len(resp.Text),
-			"text_preview", oneLine(resp.Text),
-			"tool_calls_count", len(resp.ToolCalls),
-			"tool_calls", renderToolCalls(resp.ToolCalls))
+		logViolation(ctx, attempt, replyCommitTool, resp)
 		lastErr = fmt.Errorf("protocol violation: no %s call", replyCommitTool)
 
 		if attempt == 0 {
@@ -139,16 +127,16 @@ func (s *Synthesizer) Finalize(t *Turn) (string, error) {
 	return "", fmt.Errorf("synthesizer: exhausted retries: %w", lastErr)
 }
 
-// renderReply composes the final Discord message from the structured
-// reply.commit output: spoken text on top, each artifact as a fenced
+// renderReply composes the final reply text from the structured
+// reply_commit output: spoken text on top, each artifact as a fenced
 // block with an optional language hint, then any verbatim tool output
 // appended by code. Empty spoken + empty artifacts + no verbatim yields
 // an empty string, which the deliver step logs as a failure.
 //
 // Verbatim blocks are appended here rather than passed through the
-// model. Single-line output (status.summary) reads as prose and goes in
-// bare; multi-line output (status.report, with its `## subsystem`
-// headings) is fenced so Discord renders it as written.
+// model. Single-line output (status_summary) reads as prose and goes in
+// bare; multi-line output (status_report, with its `## subsystem`
+// headings) is fenced so it renders as written.
 func renderReply(args replyCommitArgs, verbatim []VerbatimBlock) string {
 	var sb strings.Builder
 	spoken := strings.TrimSpace(args.Spoken)

@@ -5,10 +5,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/runyanjake/tobee/internal/integrations"
-	"github.com/runyanjake/tobee/internal/scope"
-	"github.com/runyanjake/tobee/internal/workspace"
+	"github.com/runyanjake/tobee/internal/event"
+	"github.com/runyanjake/tobee/internal/mcphost"
 )
+
+// ServerLister is the slice of the MCP host the context builder reads.
+type ServerLister interface {
+	Servers() []mcphost.ServerInfo
+}
 
 // ContextBuilder builds the one system message that seeds every
 // per-request Conversation (D-029). The chat runs one continuous
@@ -16,8 +20,8 @@ import (
 // once at Messages[0], not re-sent per phase. Phase-specific
 // instructions ride in as user-role state templates (prompts/state/).
 type ContextBuilder struct {
-	Persona   string           // system prompt blob (prompts/system/*.md concatenated)
-	Workspace *workspace.Areas // configured host-file areas (nil = none)
+	Persona string       // system prompt blob (prompts/system/*.md concatenated)
+	Servers ServerLister // connected MCP servers (nil = none)
 
 	// Now is the clock stamped into the per-turn context tag. nil means
 	// time.Now; tests set it for a deterministic system message.
@@ -31,11 +35,11 @@ func (b *ContextBuilder) now() time.Time {
 	return time.Now()
 }
 
-// ComposeSystem renders the system message once per request. Contains
-// the loaded system prompt, the workspace-areas list (if any), a small
-// per-turn context tag, and the memory-tools hint. This message sits
-// at Messages[0] for the whole request.
-func (b *ContextBuilder) ComposeSystem(env integrations.Envelope) string {
+// ComposeSystem renders the system message once per request: the system
+// prompt, a <servers> block built from the MCP host (D-033), and a small
+// per-turn <context> tag. Stable sections come first for prefix caching
+// (D-017).
+func (b *ContextBuilder) ComposeSystem(ev event.Event) string {
 	var sb strings.Builder
 
 	if b.Persona != "" {
@@ -43,58 +47,64 @@ func (b *ContextBuilder) ComposeSystem(env integrations.Envelope) string {
 		sb.WriteString("\n\n")
 	}
 
-	if b.Workspace != nil && b.Workspace.Len() > 0 {
-		sb.WriteString("<workspace_areas>\n")
-		for _, ar := range b.Workspace.List() {
-			fmt.Fprintf(&sb, "- %s", ar.Name)
-			if ar.ReadOnly {
-				sb.WriteString(" (read-only)")
-			}
-			if ar.Description != "" {
-				fmt.Fprintf(&sb, ": %s", ar.Description)
-			}
-			sb.WriteByte('\n')
+	if b.Servers != nil {
+		if block := renderServers(b.Servers.Servers()); block != "" {
+			sb.WriteString(block)
+			sb.WriteString("\n\n")
 		}
-		sb.WriteString("</workspace_areas>\n\n")
 	}
 
 	// The model has no clock of its own. Without this it dates timestamps
 	// from its training cutoff — a `since`/`at` it invents lands years off.
 	now := b.now()
 	fmt.Fprintf(&sb, "<context>now=%s (%s)", now.Format(time.RFC3339), now.Format("Monday, 2 January 2006"))
-	fmt.Fprintf(&sb, " integration=%s channel=%s", env.Integration, env.Channel)
-	if env.Thread != "" {
-		fmt.Fprintf(&sb, " thread=%s", env.Thread)
+	fmt.Fprintf(&sb, " source=%s kind=%s", ev.Source, ev.Kind)
+	fmt.Fprintf(&sb, " connector=%s channel=%s", ev.Origin.Connector, ev.Origin.Channel)
+	if ev.Origin.Thread != "" {
+		fmt.Fprintf(&sb, " thread=%s", ev.Origin.Thread)
 	}
-	if env.User != "" {
-		if env.UserName != "" {
-			fmt.Fprintf(&sb, " user=%s id=%s", env.UserName, env.User)
+	if ev.Actor.ID != "" {
+		if ev.Actor.Name != "" {
+			fmt.Fprintf(&sb, " user=%s id=%s", ev.Actor.Name, ev.Actor.ID)
 		} else {
-			fmt.Fprintf(&sb, " user=%s", env.User)
+			fmt.Fprintf(&sb, " user=%s", ev.Actor.ID)
 		}
+	} else {
+		// memory's scope="user" and user_ask fail without a user; say so
+		// up front rather than let the model find out by error.
+		sb.WriteString(" user=none")
 	}
-	sb.WriteString("</context>\n\n")
+	sb.WriteString("</context>")
 
-	sb.WriteString(memoryHint(scope.FromEnvelope(env).HasUser()))
-
-	return strings.TrimRight(sb.String(), "\n")
+	return sb.String()
 }
 
-// memoryHint is the small block that names the memory paths and tools.
-// The model tool-calls memory.* to fetch actual content on demand.
-func memoryHint(hasUser bool) string {
-	var sb strings.Builder
-	sb.WriteString("<memory>\n")
-	sb.WriteString("Your stored knowledge is not in this prompt. Each turn is a fresh chat with no memory of prior turns — anything you need to remember across messages must be written to and read from these tools:\n")
-	sb.WriteString("- `memory.read({path, scope})` — read a specific file. scope=\"user\" for the current user, \"shared\" for cross-user.\n")
-	sb.WriteString("- `memory.search({query, scope})` — case-insensitive substring hits across a scope (default \"both\").\n")
-	sb.WriteString("- `memory.list({dir, scope})` — enumerate files under a scope.\n")
-	sb.WriteString("- `memory.write({path, content, scope})` — create or overwrite a file. Save preferences, decisions, and facts here.\n")
-	sb.WriteString("- `memory.append({path, content, scope})` — append to a file, creating it if needed.\n")
-	sb.WriteString("Start with `memory.read({path: \"INDEX.md\", scope: \"user\"})` for the user's table of contents.\n")
-	if !hasUser {
-		sb.WriteString("No user is attached to this turn; only scope=\"shared\" is available.\n")
+// renderServers lists every connected MCP server with its instructions.
+// Untrusted servers get a name and tool list only: their instructions are
+// third-party text and do not belong in the system prompt (D-038).
+func renderServers(servers []mcphost.ServerInfo) string {
+	if len(servers) == 0 {
+		return ""
 	}
-	sb.WriteString("</memory>")
+	var sb strings.Builder
+	sb.WriteString("<servers>\n")
+	for i, s := range servers {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		fmt.Fprintf(&sb, "## %s", s.Name)
+		if !s.Trusted {
+			sb.WriteString(" (external)")
+		}
+		sb.WriteByte('\n')
+		if s.Instructions != "" {
+			sb.WriteString(s.Instructions)
+			sb.WriteByte('\n')
+		}
+		if len(s.Tools) > 0 {
+			fmt.Fprintf(&sb, "Tools: %s\n", strings.Join(s.Tools, ", "))
+		}
+	}
+	sb.WriteString("</servers>")
 	return sb.String()
 }
