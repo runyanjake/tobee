@@ -19,7 +19,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | 2026-07-19 | `a974c76` … `1f2f5c5` | User text split from `<phase>` directives. Verbatim enforced in code, clock stamp, relative status `window` (D-030). Salvage parser added (D-031) then reverted. Temperature default 0.7 → 0.1, now configurable. Planner `direct_reply` fast path (D-032). |
 | 2026-09-28 | `e9b81ea` … `ab78cd9` (on `main`) | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. Prompts cut to about a quarter of their size, with every `tool({args})` example removed. `llm.Model` interface; the OpenAI-compatible provider uses schema-constrained structured output instead of `tool_choice`, which Ollama ignores (D-041). MCP resources: memory and workspace files as `memory://` / `workspace://` URIs read through `resources_read`; the system prompt comes from pinned resources (D-042). Fixed a cross-user path traversal in the memory tools. Fixed plan/execute/synthesize phases replaced by one agent loop with `reply` and `plan` tools (D-043); tool categories from MCP annotations (D-044); send tools refuse the current conversation (a greeting had been answered twice). Per-person sessions across connectors (D-045, D-046), code-enforced grounding with action lines and approvals, `memory_delete` (D-047), no more date-stamped filenames (D-048). |
 
-| 2026-09-29 | (working tree) | One wall clock from `TZ`, stamped in `<context>` and used for every user-facing time (D-049). Discord addressing rewritten: DMs, role pings, and joined threads are addressed, each rule logged as `addressed_by`, and `DISCORD_CHANNEL_ID` no longer scopes out DMs or threads of that channel (D-050). |
+| 2026-09-29 | (working tree) | Two-tier long-term memory replacing D-026: a capped, pinned `lessons.md` written by a reflection pass over closed sessions that failed, gated by `AGENT_REFLECT` (D-052). Failure reporting and the Reflexion record: `Turn.Problems`, the "⚠️ Didn't finish cleanly" block, repeated calls closing their tool, and `session.Outcome` carried into later turns and the transcript (D-051). One wall clock from `TZ`, stamped in `<context>` and used for every user-facing time (D-049). Discord addressing rewritten: DMs, role pings, and joined threads are addressed, each rule logged as `addressed_by`, and `DISCORD_CHANNEL_ID` no longer scopes out DMs or threads of that channel (D-050). |
 
 ## Major Refactors & Migrations
 
@@ -37,7 +37,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 - **Conversation state:** rolling summary, then saved ring buffer (D-016), then none (D-027), then none except parked questions (D-036), then one code-recorded session per person (D-045, D-046).
 - **Tools:** `tools.Registry` plus Go tool packs, then MCP servers behind `mcphost.Host` (D-033). `internal/tools/{memory,workspace,schedule,status}` → `internal/servers/*`; `internal/tools/datedname` → `internal/datedname` → deleted with D-048. `prompts/system/05-tools.md` catalogue → `prompts/servers/<name>.md` instructions.
 - **Input and output:** `integrations.Bus` (drop-on-full channel) and `Envelope` → `ingest.Engine`, `taskqueue.Queue`, and `event.Event` (D-034). `agent.Replies` → `delivery.Router` (D-035). `internal/integrations/discord` → `internal/connectors/discord`. The idle static tick `Scheduler` was deleted; `JobManager` is an ingest source.
-- **Memory access:** always-injected INDEX / profile / preferences, then tool-only recall (D-026), then resource reads by URI (D-042).
+- **Memory access:** always-injected INDEX / profile / preferences, then tool-only recall (D-026), then resource reads by URI (D-042), then two tiers — tool-read facts plus one pinned, capped `lessons.md` (D-052).
 - **Security fix (2026-09-28):** memory tools joined the model's path onto the scope directory and relied on `sandboxfs`, which only confines to the whole memory tree. `../<other-user>/…` could read or overwrite another user's files. Paths are now confined to the scope root. A test covers read, write, append, and list.
 - **Prompt files:** `context/{PROMPT,SOUL,TOOLS}.md` → `prompts/persona.md` (D-006) → `prompts/personality/` → `prompts/persona/` (D-012, D-018) → `prompts/system/` plus `prompts/state/` (D-028, D-029). `prompts/planner.md`, `synthesizer.md`, `triage.md`, `summarizer.md` were deleted.
 - **Filesystem:** `internal/memory` FS extracted to `internal/sandboxfs` and shared with workspace areas (D-019).
@@ -59,6 +59,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | D-023 | Unified act-loop plus always-on synthesis | D-024 |
 | D-024 (partial) | Text-wrap planner fallback; synthesis given only the plan; per-step tool scopes; mandatory steps for every turn | D-025, D-029, D-029, D-032 |
 | D-026 (partial) | Session summary still pre-loaded | D-027 |
+| D-026 | Memory is never pre-loaded into the prompt and never pinned; recall is always a read | D-052. Removed from the active table: facts stay tool-only, but a capped `lessons.md` is pinned. |
 | D-031 | Salvage parser for tool calls written as text | Reverted in `3e818f9`; entry removed from the log |
 | D-024 | Tool-using turns run plan → announce → execute → synthesize | D-043 |
 | D-032 | Planner may commit `direct_reply` with zero steps | D-043. Replying directly is just calling `reply` first. |
@@ -78,6 +79,11 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 - **Protocol violations were `tool_choice` being ignored.** Found 2026-09-28: Ollama's OpenAI endpoint has no `tool_choice` field, so `required` was never enforced. D-041 replaces it with constrained decoding. Checked against LM Studio (Qwen3 27B: a greeting got a direct reply, a lookup made a real tool call, zero violations). Prod Ollama with `qwen2.5:7b` is not yet verified; see [GOALS.md](GOALS.md#current-operational-priorities).
 - **Premature replies.** The model can call `reply` from its own knowledge instead of looking something up. Only the `turn` directive guards against this (D-043).
+- **A false reply is contradicted, not prevented.** Code appends what went wrong (D-051), but the model's own sentence can still be wrong — as in the 2026-09-29 "I couldn't find any reminders" turn. The warning block is what tells the user to distrust it.
+- **Nothing makes the model choose the right tool.** In that same turn `schedule_cancel` was offered, needed no approval, and was never called. Closing a repeated tool ends the loop sooner but doesn't point at the tool that would have worked.
+- **A wrong lesson is sticky.** A lesson the reflection pass gets wrong sits in every prompt for that person until it ages past the 1 KiB cap or a human edits `lessons.md` (D-052). Nothing validates a lesson against later turns.
+- **Reflection depends on a session closing.** Lessons are drawn at archive time, so a conversation that stays active never produces any, and a crash before the idle sweep loses them.
+- **Lessons don't transfer between people** (D-052), so a second user re-learns the same thing.
 - **Planning is optional.** The model decides whether to call `plan`; a small model may skip it on multi-step work.
 - **Serial throughput.** One turn at a time, up to 2m each. A full queue (256) rejects new events with an ERROR log, and the sender is not notified.
 - **At-least-once tasks.** A crash mid-turn replays the task on boot, which can repeat a reply or a side effect. A task is dropped after 2 attempts.
@@ -107,6 +113,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 ### Config and deploy drift
 
+- The reflection pass has no budget of its own: it uses the model's own `AI_TIMEOUT` and the root context, so a slow model delays the idle sweep.
 - `Dockerfile` has no `USER` directive (runs as root).
 - `Jenkinsfile` doesn't set `AI_TEMPERATURE`, `AI_API_KEY`, or any email or MCP variables; the defaults apply.
 
@@ -119,7 +126,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 Tests cover:
 
-- `internal/agent`: context builder, `renderReply`, and end-to-end runtime tests against a scripted `llm.Model` (ask → park → resume; approval granted and declined; verbatim delivery; action lines; the logged chain; unreadable output dropped)
+- `internal/agent`: context builder, `renderReply`, problem rendering and recovery, and end-to-end runtime tests against a scripted `llm.Model` (ask → park → resume; approval granted and declined; verbatim delivery; action lines; the logged chain; unreadable output dropped; a repeated read closing its tool; outcomes carried into the next turn and absent on a clean one)
 - `internal/llm/openai`: request shape (structured output, no `tools` / `tool_choice`), schema building, ordering, and sanitizing, the tool menu, invalid-output rejection, native-call acceptance
 - `internal/mcphost`: catalog, results, trust gating, server config, pinned resources
 - `internal/taskqueue`: persistence, poison tasks, park/resume, expiry, capacity
@@ -129,7 +136,8 @@ Tests cover:
 - `internal/connectors/email`: body parsing, threading headers, outbound allowlist
 - `internal/connectors/discord`: every addressing rule that needs no gateway lookup, role-ping matching, DM scoping
 - `internal/scheduler`: local wall-clock formatting of fire times
-- `internal/servers/{memory,status,system}`: memory path confinement and archiving, status rendering, pinned prompt resources
+- `internal/servers/{memory,status,system}`: memory path confinement and archiving, lessons pinning per user with caps, status rendering, pinned prompt resources
+- `internal/agent` reflection: lessons drawn from recorded failures, clean sessions skipped, empty and unreadable answers dropped, disabled is safe
 
 No tests cover:
 

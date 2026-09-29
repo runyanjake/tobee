@@ -28,8 +28,19 @@ const (
 	invalidNudge = "Your last response could not be read as a tool call. Call exactly one tool."
 	budgetNudge  = "You are out of steps. Reply now with what you have, and say what wasn't done."
 	verbatimNote = "\n\n(Shown to the user as-is with your reply. Don't repeat it.)"
-	repeatNote   = "\n\n(Same call as earlier in this turn; nothing has changed since. Use this result.)"
+	// A repeat is refused by argument set, never by tool: widening a search
+	// after it came back empty is the right next move, so the note asks for it.
+	repeatNote = "\n\n(Same arguments as earlier in this turn, so this was not run again. " +
+		"Use this result, call it with different arguments if you need different information, " +
+		"or call another tool.)"
+	closedNote = "\n\n(Same arguments again. %s is closed for the rest of this turn: " +
+		"call a different tool or reply with what you have.)"
 )
+
+// maxSuppressed is how many refused repeats a tool gets before it is closed.
+// Refusing the exact call is not enough on its own: the context barely
+// changes, so a low-temperature model makes the same choice again (D-051).
+const maxSuppressed = 2
 
 // Loop is the tool-calling agent loop (ReAct): each model call picks one
 // tool, until the model calls reply. Planning and replying are tools the
@@ -71,21 +82,27 @@ func (l *Loop) Handle(t *Turn) {
 
 	invalid, failures := 0, 0
 	seen := map[string]string{} // call key → result, cleared when anything changes
+	st := newRepeatState()
 	for step := 1; step <= l.maxSteps; step++ {
+		t.Steps = step
 		sctx := telemetry.With(ctx, "step", step)
-		d, err := decide(sctx, l.model, conv, l.offer())
+		d, err := decide(sctx, l.model, conv, l.offer(st.closed))
 		switch {
 		case errors.Is(err, llm.ErrInvalidDecision):
 			// The unreadable output is dropped so later calls can't continue it.
 			if invalid++; invalid > 1 {
+				t.AddProblem("unreadable", "", "the model's answer wasn't a usable tool call, twice over")
 				return
 			}
+			t.AddRecovered("unreadable", "", "the model's answer wasn't a usable tool call; the step was retried")
 			conv.AppendHarness(llm.Message{Role: llm.RoleUser, Content: invalidNudge})
 			continue
 		case err != nil:
 			if failures++; failures > 1 || ctx.Err() != nil {
+				t.AddProblem("model_error", "", firstLine(err.Error()))
 				return
 			}
+			t.AddRecovered("model_error", "", firstLine(err.Error()))
 			continue
 		}
 
@@ -105,7 +122,7 @@ func (l *Loop) Handle(t *Turn) {
 				l.askApproval(sctx, t, call)
 				return
 			}
-			l.use(sctx, t, call, seen)
+			l.use(sctx, t, call, seen, st)
 			if t.Await != nil {
 				return
 			}
@@ -114,27 +131,50 @@ func (l *Loop) Handle(t *Turn) {
 
 	// Out of steps: one last call that can only reply.
 	telemetry.Logger(ctx).Warn("agent: step budget spent; forcing a reply", "max_steps", l.maxSteps)
+	t.AddProblem("budget", "", fmt.Sprintf("ran out of steps after %d model calls", l.maxSteps))
 	conv.AppendHarness(llm.Message{Role: llm.RoleUser, Content: budgetNudge})
 	d, err := decide(ctx, l.model, conv, []llm.ToolSpec{replySpec()})
 	if err == nil {
 		l.reply(ctx, t, d.Call)
 		return
 	}
-	if len(t.Verbatim) > 0 {
-		// A tool already rendered an answer; send that rather than nothing (D-030).
-		t.Reply = strings.TrimSpace(renderReply(replyArgs{}, t.Verbatim, t.Actions))
-	}
+	t.AddProblem("model_error", "", "the final reply could not be produced")
+	// A tool may already have rendered an answer, and the problem list is worth
+	// sending even on its own: silence hides what went wrong (D-051).
+	t.Reply = strings.TrimSpace(renderReply(replyArgs{}, t.Verbatim, t.Actions, t.Problems))
 }
 
-// offer is the host's whole catalog plus the loop's own tools (D-029).
-func (l *Loop) offer() []llm.ToolSpec {
-	return append(l.tools.Tools(), replySpec(), llm.ToolSpec{
+// offer is the host's whole catalog plus the loop's own tools (D-029), minus
+// any the turn has closed. Closing is enforced by leaving the tool out of the
+// decision schema, so the model cannot call it again (D-051).
+func (l *Loop) offer(closed map[string]bool) []llm.ToolSpec {
+	catalog := l.tools.Tools()
+	if len(closed) > 0 {
+		open := make([]llm.ToolSpec, 0, len(catalog))
+		for _, t := range catalog {
+			if !closed[t.Name] {
+				open = append(open, t)
+			}
+		}
+		catalog = open
+	}
+	return append(catalog, replySpec(), llm.ToolSpec{
 		Name: planTool,
 		Description: "Only for work with several distinct steps: set the checklist the user sees. " +
 			"Call again with updated statuses as steps finish. Never for a single lookup or a chat reply.",
 		InputSchema: planSchema,
 		Category:    llm.CategoryFinish,
 	})
+}
+
+// repeatState tracks refused repeats per tool and which tools that has closed.
+type repeatState struct {
+	suppressed map[string]int
+	closed     map[string]bool
+}
+
+func newRepeatState() *repeatState {
+	return &repeatState{suppressed: map[string]int{}, closed: map[string]bool{}}
 }
 
 func replySpec() llm.ToolSpec {
@@ -153,7 +193,7 @@ func (l *Loop) reply(ctx context.Context, t *Turn, call llm.ToolCall) {
 		telemetry.Logger(ctx).Error("agent: reply decode failed", "err", err)
 		return
 	}
-	t.Reply = strings.TrimSpace(renderReply(args, t.Verbatim, t.Actions))
+	t.Reply = strings.TrimSpace(renderReply(args, t.Verbatim, t.Actions, t.Problems))
 }
 
 func (l *Loop) plan(ctx context.Context, t *Turn, call llm.ToolCall) {
@@ -197,16 +237,26 @@ func (l *Loop) showPlan(ctx context.Context, t *Turn) {
 	t.PlanMessageID = id
 }
 
-// use runs one MCP tool call and appends its result. A repeat of an
-// earlier identical call returns the earlier result without running it,
-// unless something has changed since.
-func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[string]string) {
+// use runs one MCP tool call and appends its result. A call with arguments
+// already used this turn is not run again; the same tool with different
+// arguments always is. Only a tool that keeps being called identically is
+// closed, and then by name, as the last way to break a stuck loop (D-051).
+func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[string]string, st *repeatState) {
 	name := call.Function.Name
 	key := name + "\x00" + canonicalJSON(call.Function.Arguments)
 	if prev, ok := seen[key]; ok {
-		telemetry.Log(ctx, slog.LevelInfo, telemetry.Action, "agent: tool call repeated; not run",
-			"tool", name, "call_id", call.ID)
-		t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Name: name, Content: prev + repeatNote})
+		note := repeatNote
+		st.suppressed[name]++
+		detail := "called again with the same arguments; not run a second time"
+		if st.suppressed[name] >= maxSuppressed {
+			st.closed[name] = true
+			note = fmt.Sprintf(closedNote, name)
+			detail = fmt.Sprintf("called with the same arguments %d times; closed for the turn", st.suppressed[name]+1)
+		}
+		telemetry.Log(ctx, slog.LevelWarn, telemetry.Action, "agent: tool call repeated; not run",
+			"tool", name, "call_id", call.ID, "suppressed", st.suppressed[name], "closed", st.closed[name])
+		t.AddProblem("repeated", name, detail)
+		t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Name: name, Content: prev + note})
 		return
 	}
 
@@ -220,9 +270,11 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 	case err != nil:
 		content = fmt.Sprintf("error: %v", err)
 		status, level = "failed", slog.LevelWarn
+		t.AddProblem("tool_error", name, firstLine(err.Error()))
 	case res.IsError:
 		content = "error: " + res.Text
 		status, level = "error", slog.LevelWarn
+		t.AddProblem("tool_error", name, firstLine(res.Text))
 	case res.Await != nil:
 		status = "await"
 		t.Await = res.Await
@@ -241,8 +293,10 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 		seen[key] = content
 		return
 	}
-	// Anything that isn't a pure read may have changed what a read returns.
+	// Anything that isn't a pure read may have changed what a read returns,
+	// so earlier results are stale and repeating one is no longer a loop.
 	clear(seen)
+	clear(st.suppressed)
 	if status != "await" {
 		t.Actions = append(t.Actions, Action{Tool: name, OK: status == "ok" || status == "verbatim", Result: firstLine(content)})
 	}
@@ -286,10 +340,11 @@ func (l *Loop) resolveApproval(ctx context.Context, t *Turn, p *taskqueue.Pendin
 		t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: p.ID, Name: p.Tool,
 			Content: "Not run: the user did not approve."})
 		t.Actions = append(t.Actions, Action{Tool: p.Tool, OK: false, Result: "not run: not approved"})
+		t.AddProblem("declined", p.Tool, "the user did not approve it")
 		return
 	}
 	telemetry.Log(ctx, slog.LevelInfo, telemetry.Action, "agent: approval granted", "tool", p.Tool)
-	l.use(ctx, t, call, map[string]string{})
+	l.use(ctx, t, call, map[string]string{}, newRepeatState())
 }
 
 // approved accepts only a plain yes. Anything else — including silence

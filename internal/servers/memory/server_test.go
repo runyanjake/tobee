@@ -129,3 +129,113 @@ func TestArchiveTranscriptLandsInConversations(t *testing.T) {
 		}
 	}
 }
+
+// Lessons are the one pinned memory file (D-052): bounded, per user, and
+// framed so the model can't read its own past guesses as facts.
+func TestLessonsArePinnedPerUserAndCapped(t *testing.T) {
+	h, fs, ctx := setup(t)
+
+	// Nothing pinned before anything has been learned.
+	pinned, err := h.Pinned(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pinned {
+		if strings.Contains(p.Text, "<lessons>") {
+			t.Fatalf("an empty lessons file was pinned: %q", p.Text)
+		}
+	}
+
+	now := time.Date(2026, 9, 29, 16, 0, 0, 0, time.UTC)
+	if err := AppendLessons(fs, "discord:me", []string{"list the schedule for the id, then cancel it"}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	pinned, err = h.Pinned(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var block string
+	for _, p := range pinned {
+		if strings.Contains(p.Text, "<lessons>") {
+			block = p.Text
+		}
+	}
+	if block == "" {
+		t.Fatalf("lessons were not pinned: %+v", pinned)
+	}
+	for _, want := range []string{"Guidance, not fact", "- 2026-09-29 list the schedule for the id, then cancel it"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("pinned block missing %q:\n%s", want, block)
+		}
+	}
+
+	// Another user's turn never sees them.
+	other := scope.With(context.Background(), scope.UserScope{Connector: "discord", User: "other", Channel: "c"})
+	pinned, _ = h.Pinned(other)
+	for _, p := range pinned {
+		if strings.Contains(p.Text, "cancel it") {
+			t.Fatalf("one person's lessons reached another: %q", p.Text)
+		}
+	}
+
+	// A turn with no user at all (a timer) reads nothing rather than failing.
+	if pinned, err = h.Pinned(context.Background()); err != nil {
+		t.Fatalf("Pinned() with no scope = %v, want no error", err)
+	}
+	for _, p := range pinned {
+		if strings.Contains(p.Text, "<lessons>") {
+			t.Fatalf("lessons pinned with no user: %q", p.Text)
+		}
+	}
+}
+
+// The cap is what makes pinning safe: the file keeps the newest lines only.
+func TestAppendLessonsTrimsAndBounds(t *testing.T) {
+	_, fs, _ := setup(t)
+	now := time.Now()
+
+	for i := 0; i < 40; i++ {
+		if err := AppendLessons(fs, "discord:me", []string{strings.Repeat("x", 120)}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body, err := fs.Read("users/discord/me/" + lessonsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > lessonsMaxBytes {
+		t.Fatalf("lessons file is %d bytes, cap is %d", len(body), lessonsMaxBytes)
+	}
+
+	// At most three lessons per session, each line bounded.
+	_ = fs.Write("users/discord/me/"+lessonsPath, "")
+	if err := AppendLessons(fs, "discord:me",
+		[]string{"one", "two", "three", "four"}, now); err != nil {
+		t.Fatal(err)
+	}
+	body, _ = fs.Read("users/discord/me/" + lessonsPath)
+	if strings.Contains(body, "four") {
+		t.Fatalf("more than %d lessons kept:\n%s", lessonsMaxPerRun, body)
+	}
+
+	if err := AppendLessons(fs, "discord:me", []string{strings.Repeat("y", 400)}, now); err != nil {
+		t.Fatal(err)
+	}
+	body, _ = fs.Read("users/discord/me/" + lessonsPath)
+	for _, line := range strings.Split(body, "\n") {
+		if len(line) > lessonLineMax+len("- 2026-09-29 ")+4 {
+			t.Fatalf("line of %d bytes exceeds the per-line cap: %q", len(line), line)
+		}
+	}
+}
+
+func TestAppendLessonsIgnoresNothingToSay(t *testing.T) {
+	_, fs, _ := setup(t)
+	if err := AppendLessons(fs, "discord:me", nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Exists("users/discord/me/" + lessonsPath) {
+		t.Fatal("an empty lesson list created the file")
+	}
+}

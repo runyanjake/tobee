@@ -19,7 +19,19 @@ import (
 const (
 	sharedRoot = "shared"
 	uriPrefix  = "memory://"
+
+	// Lessons are the one memory file put in every system prompt (D-052).
+	// The caps are what make that safe: a bounded block, not a growing one.
+	lessonsPath      = "lessons.md"
+	lessonsMaxBytes  = 1024
+	lessonsMaxPerRun = 3
+	lessonLineMax    = 200
 )
+
+// lessonsPreamble is framing, like the <servers> and <context> scaffolding:
+// the model must not read its own past guesses as facts.
+const lessonsPreamble = "What earlier turns learned by failing. Guidance, not fact — " +
+	"check with a tool before relying on any of it."
 
 func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 	srv := mcpserver.New("memory", instructions)
@@ -30,6 +42,17 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 			`memory_list and memory_search return these URIs.`,
 		MIMEType: "text/markdown",
 		Read:     readResource(fs),
+	})
+
+	// Pinned, so guidance that must always apply doesn't depend on the model
+	// choosing to look for it (D-052). Read fresh each turn, per user.
+	srv.AddResource(mcpserver.Resource{
+		URI:         uriPrefix + "user/" + lessonsPath,
+		Name:        "lessons",
+		Description: "What earlier turns learned from failing. Editable like any memory file.",
+		MIMEType:    "text/markdown",
+		Pinned:      true,
+		Read:        readLessons(fs),
 	})
 
 	srv.Add(mcpserver.Tool{
@@ -400,4 +423,70 @@ func ArchiveTranscript(fs *sandboxfs.FS, person string, started time.Time, markd
 		path = fmt.Sprintf("%s/conversations/%s-%d.md", dir, started.UTC().Format("2006/01/02-1504"), i)
 	}
 	return fs.Write(path, markdown)
+}
+
+// readLessons renders the pinned lessons block, or nothing at all: a turn with
+// no user (a timer or a notification) has no lessons, and neither does a fresh
+// install. Never an error — a missing file must not make the prompt partial.
+func readLessons(fs *sandboxfs.FS) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		s, ok := scope.From(ctx)
+		if !ok || !s.HasUser() {
+			return "", nil
+		}
+		body, err := fs.Read(path.Join(s.Dir(), lessonsPath))
+		if err != nil || strings.TrimSpace(body) == "" {
+			return "", nil
+		}
+		return "<lessons>\n" + lessonsPreamble + "\n" + strings.TrimSpace(body) + "\n</lessons>", nil
+	}
+}
+
+// AppendLessons adds dated lines to a person's lessons file and trims the
+// oldest away, so the pinned block stays bounded whatever happens (D-052).
+// Called from the session archive path, which has a person but no scope.
+func AppendLessons(fs *sandboxfs.FS, person string, lessons []string, now time.Time) error {
+	if person == "" || len(lessons) == 0 {
+		return nil
+	}
+	dir := scope.UserScope{Person: person, User: person}.Dir()
+	file := path.Join(dir, lessonsPath)
+	body, _ := fs.Read(file) // a missing file just starts an empty one
+
+	stamp := now.Format("2006-01-02")
+	lines := splitLines(body)
+	for i, l := range lessons {
+		if i >= lessonsMaxPerRun {
+			break
+		}
+		if l = strings.TrimSpace(strings.ReplaceAll(l, "\n", " ")); l == "" {
+			continue
+		}
+		if len(l) > lessonLineMax {
+			l = l[:lessonLineMax] + "…"
+		}
+		lines = append(lines, "- "+stamp+" "+l)
+	}
+	return fs.Write(file, trimToBytes(lines, lessonsMaxBytes))
+}
+
+func splitLines(body string) []string {
+	var out []string
+	for _, l := range strings.Split(body, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, strings.TrimRight(l, " \t"))
+		}
+	}
+	return out
+}
+
+// trimToBytes keeps the newest lines that fit, so the block never outgrows its cap.
+func trimToBytes(lines []string, max int) string {
+	for {
+		out := strings.Join(lines, "\n") + "\n"
+		if len(out) <= max || len(lines) <= 1 {
+			return out
+		}
+		lines = lines[1:]
+	}
 }

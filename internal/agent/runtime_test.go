@@ -483,8 +483,12 @@ func TestRepeatedReadIsNotRerun(t *testing.T) {
 	h.runNext(t, chatEvent("e1", "list", ""))
 
 	last := h.llm.requests[2][len(h.llm.requests[2])-1]
-	if last.Role != llm.RoleTool || !strings.Contains(last.Content, "Same call as earlier") {
+	if last.Role != llm.RoleTool || !strings.Contains(last.Content, "Same arguments as earlier") {
 		t.Fatalf("repeat not caught: %+v", last)
+	}
+	// The refusal invites a different argument set rather than ending the tool.
+	if !strings.Contains(last.Content, "different arguments") {
+		t.Fatalf("refusal did not offer varying the arguments: %s", last.Content)
 	}
 }
 
@@ -516,5 +520,145 @@ func TestQuestionAnsweredFromAnotherConnector(t *testing.T) {
 	h.llm.script(call{name: "reply", args: `{"spoken":"Renamed."}`})
 	if task := h.runNext(t, ev); task.Resume == nil {
 		t.Fatal("answer from another connector did not resume the question")
+	}
+}
+
+// The reported failure: asked to clear reminders, the model called one read
+// 12 times, never tried the tool that would have done the job, and then said
+// there was nothing to clear. The repeat now closes the tool so the loop
+// can't continue, and code says what went wrong (D-051).
+func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
+	h := newHarness(t, statusServer())
+	h.llm.script(
+		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{}`}, // refused: use the result or vary the arguments
+		call{name: "status_summary", args: `{}`}, // still stuck: the tool is closed
+		call{name: "reply", args: `{"spoken":"I couldn't find anything to clear."}`},
+	)
+	h.runNext(t, chatEvent("e1", "clear my reminders for today", ""))
+
+	// After the repeat the tool is gone from the schema, so it cannot be called again.
+	last := h.llm.offered[len(h.llm.offered)-1]
+	for _, name := range last {
+		if name == "status_summary" {
+			t.Fatalf("status_summary still offered after a repeat: %v", last)
+		}
+	}
+	if len(last) == 0 {
+		t.Fatal("closing a tool emptied the menu")
+	}
+
+	sent := h.chat.sent[len(h.chat.sent)-1]
+	for _, want := range []string{
+		"I couldn't find anything to clear.",
+		"⚠️ Didn't finish cleanly:",
+		"status_summary: called with the same arguments 3 times; closed for the turn",
+	} {
+		if !strings.Contains(sent, want) {
+			t.Fatalf("reply missing %q:\n%s", want, sent)
+		}
+	}
+}
+
+// Widening a search that came back empty is the right next move, so the same
+// tool with different arguments always runs (D-051).
+func TestSameToolWithDifferentArgumentsIsNotBlocked(t *testing.T) {
+	h := newHarness(t, searchServer())
+	h.llm.script(
+		call{name: "search_recent", args: `{"days":1}`},
+		call{name: "search_recent", args: `{"days":7}`},
+		call{name: "reply", args: `{"spoken":"Found one update this week."}`},
+	)
+	h.runNext(t, chatEvent("e1", "any recent updates?", ""))
+
+	// Both argument sets ran, and nothing was closed or reported as a problem.
+	for _, offered := range h.llm.offered {
+		found := false
+		for _, name := range offered {
+			found = found || name == "search_recent"
+		}
+		if !found {
+			t.Fatalf("search_recent was withdrawn after a different-argument call: %v", offered)
+		}
+	}
+	sent := h.chat.sent[len(h.chat.sent)-1]
+	if sent != "Found one update this week." {
+		t.Fatalf("sent = %q, want the plain reply with no warning block", sent)
+	}
+	results := 0
+	for _, m := range h.llm.requests[len(h.llm.requests)-1] {
+		if m.Role == llm.RoleTool {
+			results++
+			if strings.Contains(m.Content, "not run again") {
+				t.Fatalf("a different-argument call was refused: %s", m.Content)
+			}
+		}
+	}
+	if results != 2 {
+		t.Fatalf("tool results = %d, want 2 real calls", results)
+	}
+}
+
+// searchServer answers by window, so a one-day search is empty and a week isn't.
+func searchServer() *mcpserver.Server {
+	s := mcpserver.New("search", "")
+	s.Add(mcpserver.Tool{Name: "recent", ReadOnly: true, InputSchema: json.RawMessage(
+		`{"type":"object","properties":{"days":{"type":"integer"}},"required":["days"]}`),
+		Handler: func(_ context.Context, args json.RawMessage) (string, error) {
+			var in struct{ Days int }
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", err
+			}
+			if in.Days < 7 {
+				return "(nothing in the last " + fmt.Sprint(in.Days) + " day(s))", nil
+			}
+			return "one update: release 1.2", nil
+		}})
+	return s
+}
+
+// A failed turn is carried into the next one as what was tried and what
+// failed, so the model doesn't repeat it (D-051).
+func TestSessionCarriesWhatFailed(t *testing.T) {
+	h := newHarness(t, statusServer())
+	h.llm.script(
+		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{}`},
+		call{name: "reply", args: `{"spoken":"Nothing to clear."}`},
+	)
+	h.runNext(t, chatEvent("e1", "clear my reminders", ""))
+
+	h.llm.script(call{name: "reply", args: `{"spoken":"ok"}`})
+	h.runNext(t, chatEvent("e2", "try again", ""))
+
+	var outcome string
+	for _, m := range h.llm.requests[len(h.llm.requests)-1] {
+		if strings.HasPrefix(m.Content, "<outcome") {
+			outcome = m.Content
+		}
+	}
+	if outcome == "" {
+		t.Fatalf("the next turn carried no outcome:\n%+v", h.llm.requests[len(h.llm.requests)-1])
+	}
+	for _, want := range []string{`status="replied"`, "steps=", "failed: status_summary: called again"} {
+		if !strings.Contains(outcome, want) {
+			t.Fatalf("outcome missing %q:\n%s", want, outcome)
+		}
+	}
+}
+
+// A clean turn carries no outcome: the messages already say everything.
+func TestCleanTurnCarriesNoOutcome(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(call{name: "reply", args: `{"spoken":"Hey."}`})
+	h.runNext(t, chatEvent("e1", "hey", ""))
+
+	h.llm.script(call{name: "reply", args: `{"spoken":"ok"}`})
+	h.runNext(t, chatEvent("e2", "again", ""))
+
+	for _, m := range h.llm.requests[1] {
+		if strings.HasPrefix(m.Content, "<outcome") {
+			t.Fatalf("clean turn recorded an outcome: %s", m.Content)
+		}
 	}
 }

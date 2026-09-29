@@ -87,7 +87,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Scope
 
-- Don't build deferred features without discussing them first: vector search, reflection passes, exposing tobee as an MCP server, streaming replies, a non-OpenAI provider abstraction. See [GOALS.md](GOALS.md#non-goals--out-of-scope).
+- Don't build deferred features without discussing them first: vector search, exposing tobee as an MCP server, streaming replies, a non-OpenAI provider abstraction. See [GOALS.md](GOALS.md#non-goals--out-of-scope).
+- Anything pinned into the system prompt needs a hard cap in code, and a turn without a user pins nothing from memory (D-052).
 - No backwards-compatibility shims or parallel old/new code paths. Pick one path.
 - Don't add an interface until a second implementation exists. There is one `sandboxfs.FS`. `agent.Strategy` (D-037) and `llm.Model` (D-041) are deliberate exceptions.
 - Don't add parsers that recover tool calls the model wrote as text, and don't accept prose where a phase requires a tool call (D-025). A salvage parser was built and reverted in `3e818f9`.
@@ -112,6 +113,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Tasks are processed one at a time on purpose (D-005). Don't parallelize consumption.
 - History is the person's session, recorded by code: user messages, tool calls with real results, and delivered replies (D-046). Don't store model drafts or summaries in it, and don't key it by channel or connector; key by person (D-045).
 - Anything the reply says happened must be backed by code: action lines come from real tool results, and destructive calls go through the code-written approval (D-047). Never make a prompt instruction the only guard against a false claim or a destructive action.
+- What went wrong is reported by code too. Record it on the turn with `AddProblem` (or `AddRecovered` when a retry fixed it) and let `renderReply` and the session outcome carry it; a nudge asking the model to admit a failure is not a guard (D-051).
+- When the loop stops making progress, take the option away instead of asking it to stop: an identical repeat closes that tool for the turn by leaving it out of the schema (D-051).
 - New reasoning schemes implement `agent.Strategy` and are selected by `AGENT_STRATEGY` (D-037). The runtime owns scope, budget, delivery, and parking; a strategy only fills `Turn.Reply` or `Turn.Await`.
 - Keep the turn budget and `AGENT_MAX_STEPS`. Don't raise or remove them to make one case work.
 - Every model call goes through `llm.Model.Decide`: the model picks exactly one of the offered tools. The loop offers the MCP catalog plus its own `reply` and `plan`. Never call a provider directly, and keep request shape, output mode, and wire quirks inside `internal/llm/<provider>` (D-041).
@@ -126,7 +129,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Every input is an `ingest.Source` emitting `event.Event`s. Register it with the ingest engine in `main.go`; never write to the task queue directly. Give events a stable `ID`: it is the dedup key (D-034).
 - A new external system is a connector under `internal/connectors/<name>/`: a `Source`, a `delivery.Channel` (plus `Editor` / `Reactor` if supported), an MCP server, and a Reporter, all named with one `Name` constant (D-035).
 - The reply to the event's origin, and progress reactions, are delivered in code, not by tools. Tools are for actions the model chooses, including messages elsewhere and `user_ask` (D-035).
-- Readable content is an MCP resource or resource template with a URI that mirrors its folder path, read through `resources_read`. Don't add per-server read tools. Only trusted servers may pin a resource into the system prompt, and memory is never pinned (D-026, D-042).
+- Readable content is an MCP resource or resource template with a URI that mirrors its folder path, read through `resources_read`. Don't add per-server read tools. Only trusted servers may pin a resource into the system prompt (D-042). From memory, only the capped `lessons.md` is pinned; facts, preferences and transcripts stay tool-read (D-052).
 - Anything that turns a model-supplied path into a file path confines it to its scope root first. `sandboxfs` only confines to its own root.
 - New capabilities are MCP tools, never a side channel. A built-in server uses `internal/mcpserver`, gets a `prompts/servers/<name>.md` instructions file, and is connected with `host.ConnectInProcess`. Every tool needs a real JSON-Schema `InputSchema`; set `ReadOnly` when it doesn't write (D-033).
 - Third-party tools arrive through `MCP_SERVER_<NAME>_*`, not code. Don't relax trust: untrusted servers get no scope, no prompt instructions, no verbatim/await, and no subscriptions (D-038).
@@ -136,7 +139,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 ### Prompts & config
 
 - Prompt text lives in `prompts/`, not in Go string literals. Existing exceptions:
-  - protocol nudges and the `reply` / `plan` schemas in `loop.go`, `reply.go`, `plan.go`
+  - protocol nudges and the `reply` / `plan` / `lessons` schemas in `loop.go`, `reply.go`, `plan.go`, `reflect.go`
+  - the `<lessons>` framing in the memory server
   - tool `Description` fields
   - the tool menu the provider appends to each request (`internal/llm/openai/schema.go`)
   - the `<servers>` / `<context>` scaffolding in `context.go`
@@ -155,7 +159,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-051**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-053**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

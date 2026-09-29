@@ -35,6 +35,15 @@ type Turn struct {
 	// with its real outcome. Code renders them under the reply (D-047).
 	Actions []Action
 
+	// Problems records what went wrong or was refused, including on reads,
+	// which produce no Action. Code renders them under the reply and the
+	// runtime saves them to the session, so a failed turn can't be reported
+	// as a clean one (D-051).
+	Problems []Problem
+
+	// Steps counts the model calls this turn spent.
+	Steps int
+
 	// Verbatim is appended to the reply by code, not restated by the model (D-030).
 	Verbatim []VerbatimBlock
 
@@ -54,6 +63,36 @@ type Action struct {
 type VerbatimBlock struct {
 	Tool string // for logging
 	Body string
+}
+
+// Problem is one thing that did not work this turn. Kind is a short code so
+// the session can be read by machine as well as by a person. A Recovered
+// problem is kept for the session but not shown to the user: a retry that
+// worked is history, not an outcome.
+type Problem struct {
+	Kind      string // tool_error | repeated | budget | unreadable | model_error | declined
+	Tool      string // empty when the problem isn't about one tool
+	Detail    string
+	Recovered bool
+}
+
+// AddProblem records a problem the user should hear about, replacing a
+// recovered entry for the same tool: one entry per kind and tool, so a tool
+// that fails twice for one reason is one line, not two.
+func (t *Turn) AddProblem(kind, tool, detail string) { t.problem(kind, tool, detail, false) }
+
+// AddRecovered records something that went wrong and was then handled.
+func (t *Turn) AddRecovered(kind, tool, detail string) { t.problem(kind, tool, detail, true) }
+
+func (t *Turn) problem(kind, tool, detail string, recovered bool) {
+	for i, p := range t.Problems {
+		if p.Kind == kind && p.Tool == tool {
+			t.Problems[i].Detail = detail // the latest detail is the fullest
+			t.Problems[i].Recovered = p.Recovered && recovered
+			return
+		}
+	}
+	t.Problems = append(t.Problems, Problem{Kind: kind, Tool: tool, Detail: detail, Recovered: recovered})
 }
 
 // AddVerbatim skips blanks and exact duplicates, e.g. status_summary called twice.

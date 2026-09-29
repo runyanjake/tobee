@@ -81,13 +81,6 @@ func main() {
 	}
 	engine.SetIdentities(people)
 	memoryserver.LinkIdentities(memFS, people.People())
-	sessions, err := session.Open(dataDir+"/sessions", mustDuration("SESSION_IDLE_TIMEOUT", 10*time.Minute),
-		func(sess *session.Session) error {
-			return memoryserver.ArchiveTranscript(memFS, sess.Person, sess.Started, sess.Markdown())
-		})
-	if err != nil {
-		fatal("session: open failed", err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -190,6 +183,29 @@ func main() {
 		fatal("prompts: state templates failed", err)
 	}
 	logPromptsLoaded(promptsDir, pinned, states.Names())
+
+	// --- Sessions ------------------------------------------------------------
+	// Opened after the prompts: closing a session can draw lessons from it,
+	// which needs the reflect template (D-052).
+	var reflector *agent.Reflector
+	if envBool("AGENT_REFLECT", true) {
+		reflector = agent.NewReflector(model, states, func(person string, lessons []string) error {
+			return memoryserver.AppendLessons(memFS, person, lessons, time.Now())
+		})
+	}
+	sessions, err := session.Open(dataDir+"/sessions", mustDuration("SESSION_IDLE_TIMEOUT", 10*time.Minute),
+		func(sess *session.Session) error {
+			// The transcript is the durable record and its error retries the
+			// archive; reflection is best-effort and never blocks it.
+			if err := memoryserver.ArchiveTranscript(memFS, sess.Person, sess.Started, sess.Markdown()); err != nil {
+				return err
+			}
+			reflector.Reflect(ctx, sess)
+			return nil
+		})
+	if err != nil {
+		fatal("session: open failed", err)
+	}
 
 	// --- Agent ----------------------------------------------------------------
 	ctxb := &agent.ContextBuilder{Host: host}
@@ -334,6 +350,18 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// envBool accepts the same spellings as the workspace read-only flag.
+func envBool(key string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "":
+		return fallback
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func mustInt(key string, fallback int) int {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
@@ -407,7 +435,7 @@ func logPromptsLoaded(dir string, pinned []mcphost.Pinned, stateNames []string) 
 	if chars == 0 {
 		missing = append(missing, "system/*.md")
 	}
-	required := []string{"turn"}
+	required := []string{"turn", "reflect"}
 	have := make(map[string]bool, len(stateNames))
 	for _, n := range stateNames {
 		have[n] = true

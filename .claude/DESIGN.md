@@ -155,6 +155,7 @@ flowchart LR
 - **Expiry:** after `SESSION_IDLE_TIMEOUT` (default 10m) without a message, checked every 30s and on the person's next message. The session is written by code as a markdown transcript to `memory://user/conversations/YYYY/MM/DD-HHMM.md`, then dropped. A failed archive is retried.
 - **Durability:** live sessions are saved to `data/sessions/<person>.json` on every exchange and reloaded at boot.
 - **Grounding:** the system prompt says earlier replies are only what was said; tool results and memory are facts. The session keeps real tool results, so later turns can check.
+- **Outcomes (D-051):** each exchange also carries a code-written `Outcome` — status, steps spent, the actions taken, and what failed. A notable one (anything that failed, or a turn that didn't reply) is injected after that exchange as `<outcome status="…" steps="…">…</outcome>`, and the archived transcript records it as `> outcome:` / `> failed:` lines. This is the Reflexion record: what was tried, what worked, what didn't — all facts, no model-written lesson.
 
 ## Tools (MCP)
 
@@ -219,9 +220,9 @@ N    asst    tool call: reply                           ends the turn
    - **`plan`** stores the checklist and acknowledges `ok`. It is shown only on connectors that can edit the message, and only with two or more steps; later calls edit it.
    - **A destructive tool** (MCP `destructiveHint`, true by default for non-read-only tools) doesn't run. The loop sends a code-written "Confirm: <tool> <args>" question and parks the task with the exact call. On resume, a plain yes runs that call unchanged; anything else cancels it. Either way, the model then continues (D-047).
    - **Any other tool** runs through the host and its result is appended. A verbatim result tells the model it is already shown. A `user_ask` result ends the turn so the runtime can park it (D-036).
-   - **A repeated identical read** within the turn returns the earlier result with a note, and is not run again. Any non-read call clears this.
+   - **A call whose arguments were already used** returns the earlier result with a note asking for different arguments or a different tool, and is not run again. The same tool with *different* arguments always runs: widening a search that came back empty is the right next move. Only a tool refused `maxSuppressed` (2) times is closed, by leaving it out of the next call's schema, which is the last way to break a stuck loop (D-051). Any non-read call clears both records.
    - **Every non-read call is recorded as an action** with its real outcome.
-3. When `AGENT_MAX_STEPS` calls are spent, a budget nudge is appended and one last call offers only `reply`. If that fails, any verbatim blocks are delivered on their own.
+3. When `AGENT_MAX_STEPS` calls are spent, a budget nudge is appended and one last call offers only `reply`. If that fails, the verbatim blocks and the problem list are delivered on their own.
 4. The runtime delivers `Turn.Reply`: non-empty clears the progress reactions; empty adds ❌. A parked turn clears its reactions.
 5. The runtime records the exchange in the person's session. It records this turn's user, tool-call, and tool-result messages; the reply is stored as the delivered text. Harness directives are left out. Parked turns are recorded when their task finishes.
 
@@ -269,7 +270,9 @@ Replying to the origin is never a tool, and the send tools refuse the current co
 | **Content/presentation separation** | `reply` provides `spoken` and `artifacts`; Go writes the code fences. |
 | **Return-direct passthrough** | Output from verbatim tools is appended by code and never rewritten by the model. Same idea as LangChain's `return_direct`. |
 | **Spotlighting** (delimiting) | The harness directive is wrapped in a `<phase>` tag; user text never is. |
-| **Tool-driven memory recall** | Nothing from memory is pre-loaded into the prompt; the model reads `memory://` resources. |
+| **Tool-driven memory recall** | Facts, preferences and transcripts are never pre-loaded; the model reads `memory://` resources (D-052). |
+| **Reflexion** | A closed session that failed is distilled into a few verbal lessons, written to the core memory tier and pinned into later prompts. Shinn et al.'s loop, with the actor's own recorded outcomes as the evidence (D-051, D-052). |
+| **Core / archival memory split** | A small always-present block plus a larger searched store, as in MemGPT/Letta core vs archival memory (D-052). |
 
 ### Retry and failure handling
 
@@ -278,7 +281,8 @@ Replying to the origin is never a tool, and the send tools refuse the current co
 | Unreadable output (`ErrInvalidDecision`) | Dropped; nudge; retry. At most 1 per turn. | Turn ends with no reply; ❌ |
 | Model call error | Retry once per turn | Turn ends with no reply; ❌ |
 | Tool call error, timeout, panic (recovered in built-ins) | No retry; sent to the model as `error: …` | — |
-| Step budget spent | One reply-only call | Verbatim blocks alone, else ❌ |
+| Step budget spent | One reply-only call | Verbatim blocks and the problem list, else ❌ |
+| Any of the above | Recorded on the turn as a `Problem`; unrecovered ones are rendered under the reply and all are saved to the session (D-051) | — |
 | Source | Restart with backoff, forever | Logged; `ingest` Reporter shows `down` |
 | Task | Redelivered after a crash, up to 2 attempts | Dropped at boot with an ERROR |
 | Plan message, react, send | No retry | Logged; turn continues |
@@ -327,12 +331,13 @@ The model writes item 1 and item 2. Code writes item 3 and item 4, so what the r
 2. Each non-empty artifact as ```` ```<lang>\n<body>\n``` ````.
 3. Each verbatim block: single-line output is appended as plain text; multi-line output is wrapped in a bare code fence. Blocks with identical text appear once per turn.
 4. One line per action taken this turn: `✅ <tool>: <first line of the result>` or `❌ <tool>: <error, or "not run: not approved">` (D-047).
-5. Connector rendering. Discord turns outbound `@displayname` into `<@id>`, then splits at ≤2000 characters. Preferred break points, in order: after a closing fence, a paragraph break, a sentence end, a newline, then a hard cut. Email sends the text as a plain-text body.
+5. `⚠️ Didn't finish cleanly:` and one bullet per unrecovered problem — a tool error (reads included), a repeat that closed a tool, a spent step budget, a declined approval, a model failure. A retry that worked is recorded but not shown (D-051).
+6. Connector rendering. Discord turns outbound `@displayname` into `<@id>`, then splits at ≤2000 characters. Preferred break points, in order: after a closing fence, a paragraph break, a sentence end, a newline, then a hard cut. Email sends the text as a plain-text body.
 
 ## Prompt Architecture
 
 - **System message** (built once per request, `ContextBuilder.ComposeSystem`), in order:
-  1. Pinned resources from trusted servers, in server then URI order, capped at 32 KiB. Today only the `system` server pins anything: `prompts/system/*.md` (identity, voice, behaviour, safety, tools), read fresh each turn.
+  1. Pinned resources from trusted servers, in server then URI order, capped at 32 KiB, read fresh each turn: `prompts/system/*.md` from the `system` server (identity, voice, behaviour, safety, tools), and the current user's `lessons.md` from the `memory` server, wrapped in `<lessons>` with a line saying it is guidance, not fact (D-052). A turn with no user pins no lessons.
   2. `<servers>`: each connected server's name, trusted instructions, and tool names. Built-in instructions are `prompts/servers/<name>.md`. The workspace server appends its area list.
   3. `<context>`: `now` (RFC3339 plus a readable date and time), `tz=<IANA zone>`, source, kind, connector, channel, thread, and user name and ID, or `user=none`. The zone is what lets "4:40pm" become an instant (D-049).
 - **Turn directive** is one user-role message rendered from `prompts/state/turn.md`, wrapped in `<phase name="turn">`.
@@ -351,13 +356,15 @@ The model writes item 1 and item 2. Code writes item 3 and item 4, so what the r
 
 ### Taxonomy (loosely CoALA)
 
-| Kind | Lives at | Written by |
-|---|---|---|
-| Working | The current turn's `Conversation`; never saved | The strategy |
-| Semantic | `user.md`, `facts/*.md` under a scope | `memory_write` / `memory_append` |
-| Procedural | `preferences.md`, `feedback/*.md` under a scope | `memory_write` / `memory_append` |
+| Kind | Lives at | Written by | How it reaches the model |
+|---|---|---|---|
+| Working | The current turn's `Conversation`; never saved | The strategy | In the prompt |
+| Episodic | The person's live session, then `conversations/YYYY/…` | Code (D-046, D-051) | Injected while live; tool-read once archived |
+| Semantic | `user.md`, `facts/*.md` under a scope | `memory_write` / `memory_append` | Tool-read (D-052) |
+| Procedural | `preferences.md`, `feedback/*.md` under a scope | `memory_write` / `memory_append` | Tool-read (D-052) |
+| Core | `lessons.md` under the user scope, capped at 1 KiB | The reflection pass (D-052) | Pinned into every system prompt |
 
-Episodic memory is the person's live session, recorded by code and archived to `conversations/` on idle (D-046); the model never writes a summary (D-027). Parked tasks keep only a request and a question, for up to 24h (D-036).
+Episodic memory is the person's live session, recorded by code and archived to `conversations/` on idle (D-046); the model never writes a summary of it (D-027). The one thing the model does write about the past is a lesson from a failure, and only into the capped core tier (D-052). Parked tasks keep only a request and a question, for up to 24h (D-036).
 
 ### Layout
 
@@ -366,6 +373,7 @@ data/
 ├─ memory/
 │  ├─ shared/                        # scope="shared"
 │  └─ users/<person>/                # scope="user": a linked person's name, or <connector>/<account>
+│     ├─ lessons.md                  # core tier: pinned, capped at 1 KiB (D-052)
 │     └─ conversations/YYYY/MM/DD-HHMM.md   # session transcripts (D-046)
 ├─ scheduler/
 │  └─ jobs/<id>.json                 # one file per job; ids are "j-<8 hex>"
@@ -401,7 +409,7 @@ data/
 - **Size caps** are enforced on `Write` and on the combined size after `Append`.
 - **No approval gate.** The model writes what it judges useful.
 - **Tool results are data, not instructions.** This is prompt guidance only (`04-safety.md`). No code-level framing is applied to tool results.
-- **Curating `INDEX.md`** is expected to be a human task. Nothing enforces this.
+- **Curating `INDEX.md`** is expected to be a human task. Nothing enforces this. `lessons.md` is the same: plain text, editable, and deletable if a lesson is wrong (D-052).
 
 ## Other Subsystems
 
@@ -439,7 +447,6 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-017 | Stable sections first in the system message. | Prefix caching on the LLM server. | Reordering sections must keep the stable-first order. |
 | D-019 | Workspace areas: operator-configured sandboxed roots; list carried in the workspace server's instructions. | Access limited to directories the operator opts in; no discovery calls needed. | Area names and descriptions are visible to the model. |
 | D-025 | Every model output is a tool call; one nudge-and-retry; no text fallbacks. | Every text escape hatch became a class of "the model decided" bugs. | An unreadable call costs a retry. |
-| D-026 | Memory is never pre-loaded into the prompt, and is never pinned (D-042); recall is a read. | Bounded prompt; auditable reads; no stale snapshots. | Recall costs 1–2 extra tool calls. |
 | D-027 | Superseded by D-046: history is a code-recorded session per person, not a model-written summary or a per-channel ring buffer. | — | — |
 | D-029 | One `Conversation` per request; the harness directive is its own `<phase>`-tagged message; every call offers every tool. | One system message enables prefix caching; the user's words are never mixed with directives. | The whole transcript is resent on each call. |
 | D-030 | Verbatim output is enforced in code, now as `tobee/verbatim` tool metadata honored for trusted servers; clock stamped in `<context>`; status takes a relative `window`. | "Relay verbatim" in prose was ignored; the model invented windows and state. | Only a short lead-in is written by the model on status turns. |
@@ -452,7 +459,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-039 | The LLM backend is configuration: `AI_PROVIDER_URL`, `AI_MODEL`, `AI_API_KEY`, `AI_TEMPERATURE`, `AI_MAX_TOKENS`, `AI_TIMEOUT`. The OpenAI-compatible chat API is the contract. | Switching models or hosts is planned; no code change should be needed. | Backends without an OpenAI-compatible endpoint need a proxy. |
 | D-040 | Logs are categorized by the reasoning chain: `input`, `thinking`, `action`, `output`, plus `llm` and `system`, with `task` / `step` correlation from a context logger. The INFO trail carries content (capped by `LOG_CONTENT_LIMIT`); DEBUG adds the exact prompts, logged incrementally. | One turn's input, reasoning, actions, and output must be reconstructable and filterable without DEBUG; the old DEBUG dump re-printed the whole transcript per call and dropped model reasoning. | User messages and tool output are in INFO logs; lower `LOG_CONTENT_LIMIT` to trim them. |
 | D-041 | The agent reaches a model only through `llm.Model.Decide`, which returns exactly one call to one offered tool. The OpenAI-compatible provider enforces this with `response_format: json_schema` (grammar-constrained on Ollama), not `tools` / `tool_choice`; a per-request tool menu describes the options. Unreadable output is never kept. `AI_PROVIDER` selects the provider. | Ollama ignores `tool_choice`, so the model answered in prose or wrote calls as text (the long-standing protocol violations). Constrained decoding makes that impossible, and one interface keeps request shape and server quirks out of the agent. | One tool call per model call. The tool menu adds prompt tokens at the tail of every request. Needs a server with `json_schema` support. `llm.Model` has one implementation, by choice. |
-| D-042 | Servers expose readable content as MCP resources and resource templates, with URIs that mirror the folder tree (`memory://user/…`, `workspace://<area>/…`). The model reads any of them through the one `resources_read` tool; per-server read tools are gone. Resources a trusted server pins (priority 1) go into every system prompt, capped at 32 KiB; the only pinned set is `prompts/system/*.md`, served by the `system` server. | One read path for built-in and third-party content; files stay human-editable; the system prompt uses the same mechanism as any other context. | Pinned resources are read every turn. Memory is never pinned (D-026). Untrusted servers cannot pin (D-038). |
+| D-042 | Servers expose readable content as MCP resources and resource templates, with URIs that mirror the folder tree (`memory://user/…`, `workspace://<area>/…`). The model reads any of them through the one `resources_read` tool; per-server read tools are gone. Resources a trusted server pins (priority 1) go into every system prompt, capped at 32 KiB; the only pinned set is `prompts/system/*.md`, served by the `system` server. | One read path for built-in and third-party content; files stay human-editable; the system prompt uses the same mechanism as any other context. | Pinned resources are read every turn. Only the capped lessons file is pinned from memory (D-052). Untrusted servers cannot pin (D-038). |
 | D-043 | A turn is one tool-calling agent loop (ReAct): each model call picks one tool from the catalog plus the loop's own `reply` and `plan`, until `reply`. `plan` is a model-maintained checklist shown only for 2+ steps where it can be edited. Out of steps, one reply-only call. | The fixed plan → announce → execute → synthesize sequence turned a greeting into a one-step plan, a checklist, and two replies. With `reply` as a tool, simple turns cost one call and there is no separate synthesis. | Multi-step structure depends on the model choosing to call `plan`. No per-step budget; `AGENT_MAX_STEPS` bounds the turn. |
 | D-044 | Tool categories are derived from standard MCP annotations: `read` (readOnlyHint), `write` (openWorldHint false), `external` (otherwise); the loop's tools are `finish`. They group the tool menu and nothing else. | Helps the model tell answering from acting without a custom MCP field; works for third-party servers that annotate. | Annotations are hints; untrusted servers can mislabel tools, which is why categories never gate anything (D-038). |
 | D-045 | A person is a set of linked connector accounts (`IDENTITY_<NAME>`). Sessions, memory (`users/<person>/`), and parked-question matching key on the person; unlinked accounts are their own person. | Conversations move between Discord, email, and texting; memory must follow the human, not the account. | Linking moves the old account folder at boot; several old folders need a manual merge. |
@@ -460,6 +467,8 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-047 | Grounding is enforced in code. Every non-read call becomes an action line under the reply with its real outcome. Destructive calls (`destructiveHint`, MCP default true) run only after a plain yes to a code-written confirmation, exactly as proposed. Identical repeated reads return the earlier result. | The model claimed deletions it never made (no tool existed) and wrote a "removed files" note instead; prompts can't prevent that. | An extra round trip for every destructive call. Unannotated third-party tools ask first. |
 | D-048 | Memory and workspace paths are written exactly as given; no date prefix or renaming. | Date-stamping made `INDEX.md` unreachable (it became `2026.07.20-index.md`) and doubled dates in names. | Dated file names are now the model's choice. |
 | D-049 | The instance has one wall clock, set by `TZ`: `main` pins `time.Local` at boot, `<context>` stamps `now`, the readable time, and `tz=<zone>`, and every time a person reads (reminder confirmations, `schedule_list`, status reports) is local. | The container has no zone, so everything was UTC. The model was asked to turn "4:40pm" into an instant with no offset to convert from, and set a reminder 9 minutes off; the confirmation then read `23:49:47Z`, which no one can check at a glance. | `TZ` is now instance config in three places (`.env`, `.env.prod`, `Jenkinsfile`). Logs move to local time too. One instance has one zone; a user in another is not modelled. |
+| D-052 | Long-term memory has two tiers, as in a standard agent. **Core:** one hard-capped file, `memory://user/lessons.md` (1 KiB, newest lines kept), pinned into every system prompt and read fresh per turn, holding what past failures taught. **Everything else** — `INDEX.md`, facts, preferences, transcripts — stays tool-accessed, never pre-loaded. Lessons are written by a reflection pass over a closed session's recorded outcomes, at most 3 per session, gated by `AGENT_REFLECT`, and the file is plain text the operator can edit or delete. Replaces D-026. | D-026 banned all pre-loading, which left tool-access as the only tier — the one discipline that needs the model to *choose* to remember, on a model whose documented failure is not looking things up. Of D-026's three reasons, only "bounded prompt" survives a cap: pinned resources are read fresh (so no stale snapshot) and appear in every prompt log (so more auditable, not less). What it was really right about was unbounded growth, which is why the fact tiers stay tool-only. Reflexion and MemGPT both put the lesson in front of the actor rather than behind a search. | One model call per closed session that failed, outside any turn. A wrong lesson persists in every prompt until it ages out or a human deletes it — bounded by the cap, the failure-only trigger, and the file being editable. Lessons are per person and don't transfer. |
+| D-051 | A turn keeps a code-written record of what went wrong (`Turn.Problems`), including on reads. Unrecovered problems are rendered under the reply as "⚠️ Didn't finish cleanly"; all of them, plus the actions taken, become the exchange's `session.Outcome`, which later turns see as an `<outcome>` message and which the archived transcript keeps. A call repeating arguments already used is not re-run; the same tool with different arguments always is. A tool refused twice is closed for the turn by leaving it out of the decision schema. | Asked to clear a reminder, the model called `schedule_list` 12 times — byte-identical output each time, because a suppressed repeat leaves the context almost unchanged and temperature is 0.1 — never called `schedule_cancel`, and then replied "I couldn't find any reminders", which the step budget's "say what wasn't done" did nothing to prevent. Absorbing a repeat bounded the cost but not the loop, and nothing code-written contradicted the false answer. | The user sees a warning block on any turn that had a problem. A stuck loop still costs three steps before the tool closes, and a tool closed for the turn stays closed even if a later write changes what it would return. `<outcome>` adds a few lines of history per failed turn. |
 | D-050 | A Discord message is for tobee if it is a DM, mentions its user, replies to one of its messages, names it, pings a role it holds, or is in a thread it belongs to. Each rule names itself in the log (`addressed_by`). `DISCORD_CHANNEL_ID` scopes guild channels only: DMs and threads of that channel always pass. | "@TOBEE" autocompletes to the bot's integration-managed role, which arrives as `<@&roleID>` and never appears in `m.Mentions`, so every such request was dropped as ambient. DMs and threads were dropped too whenever `DISCORD_CHANNEL_ID` was set. | Role and thread checks need a guild-member and thread-member lookup, cached per guild and per channel (10m, invalidated when the bot posts). Every message in a joined thread is a turn, and every DM is a turn: `DISCORD_ALLOWED_USERS` is the only gate left there. |
 
 ## Rejected Alternatives
@@ -475,11 +484,15 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | Planner with `plan.revise` replanning | Removed when the plan/execute shape was restored; failures are reported instead | D-020 → D-024 |
 | Per-step tool scoping | The planner granted empty tool lists, so steps did nothing | D-029 |
 | Text-wrap fallback / salvage parser for tool calls written as text | Masks an undiagnosed cause; reintroduces "the model chooses the format" | D-025, `3e818f9` |
+| Suppressing a repeated call without closing the tool | The context after a suppressed repeat is nearly identical, so a low-temperature model repeats the same choice until the budget runs out | D-051 |
+| Telling the model to "say what wasn't done" when out of steps | It said the opposite, confidently. What went wrong is code's to report | D-051, D-047 |
 | Session ring buffer, rolling summarizer, idle rotation, janitor | Polluted transcripts, hallucinated summaries, users mixed in shared channels | D-027 → D-046 (per-person, code-recorded sessions) |
 | Per-channel sessions | Users in a shared channel would see each other's context; a person switching channels would lose theirs | D-045, D-046 |
 | Vector database for memory | Tens to hundreds of facts per user; the problems were grounding and structure, not recall; an embedding store is opaque and a second source of truth | D-046 |
 | Asking the model to confirm destructive actions | It can skip or misstate the question; the confirmation and the call are code's job | D-047 |
-| Pre-loading `INDEX.md` / profile / preferences into the prompt, or pinning memory resources | Unbounded prompt growth, stale snapshots | D-026, D-042 |
+| Pre-loading `INDEX.md` / profile / preferences into the prompt | Unbounded prompt growth: the set grows with every fact learned, and most of it is irrelevant to any one turn | D-052 |
+| Banning pinned memory outright | Left tool-access as the only tier, so anything that must always apply depended on the model choosing to look it up | D-026 → D-052 |
+| Lessons in `shared/`, so every person benefits | A lesson distilled from one person's session can carry their content; per-person keeps that contained | D-052 |
 | Per-server read tools alongside `resources_read` | Two read paths for the same files | D-042 |
 | Absolute memory URIs (`memory://users/<connector>/<id>/…`) | Exposes user IDs and invites cross-user reads; `user` resolves per turn instead | D-042 |
 | Asking the model to relay status verbatim | The model reworded it and invented facts | D-030 |

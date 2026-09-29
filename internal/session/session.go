@@ -27,13 +27,48 @@ const (
 	maxHistoryBytes    = 16 * 1024
 )
 
-// Exchange is one turn: the person's message and everything tobee did.
+// Exchange is one turn: the person's message, everything tobee did, and how
+// the turn ended.
 type Exchange struct {
 	At        time.Time     `json:"at"`
 	Connector string        `json:"connector"`
 	Channel   string        `json:"channel"`
 	UserName  string        `json:"userName,omitempty"`
 	Messages  []llm.Message `json:"messages"`
+	Outcome   *Outcome      `json:"outcome,omitempty"`
+}
+
+// Outcome is what was tried and what came of it, written by code from the
+// turn's own record (D-051). Kept only when something is worth carrying: a
+// clean turn's messages already say everything.
+type Outcome struct {
+	Status   string   `json:"status"` // replied | no reply | parked
+	Steps    int      `json:"steps"`
+	Acted    []string `json:"acted,omitempty"` // "✅ memory_write: wrote …"
+	Problems []string `json:"problems,omitempty"`
+}
+
+// Line renders the outcome for the model: one tagged message, so a later turn
+// knows what was already tried and what failed rather than repeating it.
+func (o *Outcome) Line() string {
+	if o == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<outcome status=%q steps=%d>", o.Status, o.Steps)
+	for _, a := range o.Acted {
+		fmt.Fprintf(&b, "\n%s", a)
+	}
+	for _, p := range o.Problems {
+		fmt.Fprintf(&b, "\nfailed: %s", p)
+	}
+	b.WriteString("\n</outcome>")
+	return b.String()
+}
+
+// Notable reports whether this outcome is worth showing a later turn.
+func (o *Outcome) Notable() bool {
+	return o != nil && (len(o.Problems) > 0 || o.Status != "replied")
 }
 
 type Session struct {
@@ -106,7 +141,14 @@ func (s *Store) History(person string, now time.Time) []llm.Message {
 			break
 		}
 		size += n
-		keep = append(keep, sess.Exchanges[i].Messages)
+		msgs := sess.Exchanges[i].Messages
+		// A failed turn carries its outcome into the next one: without it the
+		// model repeats what didn't work (D-051).
+		if o := sess.Exchanges[i].Outcome; o.Notable() {
+			msgs = append(append([]llm.Message{}, msgs...),
+				llm.Message{Role: llm.RoleUser, Content: o.Line()})
+		}
+		keep = append(keep, msgs)
 	}
 	var out []llm.Message
 	for i := len(keep) - 1; i >= 0; i-- {
@@ -186,7 +228,7 @@ func (s *Store) expire(now time.Time, person string) {
 			slog.Warn("session: remove failed", "person", sess.Person, "err", err)
 		}
 		slog.Info("session: closed", "person", sess.Person, "exchanges", len(sess.Exchanges),
-			"started", sess.Started.UTC().Format(time.RFC3339))
+			"started", sess.Started.Format(time.RFC3339))
 	}
 }
 
@@ -213,8 +255,8 @@ func writeAtomic(path string, b []byte) error {
 // said and what was done, from the recorded messages only.
 func (sess *Session) Markdown() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Conversation %s – %s\n", sess.Started.UTC().Format("2006-01-02 15:04"),
-		sess.LastActive.UTC().Format("15:04 MST"))
+	fmt.Fprintf(&b, "# Conversation %s – %s\n", sess.Started.Local().Format("2006-01-02 15:04"),
+		sess.LastActive.Local().Format("15:04 MST"))
 	connectors := map[string]bool{}
 	for _, ex := range sess.Exchanges {
 		connectors[ex.Connector] = true
@@ -234,7 +276,7 @@ func (sess *Session) Markdown() string {
 		for _, m := range ex.Messages {
 			switch {
 			case m.Role == llm.RoleUser:
-				fmt.Fprintf(&b, "\n**%s** (%s, %s): %s\n", who, ex.Connector, ex.At.UTC().Format("15:04"), m.Content)
+				fmt.Fprintf(&b, "\n**%s** (%s, %s): %s\n", who, ex.Connector, ex.At.Local().Format("15:04"), m.Content)
 			case m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0:
 				for _, tc := range m.ToolCalls {
 					fmt.Fprintf(&b, "\n> called `%s` %s\n", tc.Function.Name, oneLine(tc.Function.Arguments))
@@ -245,8 +287,23 @@ func (sess *Session) Markdown() string {
 				fmt.Fprintf(&b, "> result: %s\n", oneLine(m.Content))
 			}
 		}
+		// What went wrong is part of the record: a transcript that only shows
+		// the reply teaches the wrong lesson when the reply was wrong (D-051).
+		if o := ex.Outcome; o.Notable() {
+			fmt.Fprintf(&b, "\n> outcome: %s after %d step%s\n", o.Status, o.Steps, plural(o.Steps))
+			for _, p := range o.Problems {
+				fmt.Fprintf(&b, "> failed: %s\n", p)
+			}
+		}
 	}
 	return b.String()
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func oneLine(s string) string {

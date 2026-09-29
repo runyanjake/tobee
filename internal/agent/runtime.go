@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -22,7 +23,7 @@ const (
 	reactFailed    = "❌"
 )
 
-// Config holds turn-level limits; step caps live on Executor.
+// Config holds turn-level limits; the step cap lives on the strategy (Loop).
 type Config struct {
 	TurnBudget time.Duration // wall-clock cap per turn
 }
@@ -140,7 +141,41 @@ func (r *Runtime) record(t *Turn) {
 		Channel:   t.Event.Origin.Channel,
 		UserName:  t.Event.Actor.Name,
 		Messages:  msgs,
+		Outcome:   outcome(t),
 	})
+}
+
+// outcome is the turn's own account of what it tried and what failed, written
+// from the records code kept, never from the model's words (D-051). The
+// session carries it into later turns and into the archived transcript.
+func outcome(t *Turn) *session.Outcome {
+	o := &session.Outcome{Status: "replied", Steps: t.Steps}
+	if t.Await != nil {
+		o.Status = "parked"
+	} else if t.Reply == "" {
+		o.Status = "no reply"
+	}
+	for _, a := range t.Actions {
+		mark := "✅"
+		if !a.OK {
+			mark = "❌"
+		}
+		o.Acted = append(o.Acted, fmt.Sprintf("%s %s: %s", mark, a.Tool, a.Result))
+	}
+	for _, p := range t.Problems {
+		line := p.Detail
+		if p.Tool != "" {
+			line = p.Tool + ": " + p.Detail
+		}
+		if p.Recovered {
+			line += " (recovered)"
+		}
+		o.Problems = append(o.Problems, line)
+	}
+	if !o.Notable() && len(o.Acted) == 0 {
+		return nil // a clean turn's messages already say everything
+	}
+	return o
 }
 
 // park logs the already-sent question as the turn's output so every turn ends with one output record.
