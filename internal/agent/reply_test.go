@@ -52,7 +52,7 @@ func TestRenderReplyVerbatim(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := renderReply(tc.args, tc.verbatim); got != tc.want {
+			if got := renderReply(tc.args, tc.verbatim, nil); got != tc.want {
 				t.Fatalf("renderReply() =\n%q\nwant\n%q", got, tc.want)
 			}
 		})
@@ -65,6 +65,7 @@ func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 	got := renderReply(
 		replyArgs{Spoken: "Discord checked and found 1 inbound message in the last hour."},
 		[]VerbatimBlock{{Tool: "status_summary", Body: body}},
+		nil,
 	)
 	if !strings.Contains(got, body) {
 		t.Fatalf("renderReply() dropped the verbatim block:\n%s", got)
@@ -74,7 +75,7 @@ func TestRenderReplyVerbatimSurvivesModelRewording(t *testing.T) {
 // When the synthesiser dies, the loop falls back to what the tools already rendered.
 func TestRenderReplyVerbatimOnlyIsDeliverable(t *testing.T) {
 	const body = "Discord is connected and saw 2 inbound messages in the window."
-	got := renderReply(replyArgs{}, []VerbatimBlock{{Tool: "status_summary", Body: body}})
+	got := renderReply(replyArgs{}, []VerbatimBlock{{Tool: "status.summary", Body: body}}, nil)
 	if got != body {
 		t.Fatalf("renderReply() = %q, want %q", got, body)
 	}

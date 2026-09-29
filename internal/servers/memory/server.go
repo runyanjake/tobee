@@ -6,11 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
 	"time"
 
-	"github.com/runyanjake/tobee/internal/datedname"
 	"github.com/runyanjake/tobee/internal/mcpserver"
 	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scope"
@@ -34,15 +34,13 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 
 	srv.Add(mcpserver.Tool{
 		Name: "write",
-		Description: `Create or overwrite a memory file. Pass the filename you want; the backend ` +
-			`prepends today's date and kebab-cases the name. "My Notes.md" becomes ` +
-			`"YYYY.MM.DD-my-notes.md". Subdirectories are preserved. scope="user" (default) ` +
-			`writes to the active user's tree; scope="shared" writes to cross-user knowledge.`,
+		Description: `Create or overwrite a memory file at exactly the path given. ` +
+			`scope "user" (default) is the current user's files; "shared" is visible to everyone.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"path":    {"type": "string", "description": "Filename (with optional subdir). Date prefix and kebab-case applied automatically. Do not add a date yourself."},
-				"content": {"type": "string", "description": "Full file contents"},
+				"path":    {"type": "string", "description": "Path within the scope, e.g. INDEX.md or topics/food.md."},
+				"content": {"type": "string", "description": "Full file contents."},
 				"scope":   {"type": "string", "enum": ["user", "shared"], "description": "Default \"user\"."}
 			},
 			"required": ["path", "content"]
@@ -51,21 +49,32 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 	})
 
 	srv.Add(mcpserver.Tool{
-		Name: "append",
-		Description: `Append content to a memory file, creating it if needed. Filename is ` +
-			`auto-stamped with today's date and kebab-cased the first time it is created; ` +
-			`subsequent appends in the same turn target the same dated file. Prefer this over ` +
-			`memory_write when adding to a list or journal.`,
+		Name:        "append",
+		Description: `Append to a memory file, creating it if needed. Prefer this over memory_write for lists and journals.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"path":    {"type": "string", "description": "Filename (with optional subdir). Date prefix and kebab-case applied automatically."},
-				"content": {"type": "string", "description": "Text to append (include leading newline if needed)"},
+				"path":    {"type": "string", "description": "Path within the scope."},
+				"content": {"type": "string", "description": "Text to append; include a leading newline if needed."},
 				"scope":   {"type": "string", "enum": ["user", "shared"], "description": "Default \"user\"."}
 			},
 			"required": ["path", "content"]
 		}`),
 		Handler: appendHandler(fs),
+	})
+
+	srv.Add(mcpserver.Tool{
+		Name:        "delete",
+		Description: `Delete memory files. The user is asked to confirm before anything is deleted.`,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"uris": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "memory:// URIs of the files, as memory_list returns them."}
+			},
+			"required": ["uris"]
+		}`),
+		Destructive: true,
+		Handler:     deleteHandler(fs),
 	})
 
 	srv.Add(mcpserver.Tool{
@@ -158,17 +167,22 @@ func joinScope(root scopedRoot, p string) (string, error) {
 // uri renders a scope-relative path as memory://<scope>/<path>.
 func uri(label, rel string) string { return uriPrefix + label + "/" + rel }
 
+// resolveURI maps memory://<scope>/<path> to an FS path inside that scope.
+func resolveURI(ctx context.Context, u string) (string, error) {
+	label, rel, ok := strings.Cut(strings.TrimPrefix(u, uriPrefix), "/")
+	if !strings.HasPrefix(u, uriPrefix) || !ok || rel == "" {
+		return "", fmt.Errorf("%q is not memory://<scope>/<path>", u)
+	}
+	root, err := writableRoot(ctx, label)
+	if err != nil {
+		return "", err
+	}
+	return joinScope(root, rel)
+}
+
 func readResource(fs *sandboxfs.FS) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, u string) (string, error) {
-		label, rel, ok := strings.Cut(strings.TrimPrefix(u, uriPrefix), "/")
-		if !ok || rel == "" {
-			return "", fmt.Errorf("%q is not memory://<scope>/<path>", u)
-		}
-		root, err := writableRoot(ctx, label)
-		if err != nil {
-			return "", err
-		}
-		full, err := joinScope(root, rel)
+		full, err := resolveURI(ctx, u)
 		if err != nil {
 			return "", err
 		}
@@ -190,18 +204,14 @@ func writeHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		if err != nil {
 			return "", err
 		}
-		dated, err := datedname.Apply(in.Path, time.Now())
-		if err != nil {
-			return "", err
-		}
-		full, err := joinScope(root, dated)
+		full, err := joinScope(root, in.Path)
 		if err != nil {
 			return "", err
 		}
 		if err := fs.Write(full, in.Content); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("wrote %s (%d bytes)", uri(root.Label, dated), len(in.Content)), nil
+		return fmt.Sprintf("wrote %s (%d bytes)", uri(root.Label, strings.TrimPrefix(in.Path, "/")), len(in.Content)), nil
 	}
 }
 
@@ -219,18 +229,14 @@ func appendHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		if err != nil {
 			return "", err
 		}
-		dated, err := datedname.Apply(in.Path, time.Now())
-		if err != nil {
-			return "", err
-		}
-		full, err := joinScope(root, dated)
+		full, err := joinScope(root, in.Path)
 		if err != nil {
 			return "", err
 		}
 		if err := fs.Append(full, in.Content); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("appended to %s (%d bytes)", uri(root.Label, dated), len(in.Content)), nil
+		return fmt.Sprintf("appended to %s (%d bytes)", uri(root.Label, strings.TrimPrefix(in.Path, "/")), len(in.Content)), nil
 	}
 }
 
@@ -311,4 +317,87 @@ func listHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		}
 		return out, nil
 	}
+}
+
+// deleteHandler deletes every file it can and reports each outcome, so the
+// reply's action line matches the filesystem exactly.
+func deleteHandler(fs *sandboxfs.FS) mcpserver.Handler {
+	return func(ctx context.Context, args json.RawMessage) (string, error) {
+		var in struct {
+			URIs []string `json:"uris"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil {
+			return "", fmt.Errorf("invalid args: %w", err)
+		}
+		var deleted, failed []string
+		for _, u := range in.URIs {
+			full, err := resolveURI(ctx, u)
+			if err == nil {
+				err = fs.Delete(full)
+			}
+			if err != nil {
+				failed = append(failed, fmt.Sprintf("%s (%v)", u, err))
+				continue
+			}
+			deleted = append(deleted, u)
+		}
+		var sb strings.Builder
+		if len(deleted) > 0 {
+			fmt.Fprintf(&sb, "deleted %s", strings.Join(deleted, ", "))
+		}
+		if len(failed) > 0 {
+			if sb.Len() > 0 {
+				sb.WriteString("; ")
+			}
+			fmt.Fprintf(&sb, "not deleted: %s", strings.Join(failed, ", "))
+		}
+		if len(deleted) == 0 {
+			return "", fmt.Errorf("%s", sb.String())
+		}
+		return sb.String(), nil
+	}
+}
+
+// LinkIdentities moves a newly linked person's memory from its old
+// per-account folder (users/<connector>/<account>) to users/<person>, so
+// linking accounts never strands what was already remembered (D-045). With
+// several old folders, the first moves and the rest are left for a human to
+// merge.
+func LinkIdentities(fs *sandboxfs.FS, people map[string][]string) {
+	for person, accounts := range people {
+		target := "users/" + person
+		if fs.DirExists(target) {
+			continue
+		}
+		moved := false
+		for _, acct := range accounts {
+			conn, id, _ := strings.Cut(acct, ":")
+			legacy := scope.UserScope{Connector: conn, User: id}.Dir()
+			if !fs.DirExists(legacy) {
+				continue
+			}
+			if moved {
+				slog.Warn("memory: another account folder for this person; merge by hand",
+					"person", person, "folder", legacy, "into", target)
+				continue
+			}
+			if err := fs.Rename(legacy, target); err != nil {
+				slog.Error("memory: link failed", "person", person, "from", legacy, "err", err)
+				continue
+			}
+			slog.Info("memory: linked account folder to person", "person", person, "from", legacy, "to", target)
+			moved = true
+		}
+	}
+}
+
+// ArchiveTranscript writes a closed session under the person's
+// conversations/ folder, where memory_search and resources_read reach it.
+func ArchiveTranscript(fs *sandboxfs.FS, person string, started time.Time, markdown string) error {
+	dir := scope.UserScope{Person: person, User: person}.Dir()
+	path := fmt.Sprintf("%s/conversations/%s.md", dir, started.UTC().Format("2006/01/02-1504"))
+	for i := 2; fs.Exists(path); i++ {
+		path = fmt.Sprintf("%s/conversations/%s-%d.md", dir, started.UTC().Format("2006/01/02-1504"), i)
+	}
+	return fs.Write(path, markdown)
 }

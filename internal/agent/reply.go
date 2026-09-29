@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -36,9 +37,9 @@ type replyArgs struct {
 }
 
 // renderReply writes spoken, then each artifact fenced, then verbatim tool
-// output appended by code (D-030). Multi-line verbatim is fenced so it
-// renders as written.
-func renderReply(args replyArgs, verbatim []VerbatimBlock) string {
+// output (D-030), then one line per action taken (D-047) — the last two by
+// code, so what the user reads about the world matches what happened.
+func renderReply(args replyArgs, verbatim []VerbatimBlock, actions []Action) string {
 	var sb strings.Builder
 	if spoken := strings.TrimSpace(args.Spoken); spoken != "" {
 		sb.WriteString(spoken)
@@ -67,6 +68,21 @@ func renderReply(args replyArgs, verbatim []VerbatimBlock) string {
 			sb.WriteString("\n```")
 		} else {
 			sb.WriteString(v.Body)
+		}
+	}
+	if len(actions) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		for i, a := range actions {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			mark := "✅"
+			if !a.OK {
+				mark = "❌"
+			}
+			fmt.Fprintf(&sb, "%s %s: %s", mark, a.Tool, a.Result)
 		}
 	}
 	return sb.String()

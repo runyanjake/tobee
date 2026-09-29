@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-tobee is a self-hosted personal AI assistant, written in Go as one long-running process. It is an MCP host. Input comes from pluggable ingest sources (Discord, email, its own scheduled jobs, MCP resource notifications) through a durable task queue. A single serial runtime runs each task through a reasoning strategy (today: a tool-calling agent loop that ends when the model calls `reply`) against an LLM behind the `llm.Model` interface, where every call is a schema-constrained choice of one tool. Every tool, built-in or third-party, is served by an MCP server. The reply goes back to where the event came from. Everything it remembers is plain text under `data/`. There is no database, no vector store, and no chat history carried between turns; only a parked clarifying question survives a turn.
+tobee is a self-hosted personal AI assistant, written in Go as one long-running process. It is an MCP host. Input comes from pluggable ingest sources (Discord, email, its own scheduled jobs, MCP resource notifications) through a durable task queue. A single serial runtime runs each task through a reasoning strategy (today: a tool-calling agent loop that ends when the model calls `reply`) against an LLM behind the `llm.Model` interface, where every call is a schema-constrained choice of one tool. Every tool, built-in or third-party, is served by an MCP server. The reply goes back to where the event came from. Everything it remembers is plain text under `data/`. There is no database and no vector store. Each person, linked across connectors, has one live session of recent exchanges, which is archived to memory as a transcript after inactivity.
 
 ## Tech Stack & Tooling
 
@@ -40,13 +40,14 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
 | `internal/sandboxfs/` | Path-sandboxed filesystem backing memory and workspace areas. |
 | `internal/workspace/` | Parses `WORKSPACE_AREA_*` env vars into sandboxed areas. |
 | `internal/scope/` | Per-turn user/channel scope on `context.Context` and in MCP `_meta`. |
-| `internal/datedname/` | Filename date-stamping helper. |
 | `internal/telemetry/` | Log categories and correlation (D-040). |
+| `internal/identity/` | Links connector accounts to one person (D-045). |
+| `internal/session/` | Per-person conversation sessions: history, idle expiry, transcripts (D-046). |
 | `prompts/system/` | System prompt fragments, served as pinned resources by the `system` server in filename order (D-042). |
 | `prompts/servers/` | MCP `instructions` for each built-in server, one file per server name. |
 | `prompts/state/` | `turn.md`: the one directive appended after the user's message. |
 | `static/images/` | Cat photos. Not referenced by code. |
-| `data/` | Runtime state (gitignored): `memory/`, `scheduler/jobs/`, `tasks/`. |
+| `data/` | Runtime state (gitignored): `memory/`, `scheduler/jobs/`, `tasks/`, `sessions/`. |
 | `.claude/` | This knowledge base. |
 
 ## Developer Workflow Commands
@@ -109,12 +110,13 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 ### Agent loop
 
 - Tasks are processed one at a time on purpose (D-005). Don't parallelize consumption.
-- No chat history carries across turns (D-027). Don't reintroduce session buffers or summarizers. Persistence goes through `memory_*`. The only exception is a parked task, which holds the request and the question, never a transcript (D-036).
+- History is the person's session, recorded by code: user messages, tool calls with real results, and delivered replies (D-046). Don't store model drafts or summaries in it, and don't key it by channel or connector; key by person (D-045).
+- Anything the reply says happened must be backed by code: action lines come from real tool results, and destructive calls go through the code-written approval (D-047). Never make a prompt instruction the only guard against a false claim or a destructive action.
 - New reasoning schemes implement `agent.Strategy` and are selected by `AGENT_STRATEGY` (D-037). The runtime owns scope, budget, delivery, and parking; a strategy only fills `Turn.Reply` or `Turn.Await`.
 - Keep the turn budget and `AGENT_MAX_STEPS`. Don't raise or remove them to make one case work.
 - Every model call goes through `llm.Model.Decide`: the model picks exactly one of the offered tools. The loop offers the MCP catalog plus its own `reply` and `plan`. Never call a provider directly, and keep request shape, output mode, and wire quirks inside `internal/llm/<provider>` (D-041).
 - Keep the turn a single loop (D-043). Don't reintroduce fixed phases (a planning call, per-step executors, a synthesis pass); structure the model needs is a tool it can choose, like `plan`.
-- Give every built-in tool honest annotations: `ReadOnly` for reads, `OpenWorld` for anything reaching people or outside systems. Categories are derived from them and only group the menu (D-044).
+- Give every built-in tool honest annotations: `ReadOnly` for reads, `OpenWorld` for anything reaching people or outside systems, `Destructive` for anything that deletes or irreversibly overwrites. Categories are derived from them and only group the menu (D-044); `Destructive` makes the user approve each call (D-047).
 - Output that isn't a valid choice is never appended to the conversation; the phase appends its nudge and retries once.
 - Anything that must be shown to the user word for word is enforced in code (`mcpserver.Tool.Verbatim` → `tobee/verbatim`), never by prompt instruction (D-030).
 - Never merge the user's text into a phase template. Directives go in `<phase>` tags (D-029).
@@ -151,7 +153,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-045**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-049**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

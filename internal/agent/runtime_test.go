@@ -17,7 +17,10 @@ import (
 	"github.com/runyanjake/tobee/internal/llm"
 	"github.com/runyanjake/tobee/internal/mcphost"
 	"github.com/runyanjake/tobee/internal/mcpserver"
+	"github.com/runyanjake/tobee/internal/sandboxfs"
+	memoryserver "github.com/runyanjake/tobee/internal/servers/memory"
 	userserver "github.com/runyanjake/tobee/internal/servers/user"
+	"github.com/runyanjake/tobee/internal/session"
 	"github.com/runyanjake/tobee/internal/taskqueue"
 	"github.com/runyanjake/tobee/internal/telemetry"
 )
@@ -88,12 +91,13 @@ func (c *chat) Send(_ context.Context, _ event.Address, text string) (string, er
 }
 
 type harness struct {
-	out   *delivery.Router
-	loop  *Loop
-	llm   *scriptedLLM
-	chat  *chat
-	queue *taskqueue.Queue
-	rt    *Runtime
+	sessions *session.Store
+	out      *delivery.Router
+	loop     *Loop
+	llm      *scriptedLLM
+	chat     *chat
+	queue    *taskqueue.Queue
+	rt       *Runtime
 }
 
 func newHarness(t *testing.T, extra ...*mcpserver.Server) *harness {
@@ -121,8 +125,12 @@ func newHarness(t *testing.T, extra ...*mcpserver.Server) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := NewRuntime(q, &ContextBuilder{Host: host}, out, loop, Config{TurnBudget: 10 * time.Second})
-	return &harness{llm: fake, chat: ch, queue: q, rt: rt, out: out, loop: loop}
+	sessions, err := session.Open(t.TempDir(), time.Hour, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := NewRuntime(q, &ContextBuilder{Host: host}, out, loop, Config{TurnBudget: 10 * time.Second}).WithSessions(sessions)
+	return &harness{llm: fake, chat: ch, queue: q, rt: rt, out: out, loop: loop, sessions: sessions}
 }
 
 func (h *harness) runNext(t *testing.T, ev event.Event) *taskqueue.Task {
@@ -143,7 +151,7 @@ func (h *harness) runNext(t *testing.T, ev event.Event) *taskqueue.Task {
 func chatEvent(id, content, inReplyTo string) event.Event {
 	return event.Event{
 		ID: id, Source: "chat", Kind: event.KindMessage,
-		Actor:     event.Actor{ID: "u1", Name: "jake"},
+		Actor:     event.Actor{ID: "u1", Name: "jake", Person: "jake"},
 		Origin:    event.Address{Connector: "chat", Channel: "c1"},
 		InReplyTo: inReplyTo, Content: content,
 	}
@@ -352,4 +360,161 @@ type editableChat struct {
 func (c *editableChat) Edit(_ context.Context, _ event.Address, _, text string) error {
 	c.edits = append(c.edits, text)
 	return nil
+}
+
+func memoryServer(t *testing.T, files ...string) (*mcpserver.Server, *sandboxfs.FS) {
+	t.Helper()
+	fs, err := sandboxfs.NewFS(t.TempDir(), 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		_ = fs.Write("users/jake/"+f, "content of "+f)
+	}
+	return memoryserver.New("", fs), fs
+}
+
+// "Delete these" needs the previous message: a session carries it into the
+// next turn, including what tools really returned (D-046).
+func TestSessionCarriesTheConversation(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(call{name: "reply", args: `{"spoken":"You have a.md and b.md."}`})
+	h.runNext(t, chatEvent("e1", "list my files", ""))
+
+	h.llm.script(call{name: "reply", args: `{"spoken":"ok"}`})
+	h.runNext(t, chatEvent("e2", "delete these", ""))
+
+	var convo []string
+	for _, m := range h.llm.requests[1][1:] {
+		if strings.HasPrefix(m.Content, "<phase") {
+			break
+		}
+		convo = append(convo, string(m.Role)+":"+m.Content)
+	}
+	want := []string{"user:list my files", "assistant:You have a.md and b.md.", "user:delete these"}
+	if strings.Join(convo, "|") != strings.Join(want, "|") {
+		t.Fatalf("conversation = %q, want %q", convo, want)
+	}
+}
+
+// A session belongs to the person, not the connector: Discord then email
+// is one conversation, and the reply goes where the new message came from.
+func TestSessionFollowsThePersonAcrossConnectors(t *testing.T) {
+	h := newHarness(t)
+	mail := &chat{}
+	h.out.Register("mail", mail)
+
+	h.llm.script(call{name: "reply", args: `{"spoken":"Noted."}`})
+	h.runNext(t, chatEvent("e1", "my dog is Biscuit", ""))
+
+	ev := chatEvent("e2", "what is my dog called?", "")
+	ev.Source, ev.Origin = "mail", event.Address{Connector: "mail", Channel: "jake@example.com"}
+	ev.Actor.ID = "jake@example.com"
+	h.llm.script(call{name: "reply", args: `{"spoken":"Biscuit."}`})
+	h.runNext(t, ev)
+
+	joined := ""
+	for _, m := range h.llm.requests[1] {
+		joined += m.Content + "\n"
+	}
+	if !strings.Contains(joined, "my dog is Biscuit") {
+		t.Fatal("email turn did not see the Discord message")
+	}
+	if len(mail.sent) != 1 || mail.sent[0] != "Biscuit." {
+		t.Fatalf("mail sent = %q", mail.sent)
+	}
+}
+
+// A destructive call runs only after a plain yes, exactly as proposed, and
+// the reply reports what really happened in a code-written line (D-047).
+func TestDestructiveCallNeedsApproval(t *testing.T) {
+	mem, fs := memoryServer(t, "a.md", "b.md")
+	h := newHarness(t, mem)
+
+	h.llm.script(call{name: "memory_delete", args: `{"uris":["memory://user/a.md"]}`})
+	h.runNext(t, chatEvent("e1", "delete a.md", ""))
+
+	if !fs.Exists("users/jake/a.md") {
+		t.Fatal("deleted before approval")
+	}
+	if len(h.chat.sent) != 1 || !strings.HasPrefix(h.chat.sent[0], "Confirm: memory_delete") {
+		t.Fatalf("sent = %q, want the code-written confirmation", h.chat.sent)
+	}
+
+	h.llm.script(call{name: "reply", args: `{"spoken":"Deleted a.md."}`})
+	h.runNext(t, chatEvent("e2", "yes", "m1"))
+
+	if fs.Exists("users/jake/a.md") || !fs.Exists("users/jake/b.md") {
+		t.Fatal("approval did not delete exactly the proposed file")
+	}
+	if got := h.chat.sent[1]; !strings.Contains(got, "✅ memory_delete: deleted memory://user/a.md") {
+		t.Fatalf("reply = %q, want the action line", got)
+	}
+}
+
+func TestDeclinedCallDoesNotRun(t *testing.T) {
+	mem, fs := memoryServer(t, "a.md")
+	h := newHarness(t, mem)
+	h.llm.script(call{name: "memory_delete", args: `{"uris":["memory://user/a.md"]}`})
+	h.runNext(t, chatEvent("e1", "delete a.md", ""))
+
+	// The model may still claim success; the code-written line says otherwise.
+	h.llm.script(call{name: "reply", args: `{"spoken":"Done, it's gone."}`})
+	h.runNext(t, chatEvent("e2", "actually no", "m1"))
+
+	if !fs.Exists("users/jake/a.md") {
+		t.Fatal("declined delete ran")
+	}
+	if got := h.chat.sent[1]; !strings.Contains(got, "❌ memory_delete: not run: not approved") {
+		t.Fatalf("reply = %q", got)
+	}
+}
+
+// An identical read in the same turn returns the earlier result instead of
+// running again, until a write could have changed it.
+func TestRepeatedReadIsNotRerun(t *testing.T) {
+	mem, _ := memoryServer(t, "a.md")
+	h := newHarness(t, mem)
+	h.llm.script(
+		call{name: "memory_list", args: `{}`},
+		call{name: "memory_list", args: `{}`},
+		call{name: "reply", args: `{"spoken":"a.md"}`},
+	)
+	h.runNext(t, chatEvent("e1", "list", ""))
+
+	last := h.llm.requests[2][len(h.llm.requests[2])-1]
+	if last.Role != llm.RoleTool || !strings.Contains(last.Content, "Same call as earlier") {
+		t.Fatalf("repeat not caught: %+v", last)
+	}
+}
+
+// Writes show up under the reply whatever the model says about them.
+func TestWriteIsReportedUnderTheReply(t *testing.T) {
+	mem, _ := memoryServer(t)
+	h := newHarness(t, mem)
+	h.llm.script(
+		call{name: "memory_write", args: `{"path":"INDEX.md","content":"- nothing yet"}`},
+		call{name: "reply", args: `{"spoken":"Saved."}`},
+	)
+	h.runNext(t, chatEvent("e1", "start an index", ""))
+	if got := h.chat.sent[0]; got != "Saved.\n\n✅ memory_write: wrote memory://user/INDEX.md (13 bytes)" {
+		t.Fatalf("reply = %q", got)
+	}
+}
+
+// A question asked on one connector can be answered on another: the
+// person key matches when neither the reply nor the channel does (D-045).
+func TestQuestionAnsweredFromAnotherConnector(t *testing.T) {
+	h := newHarness(t)
+	mail := &chat{}
+	h.out.Register("mail", mail)
+	h.llm.script(call{name: "user_ask", args: `{"question":"Which file?"}`})
+	h.runNext(t, chatEvent("e1", "rename the file", ""))
+
+	ev := chatEvent("e2", "notes.md", "")
+	ev.Source, ev.Origin, ev.Actor.ID = "mail", event.Address{Connector: "mail", Channel: "jake@example.com"}, "jake@example.com"
+	h.llm.script(call{name: "reply", args: `{"spoken":"Renamed."}`})
+	if task := h.runNext(t, ev); task.Resume == nil {
+		t.Fatal("answer from another connector did not resume the question")
+	}
 }

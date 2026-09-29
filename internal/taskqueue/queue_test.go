@@ -71,7 +71,7 @@ func TestParkAndResume(t *testing.T) {
 
 	addr := task.Event.Origin
 	keys := []string{event.ReplyKey(addr, "q-msg"), event.ActorKey(addr, "u")}
-	if err := q.Park(task, "Which file?", keys); err != nil {
+	if err := q.Park(task, "Which file?", keys, nil); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestParkedTaskExpires(t *testing.T) {
 	q, _ := Open(t.TempDir(), 10)
 	_ = q.Enqueue(msg("1", "u", "do it", ""))
 	task := next(t, q)
-	_ = q.Park(task, "Sure?", []string{event.ActorKey(task.Event.Origin, "u")})
+	_ = q.Park(task, "Sure?", []string{event.ActorKey(task.Event.Origin, "u")}, nil)
 	for _, p := range q.parked {
 		p.Asked = time.Now().Add(-ParkTTL - time.Minute)
 	}

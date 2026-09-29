@@ -6,18 +6,43 @@ import "github.com/runyanjake/tobee/internal/llm"
 type Conversation struct {
 	Messages []llm.Message
 
+	// turnStart is where this turn's messages begin, after the system
+	// prompt and session history; harness marks directives and nudges,
+	// which are never saved to the session.
+	turnStart int
+	harness   map[int]bool
+
 	logged int // Messages already written to the debug log (see logNewMessages)
 }
 
-func NewConversation(systemPrompt string) *Conversation {
-	msgs := make([]llm.Message, 0, 8)
+func NewConversation(systemPrompt string, history []llm.Message) *Conversation {
+	msgs := make([]llm.Message, 0, 8+len(history))
 	if systemPrompt != "" {
 		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: systemPrompt})
 	}
-	return &Conversation{Messages: msgs}
+	msgs = append(msgs, history...)
+	return &Conversation{Messages: msgs, turnStart: len(msgs), harness: map[int]bool{}}
 }
 
 // Append adds a message; never mutate earlier positions, every call resends them.
 func (c *Conversation) Append(m llm.Message) {
 	c.Messages = append(c.Messages, m)
+}
+
+// AppendHarness adds a message the harness wrote rather than the user or model.
+func (c *Conversation) AppendHarness(m llm.Message) {
+	c.harness[len(c.Messages)] = true
+	c.Messages = append(c.Messages, m)
+}
+
+// TurnMessages is this turn's user, model, and tool messages, without
+// harness directives: what gets saved to the session.
+func (c *Conversation) TurnMessages() []llm.Message {
+	var out []llm.Message
+	for i := c.turnStart; i < len(c.Messages); i++ {
+		if !c.harness[i] {
+			out = append(out, c.Messages[i])
+		}
+	}
+	return out
 }

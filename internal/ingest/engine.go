@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/runyanjake/tobee/internal/event"
+	"github.com/runyanjake/tobee/internal/identity"
 )
 
 // Emit is safe to call from any goroutine.
@@ -41,7 +42,8 @@ const (
 const dedupSize = 1024
 
 type Engine struct {
-	sink Sink
+	sink   Sink
+	people *identity.Directory // nil: every account is its own person
 
 	mu      sync.Mutex
 	ctx     context.Context // nil until Start
@@ -63,6 +65,13 @@ type running struct {
 	dropped  int
 	lastErr  string
 	lastAt   time.Time
+}
+
+// SetIdentities links accounts to people; call it before Start.
+func (e *Engine) SetIdentities(d *identity.Directory) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.people = d
 }
 
 func New(sink Sink) *Engine {
@@ -192,6 +201,9 @@ func (e *Engine) admit(r *running, ev event.Event) {
 	}
 	if ev.Received.IsZero() {
 		ev.Received = time.Now()
+	}
+	if ev.Actor.ID != "" && ev.Actor.Person == "" {
+		ev.Actor.Person = e.people.Person(ev.Origin.Connector, ev.Actor.ID)
 	}
 
 	e.mu.Lock()

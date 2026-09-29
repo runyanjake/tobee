@@ -18,6 +18,7 @@ const MetaKey = "tobee/scope"
 type UserScope struct {
 	Connector string `json:"connector"`
 	User      string `json:"user,omitempty"`
+	Person    string `json:"person,omitempty"` // connector-independent owner (D-045)
 	UserName  string `json:"userName,omitempty"`
 	Channel   string `json:"channel"`
 	Thread    string `json:"thread,omitempty"`
@@ -27,6 +28,7 @@ func FromEvent(e event.Event) UserScope {
 	return UserScope{
 		Connector: e.Origin.Connector,
 		User:      e.Actor.ID,
+		Person:    e.Actor.Person,
 		UserName:  e.Actor.Name,
 		Channel:   e.Origin.Channel,
 		Thread:    e.Origin.Thread,
@@ -40,11 +42,20 @@ func (s UserScope) Address() event.Address {
 func (s UserScope) HasUser() bool { return s.User != "" }
 
 // Key returns a sanitized "<connector>/<user>" safe for use as a path component.
+// Key is the person's memory key: "jake" for a linked person, or
+// "<connector>/<account>" for an unlinked one, matching the older layout.
 func (s UserScope) Key() string {
 	if !s.HasUser() {
 		return ""
 	}
-	return sanitize(s.Connector) + "/" + sanitize(s.User)
+	if s.Person == "" {
+		return sanitize(s.Connector) + "/" + sanitize(s.User)
+	}
+	conn, acct, ok := strings.Cut(s.Person, ":")
+	if !ok {
+		return sanitize(s.Person)
+	}
+	return sanitize(conn) + "/" + sanitize(acct)
 }
 
 // Dir is the memory-relative user tree, e.g. "users/discord/12345".
@@ -70,6 +81,7 @@ func (s UserScope) ToMeta() map[string]any {
 	return map[string]any{
 		"connector": s.Connector,
 		"user":      s.User,
+		"person":    s.Person,
 		"userName":  s.UserName,
 		"channel":   s.Channel,
 		"thread":    s.Thread,

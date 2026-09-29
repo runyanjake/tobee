@@ -18,7 +18,6 @@
 | **`<context>` tag** | The system-message section stamping `now`, source, kind, connector, channel, thread, and user (or `user=none`) for the turn. |
 | **Conversation** | The `agent.Conversation` for one task. A single growing `[]llm.Message` shared by all phases, plus the `Plan`. |
 | **D-0xx** | A design decision ID. Current ones are in `DESIGN.md#key-decisions`, superseded ones in `IMPLEMENTATION.md`. Cited in code comments; never reused. |
-| **Dated filename** | The `YYYY.MM.DD-kebab-name.ext` form that `datedname.Apply` gives every written memory or workspace file. |
 | **Deliver** | The runtime's last step: send `Turn.Reply` to the event's origin, then clear reactions (success) or add ❌ (empty reply). |
 | **Delivery router** | `delivery.Router`, the connector-name → `Channel` table the runtime and `user_ask` send through. |
 | **Event** | `event.Event`, the normalized inbound unit every source emits: ID, source, kind, actor, origin, message ID, in-reply-to, content. |
@@ -30,7 +29,11 @@
 | **JobManager** | `scheduler.JobManager`, which owns model-created jobs (cron or one-shot), their JSON files, and emits timer events as the `schedule` source. |
 | **`_meta`** | MCP's per-request/result metadata field. tobee uses `tobee/scope` (request), `tobee/verbatim` (tool definition), and `tobee/await` (result), only with trusted servers. |
 | **Log category** | The `cat` attribute on every log record: `input`, `thinking`, `action`, `output`, `llm`, or `system` (D-040). |
-| **Memory scope** | `user` (`data/memory/users/<connector>/<id>/`), `shared` (`data/memory/shared/`), or `both` (search and list only). |
+| **Action line** | A code-written line under the reply for each non-read tool call this turn, e.g. `✅ memory_delete: deleted …` (D-047). |
+| **Approval** | The code-written "Confirm: <tool> <args>" question a destructive call waits on. Only a plain yes runs the call, exactly as proposed (D-047). |
+| **Identity / person** | The human behind one or more connector accounts, linked with `IDENTITY_<NAME>` (D-045). |
+| **Session** | A person's live conversation across connectors. It's injected as history and archived to `memory://user/conversations/` after `SESSION_IDLE_TIMEOUT` (D-046). |
+| **Memory scope** | `user` (`data/memory/users/<person>/`), `shared` (`data/memory/shared/`), or `both` (search and list only). |
 | **Misfire policy: skip** | One-shot jobs whose time passed while tobee was down are deleted at boot, not run. |
 | **Model (`llm.Model`)** | The agent's only interface to an LLM: `Decide` returns exactly one call to one offered tool (D-041). Implemented by the OpenAI-compatible provider in `internal/llm/openai`. |
 | **Nudge** | The short "could not be read as a tool call" user message appended before the single retry of a phase. The unreadable output itself is dropped. |

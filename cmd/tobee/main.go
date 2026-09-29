@@ -19,6 +19,7 @@ import (
 	"github.com/runyanjake/tobee/internal/connectors/discord"
 	"github.com/runyanjake/tobee/internal/connectors/email"
 	"github.com/runyanjake/tobee/internal/delivery"
+	"github.com/runyanjake/tobee/internal/identity"
 	"github.com/runyanjake/tobee/internal/ingest"
 	"github.com/runyanjake/tobee/internal/llm"
 	"github.com/runyanjake/tobee/internal/llm/openai"
@@ -33,6 +34,7 @@ import (
 	systemserver "github.com/runyanjake/tobee/internal/servers/system"
 	userserver "github.com/runyanjake/tobee/internal/servers/user"
 	workspaceserver "github.com/runyanjake/tobee/internal/servers/workspace"
+	"github.com/runyanjake/tobee/internal/session"
 	"github.com/runyanjake/tobee/internal/taskqueue"
 	"github.com/runyanjake/tobee/internal/telemetry"
 	"github.com/runyanjake/tobee/internal/workspace"
@@ -72,6 +74,19 @@ func main() {
 	abilityReg.Register(queue.Reporter())
 	engine := ingest.New(queue)
 	abilityReg.Register(engine.Reporter())
+	people, err := identity.Load(os.Environ())
+	if err != nil {
+		fatal("identity: config", err)
+	}
+	engine.SetIdentities(people)
+	memoryserver.LinkIdentities(memFS, people.People())
+	sessions, err := session.Open(dataDir+"/sessions", mustDuration("SESSION_IDLE_TIMEOUT", 10*time.Minute),
+		func(sess *session.Session) error {
+			return memoryserver.ArchiveTranscript(memFS, sess.Person, sess.Started, sess.Markdown())
+		})
+	if err != nil {
+		fatal("session: open failed", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -180,11 +195,12 @@ func main() {
 	strategy := newStrategy(envOr("AGENT_STRATEGY", "react"), model, host, states, out)
 	runtime := agent.NewRuntime(queue, ctxb, out, strategy, agent.Config{
 		TurnBudget: mustDuration("AGENT_TURN_BUDGET", 2*time.Minute),
-	})
+	}).WithSessions(sessions)
 
 	// --- Lifecycle ------------------------------------------------------------
 	engine.Start(ctx)
 	runtime.Start(ctx)
+	go sessions.Run(ctx, 30*time.Second)
 	slog.Info("tobee is running — press Ctrl+C to exit",
 		"sources", engine.Names(), "channels", out.Names())
 

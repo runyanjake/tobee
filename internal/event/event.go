@@ -23,6 +23,9 @@ type Address struct {
 type Actor struct {
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
+	// Person is who the account belongs to across connectors, set by the
+	// ingest engine from the identity directory (D-045).
+	Person string `json:"person,omitempty"`
 }
 
 type Event struct {
@@ -53,6 +56,10 @@ func ActorKey(addr Address, actorID string) string {
 }
 
 // ResumeKeys returns most specific first; only a person's message can answer a question.
+// PersonKey identifies "the next message from this person, anywhere": an
+// answer started on Discord can arrive by email.
+func PersonKey(person string) string { return "person:" + person }
+
 func (e Event) ResumeKeys() []string {
 	if e.Kind != KindMessage || e.Actor.ID == "" {
 		return nil
@@ -61,5 +68,9 @@ func (e Event) ResumeKeys() []string {
 	if e.InReplyTo != "" {
 		keys = append(keys, ReplyKey(e.Origin, e.InReplyTo))
 	}
-	return append(keys, ActorKey(e.Origin, e.Actor.ID))
+	keys = append(keys, ActorKey(e.Origin, e.Actor.ID))
+	if e.Actor.Person != "" {
+		keys = append(keys, PersonKey(e.Actor.Person))
+	}
+	return keys
 }

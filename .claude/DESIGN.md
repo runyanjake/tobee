@@ -78,6 +78,8 @@ flowchart LR
 | `abilities.Registry` | `internal/abilities` | Collects `Reporter.Render` output from each subsystem, sorted by name. |
 | `sandboxfs.FS` | `internal/sandboxfs` | Filesystem rooted at one directory. Rejects paths that escape it. Per-instance file size cap. |
 | `telemetry` | `internal/telemetry` | Log categories, a context-carried logger for correlation attributes, content truncation, and the handler that tags untagged records `cat=system` (D-040). |
+| `identity.Directory` | `internal/identity` | Links connector accounts to one person from `IDENTITY_<NAME>`. Unlinked accounts are their own person, `<connector>:<account>` (D-045). |
+| `session.Store` | `internal/session` | Each person's live conversation across connectors: saved to `data/sessions/`, injected as history, archived to memory after `SESSION_IDLE_TIMEOUT` (D-046). |
 | `scope.UserScope` | `internal/scope` | Connector, user, user name, channel, and thread. Travels on `ctx` in the runtime and as `_meta["tobee/scope"]` to trusted servers. `Dir()` returns `users/<connector>/<user>`, sanitized. |
 
 ### Wiring order (`cmd/tobee/main.go`)
@@ -98,7 +100,7 @@ flowchart LR
 ### Event flow
 
 1. A source calls `emit(event)`.
-2. The engine fills in `Source`, `ID`, and `Received` if they are missing. It drops duplicates, then drops events whose actor is not on that source's allowlist. Events with no actor, such as timers, skip the allowlist.
+2. The engine fills in `Source`, `ID`, `Received`, and `Actor.Person` if they are missing. It drops duplicates, then drops events whose actor is not on that source's allowlist. Events with no actor, such as timers, skip the allowlist.
 3. `Queue.Enqueue` checks the event's resume keys against parked tasks. If one matches, the new task carries a `Resume`.
 4. The task is written to `data/tasks/pending/<nanos>-<id>.json` and the runtime is signalled.
 5. The runtime dequeues the task, increments `Attempts` on disk, and runs the turn. Then it calls `Done`, which deletes the file, or `Park`.
@@ -125,11 +127,24 @@ flowchart LR
 
 ### Parked tasks (D-036)
 
-- `user_ask` sends the question to the turn's origin and returns `_meta["tobee/await"] = {question, keys}`. The keys are `reply:<connector>:<channel>:<questionMsgID>` and `actor:<connector>:<channel>:<userID>`.
+- `user_ask` sends the question to the turn's origin and returns `_meta["tobee/await"] = {question, keys}`. The keys are:
+  - `reply:<connector>:<channel>:<questionMsgID>`
+  - `actor:<connector>:<channel>:<userID>`
+  - `person:<person>`, so an answer can arrive on another connector
+- A destructive tool call parks the same way, with a code-written question and the exact call stored as `Pending` (D-047).
 - The executor ends the step and the turn, and the runtime calls `Queue.Park`. The parked record holds the original request, the question, the keys, and the time asked. It never holds a transcript or plan.
-- A later `message` event from a person matches reply keys first, then actor keys; the most recent question wins. Expired records (over 24h) are deleted when found.
+- A later `message` event matches reply keys first, then actor keys, then the person key; the most recent question wins. Expired records (over 24h) are deleted when found.
 - The resumed turn opens with `user: <request>`, `assistant: <question>`, `user: <answer>`, then plans from scratch.
 - On Discord the answer must still be addressed, and replying to the question is the natural way. On email any reply from the same sender matches.
+
+## Sessions (D-045, D-046)
+
+- **Who:** a person, resolved from `IDENTITY_<NAME>=<connector>:<account>,…`. Linked accounts share one session and one memory tree, `users/<name>/`. Unlinked accounts keep `users/<connector>/<account>/`. At boot, linking moves an existing account folder to `users/<name>/`; if several exist, the first moves and the rest are logged for a manual merge.
+- **What:** each exchange's user messages, tool calls, and tool results (results truncated at 1,000 bytes), plus the reply as delivered. Model drafts and harness directives are not kept.
+- **Injection:** the newest whole exchanges, up to 16 KiB, go between the system message and the new request.
+- **Expiry:** after `SESSION_IDLE_TIMEOUT` (default 10m) without a message, checked every 30s and on the person's next message. The session is written by code as a markdown transcript to `memory://user/conversations/YYYY/MM/DD-HHMM.md`, then dropped. A failed archive is retried.
+- **Durability:** live sessions are saved to `data/sessions/<person>.json` on every exchange and reloaded at boot.
+- **Grounding:** the system prompt says earlier replies are only what was said; tool results and memory are facts. The session keeps real tool results, so later turns can check.
 
 ## Tools (MCP)
 
@@ -149,7 +164,7 @@ flowchart LR
 
 | Server | Tools | Notes |
 |---|---|---|
-| `memory` | `write`, `append`, `search`, `list`; template `memory://{scope}/{+path}` | See [Memory Model](#memory-model). |
+| `memory` | `write`, `append`, `delete`, `search`, `list`; template `memory://{scope}/{+path}` | See [Memory Model](#memory-model). |
 | `workspace` | `areas`, `list`, `write`, `search`; template `workspace://{area}/{+path}` | Only when areas exist. Area names, flags, and descriptions are appended to the instructions (never host paths). |
 | `schedule` | `create`, `cancel`, `list` | `create` needs a connector and channel in scope. |
 | `status` | `summary`, `report` | Verbatim. Reporters: `discord`, `email`, `ingest`, `mcp`, `schedules`, `tasks`. |
@@ -177,6 +192,7 @@ flowchart LR
 
 ```
 0    system  pinned resources + <servers> + <context>
+…    …       session history: earlier exchanges of this person's live conversation (D-046)
 1    user    the user's message, verbatim, untagged     (resumed: request, assistant question, answer)
 2    user    <phase name="turn">…</phase>
 3    asst    tool call: <one tool>                      offered: reply, plan, catalog
@@ -191,9 +207,13 @@ N    asst    tool call: reply                           ends the turn
 2. Each iteration is one model call offering `reply`, `plan`, and the catalog:
    - **`reply`** renders `spoken`, `artifacts`, and any verbatim blocks, and ends the turn. A greeting is one call.
    - **`plan`** stores the checklist and acknowledges `ok`. It is shown only on connectors that can edit the message, and only with two or more steps; later calls edit it.
+   - **A destructive tool** (MCP `destructiveHint`, true by default for non-read-only tools) doesn't run. The loop sends a code-written "Confirm: <tool> <args>" question and parks the task with the exact call. On resume, a plain yes runs that call unchanged; anything else cancels it. Either way, the model then continues (D-047).
    - **Any other tool** runs through the host and its result is appended. A verbatim result tells the model it is already shown. A `user_ask` result ends the turn so the runtime can park it (D-036).
+   - **A repeated identical read** within the turn returns the earlier result with a note, and is not run again. Any non-read call clears this.
+   - **Every non-read call is recorded as an action** with its real outcome.
 3. When `AGENT_MAX_STEPS` calls are spent, a budget nudge is appended and one last call offers only `reply`. If that fails, any verbatim blocks are delivered on their own.
 4. The runtime delivers `Turn.Reply`: non-empty clears the progress reactions; empty adds ❌. A parked turn clears its reactions.
+5. The runtime records the exchange in the person's session. It records this turn's user, tool-call, and tool-result messages; the reply is stored as the delivered text. Harness directives are left out. Parked turns are recorded when their task finishes.
 
 Replying to the origin is never a tool, and the send tools refuse the current conversation in code (D-035). An earlier design let `discord_send_message` answer the channel it was in, which duplicated the reply.
 
@@ -290,9 +310,12 @@ Every record has a `cat` attribute. Records from a turn also carry `task`, and r
 
 ### Output formatting (`renderReply`)
 
+The model writes item 1 and item 2. Code writes item 3 and item 4, so what the reply says about the world matches what happened.
+
 1. Trimmed `spoken` text.
 2. Each non-empty artifact as ```` ```<lang>\n<body>\n``` ````.
 3. Each verbatim block: single-line output is appended as plain text; multi-line output is wrapped in a bare code fence. Blocks with identical text appear once per turn.
+4. One line per action taken this turn: `✅ <tool>: <first line of the result>` or `❌ <tool>: <error, or "not run: not approved">` (D-047).
 4. Connector rendering. Discord turns outbound `@displayname` into `<@id>`, then splits at ≤2000 characters. Preferred break points, in order: after a closing fence, a paragraph break, a sentence end, a newline, then a hard cut. Email sends the text as a plain-text body.
 
 ## Prompt Architecture
@@ -331,16 +354,18 @@ No episodic tier: there are no sessions or summaries (D-027). Parked tasks keep 
 data/
 ├─ memory/
 │  ├─ shared/                        # scope="shared"
-│  └─ users/<connector>/<userId>/    # scope="user"; IDs sanitized to [A-Za-z0-9_-]
+│  └─ users/<person>/                # scope="user": a linked person's name, or <connector>/<account>
+│     └─ conversations/YYYY/MM/DD-HHMM.md   # session transcripts (D-046)
 ├─ scheduler/
 │  └─ jobs/<id>.json                 # one file per job; ids are "j-<8 hex>"
+├─ sessions/<person>.json          # live conversations (D-046)
 └─ tasks/
    ├─ pending/<nanos>-<id>.json      # queued and in-flight tasks; ids are "t-<8 hex>"
    └─ parked/<id>.json               # questions waiting on an answer
 ```
 
 - The prompts name only `INDEX.md` as the table of contents. File layout within a scope is left to the model.
-- Filenames actually written are rewritten by `datedname.Apply` to `<dir>/YYYY.MM.DD-<kebab-name><ext>`. See [IMPLEMENTATION.md](IMPLEMENTATION.md#known-limitations).
+- Paths are written exactly as given (D-048). `conversations/` holds session transcripts written by code.
 - Email users get their own tree, keyed by address: `users/email/me_example_com/`. The same person on Discord is a different user.
 
 ### Tools
@@ -348,8 +373,9 @@ data/
 | Tool | Args | Default scope | Notes |
 |---|---|---|---|
 | `resources_read` | `uri` (`memory://user/<path>` or `memory://shared/<path>`) | — | The read path; `user` resolves to the current user's tree |
-| `memory_write` | `path`, `content`, `scope` | `user` | Filename date-stamped; overwrites |
-| `memory_append` | `path`, `content`, `scope` | `user` | Filename date-stamped; creates if missing |
+| `memory_write` | `path`, `content`, `scope` | `user` | Path used as given; overwrites |
+| `memory_append` | `path`, `content`, `scope` | `user` | Path used as given; creates if missing |
+| `memory_delete` | `uris` | — | Destructive: runs only after the user approves (D-047). Files only, never directories. |
 | `memory_search` | `query`, `limit` (20), `scope` | `both` | Case-insensitive substring; `<scope>:<path>:<line>  <snippet>` |
 | `memory_list` | `dir`, `scope` | `both` | `<scope>:<path>` |
 
@@ -403,7 +429,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-019 | Workspace areas: operator-configured sandboxed roots; list carried in the workspace server's instructions. | Access limited to directories the operator opts in; no discovery calls needed. | Area names and descriptions are visible to the model. |
 | D-025 | Every model output is a tool call; one nudge-and-retry; no text fallbacks. | Every text escape hatch became a class of "the model decided" bugs. | An unreadable call costs a retry. |
 | D-026 | Memory is never pre-loaded into the prompt, and is never pinned (D-042); recall is a read. | Bounded prompt; auditable reads; no stale snapshots. | Recall costs 1–2 extra tool calls. |
-| D-027 | No chat history: no ring buffer, summarizer, or sessions. The only cross-turn state is a parked question (D-036). | Transcripts got polluted; summaries were hallucinated; sessions mixed users in shared channels. | "Make it spicy" has no referent unless it was saved to memory. |
+| D-027 | Superseded by D-046: history is a code-recorded session per person, not a model-written summary or a per-channel ring buffer. | — | — |
 | D-029 | One `Conversation` per request; the harness directive is its own `<phase>`-tagged message; every call offers every tool. | One system message enables prefix caching; the user's words are never mixed with directives. | The whole transcript is resent on each call. |
 | D-030 | Verbatim output is enforced in code, now as `tobee/verbatim` tool metadata honored for trusted servers; clock stamped in `<context>`; status takes a relative `window`. | "Relay verbatim" in prose was ignored; the model invented windows and state. | Only a short lead-in is written by the model on status turns. |
 | D-033 | MCP is the only tool plane. Built-ins are in-process MCP servers; the host aggregates `tools/list` into one catalog named `<server>_<tool>`; server instructions (from `prompts/servers/`) replace the hand-written catalogue. The loop adds its own tools, `reply` and `plan`. | One path for built-in and third-party tools; the catalog can't drift from what's callable; names valid on every OpenAI-compatible backend. | In-process servers can't see the turn's `ctx`, so scope rides in `_meta`. Tool renames touched every prompt. |
@@ -418,6 +444,10 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-042 | Servers expose readable content as MCP resources and resource templates, with URIs that mirror the folder tree (`memory://user/…`, `workspace://<area>/…`). The model reads any of them through the one `resources_read` tool; per-server read tools are gone. Resources a trusted server pins (priority 1) go into every system prompt, capped at 32 KiB; the only pinned set is `prompts/system/*.md`, served by the `system` server. | One read path for built-in and third-party content; files stay human-editable; the system prompt uses the same mechanism as any other context. | Pinned resources are read every turn. Memory is never pinned (D-026). Untrusted servers cannot pin (D-038). |
 | D-043 | A turn is one tool-calling agent loop (ReAct): each model call picks one tool from the catalog plus the loop's own `reply` and `plan`, until `reply`. `plan` is a model-maintained checklist shown only for 2+ steps where it can be edited. Out of steps, one reply-only call. | The fixed plan → announce → execute → synthesize sequence turned a greeting into a one-step plan, a checklist, and two replies. With `reply` as a tool, simple turns cost one call and there is no separate synthesis. | Multi-step structure depends on the model choosing to call `plan`. No per-step budget; `AGENT_MAX_STEPS` bounds the turn. |
 | D-044 | Tool categories are derived from standard MCP annotations: `read` (readOnlyHint), `write` (openWorldHint false), `external` (otherwise); the loop's tools are `finish`. They group the tool menu and nothing else. | Helps the model tell answering from acting without a custom MCP field; works for third-party servers that annotate. | Annotations are hints; untrusted servers can mislabel tools, which is why categories never gate anything (D-038). |
+| D-045 | A person is a set of linked connector accounts (`IDENTITY_<NAME>`). Sessions, memory (`users/<person>/`), and parked-question matching key on the person; unlinked accounts are their own person. | Conversations move between Discord, email, and texting; memory must follow the human, not the account. | Linking moves the old account folder at boot; several old folders need a manual merge. |
+| D-046 | Each person has one live session: their messages, tool calls with real results, and delivered replies, injected as history until `SESSION_IDLE_TIMEOUT` of inactivity. Then code archives it as a markdown transcript in memory. | Follow-ups ("delete these") need the previous turn. D-027's failures came from per-channel buffers mixing users and model-written summaries; this is per person and records only what happened. | Up to 16 KiB of history per call. A long idle gap loses context by design. |
+| D-047 | Grounding is enforced in code. Every non-read call becomes an action line under the reply with its real outcome. Destructive calls (`destructiveHint`, MCP default true) run only after a plain yes to a code-written confirmation, exactly as proposed. Identical repeated reads return the earlier result. | The model claimed deletions it never made (no tool existed) and wrote a "removed files" note instead; prompts can't prevent that. | An extra round trip for every destructive call. Unannotated third-party tools ask first. |
+| D-048 | Memory and workspace paths are written exactly as given; no date prefix or renaming. | Date-stamping made `INDEX.md` unreachable (it became `2026.07.20-index.md`) and doubled dates in names. | Dated file names are now the model's choice. |
 
 ## Rejected Alternatives
 
@@ -432,7 +462,10 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | Planner with `plan.revise` replanning | Removed when the plan/execute shape was restored; failures are reported instead | D-020 → D-024 |
 | Per-step tool scoping | The planner granted empty tool lists, so steps did nothing | D-029 |
 | Text-wrap fallback / salvage parser for tool calls written as text | Masks an undiagnosed cause; reintroduces "the model chooses the format" | D-025, `3e818f9` |
-| Session ring buffer, rolling summarizer, idle rotation, janitor | Polluted transcripts, hallucinated summaries, users mixed in shared channels | D-027 |
+| Session ring buffer, rolling summarizer, idle rotation, janitor | Polluted transcripts, hallucinated summaries, users mixed in shared channels | D-027 → D-046 (per-person, code-recorded sessions) |
+| Per-channel sessions | Users in a shared channel would see each other's context; a person switching channels would lose theirs | D-045, D-046 |
+| Vector database for memory | Tens to hundreds of facts per user; the problems were grounding and structure, not recall; an embedding store is opaque and a second source of truth | D-046 |
+| Asking the model to confirm destructive actions | It can skip or misstate the question; the confirmation and the call are code's job | D-047 |
 | Pre-loading `INDEX.md` / profile / preferences into the prompt, or pinning memory resources | Unbounded prompt growth, stale snapshots | D-026, D-042 |
 | Per-server read tools alongside `resources_read` | Two read paths for the same files | D-042 |
 | Absolute memory URIs (`memory://users/<connector>/<id>/…`) | Exposes user IDs and invites cross-user reads; `user` resolves per turn instead | D-042 |

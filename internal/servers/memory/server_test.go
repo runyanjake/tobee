@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/runyanjake/tobee/internal/mcphost"
 	"github.com/runyanjake/tobee/internal/sandboxfs"
@@ -95,5 +96,36 @@ func TestUserScopeNeedsAUser(t *testing.T) {
 	ctx := scope.With(context.Background(), scope.UserScope{Connector: "mcp_feed", Channel: "c"})
 	if _, err := h.ReadResource(ctx, "memory://user/INDEX.md"); err == nil {
 		t.Fatal("user scope resolved with no user attached")
+	}
+}
+
+// Linking accounts to a person moves the old per-account folder, so
+// nothing already remembered is stranded (D-045).
+func TestLinkIdentitiesMovesLegacyFolder(t *testing.T) {
+	fs, _ := sandboxfs.NewFS(t.TempDir(), 64*1024)
+	_ = fs.Write("users/discord/123/INDEX.md", "old index")
+	LinkIdentities(fs, map[string][]string{"jake": {"discord:123", "email:jake@example.com"}})
+	if got, _ := fs.Read("users/jake/INDEX.md"); got != "old index" {
+		t.Fatalf("not moved: %q", got)
+	}
+	// Running again is a no-op.
+	LinkIdentities(fs, map[string][]string{"jake": {"discord:123"}})
+	if got, _ := fs.Read("users/jake/INDEX.md"); got != "old index" {
+		t.Fatal("second run changed the folder")
+	}
+}
+
+func TestArchiveTranscriptLandsInConversations(t *testing.T) {
+	fs, _ := sandboxfs.NewFS(t.TempDir(), 64*1024)
+	started := time.Date(2026, 9, 28, 23, 45, 0, 0, time.UTC)
+	for i := 0; i < 2; i++ {
+		if err := ArchiveTranscript(fs, "jake", started, "transcript"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{"users/jake/conversations/2026/09/28-2345.md", "users/jake/conversations/2026/09/28-2345-2.md"} {
+		if !fs.Exists(p) {
+			t.Fatalf("missing %s", p)
+		}
 	}
 }

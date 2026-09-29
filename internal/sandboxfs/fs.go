@@ -219,3 +219,49 @@ func (m *FS) SearchUnder(query string, limit int, relDir string) ([]SearchHit, e
 	}
 	return hits, nil
 }
+
+// Delete removes one file. Directories are refused: a model-chosen path
+// should never take a whole subtree with it.
+func (m *FS) Delete(rel string) error {
+	abs, err := m.resolve(rel)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%q is a directory", rel)
+	}
+	return os.Remove(abs)
+}
+
+// Rename moves a file or directory; the target must not exist.
+func (m *FS) Rename(from, to string) error {
+	src, err := m.resolve(from)
+	if err != nil {
+		return err
+	}
+	dst, err := m.resolve(to)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("%q already exists", to)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(src, dst)
+}
+
+// DirExists reports whether rel is an existing directory.
+func (m *FS) DirExists(rel string) bool {
+	abs, err := m.resolve(rel)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(abs)
+	return err == nil && info.IsDir()
+}

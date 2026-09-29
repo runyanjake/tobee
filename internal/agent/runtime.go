@@ -6,7 +6,10 @@ import (
 	"time"
 
 	"github.com/runyanjake/tobee/internal/delivery"
+	"github.com/runyanjake/tobee/internal/event"
+	"github.com/runyanjake/tobee/internal/llm"
 	"github.com/runyanjake/tobee/internal/scope"
+	"github.com/runyanjake/tobee/internal/session"
 	"github.com/runyanjake/tobee/internal/taskqueue"
 	"github.com/runyanjake/tobee/internal/telemetry"
 )
@@ -30,6 +33,7 @@ type Runtime struct {
 	ctxb     *ContextBuilder
 	out      *delivery.Router
 	strategy Strategy
+	sessions *session.Store // nil: no history between turns
 	cfg      Config
 }
 
@@ -38,6 +42,12 @@ func NewRuntime(queue *taskqueue.Queue, ctxb *ContextBuilder, out *delivery.Rout
 		cfg.TurnBudget = 2 * time.Minute
 	}
 	return &Runtime{queue: queue, ctxb: ctxb, out: out, strategy: strategy, cfg: cfg}
+}
+
+// WithSessions gives each person's turns the recent conversation (D-046).
+func (r *Runtime) WithSessions(s *session.Store) *Runtime {
+	r.sessions = s
+	return r
 }
 
 func (r *Runtime) Start(ctx context.Context) {
@@ -81,7 +91,7 @@ func (r *Runtime) run(parent context.Context, task *taskqueue.Task) {
 		Ctx:          ctx,
 		Task:         task,
 		Event:        ev,
-		Conversation: NewConversation(r.ctxb.ComposeSystem(ctx, ev)),
+		Conversation: NewConversation(r.ctxb.ComposeSystem(ctx, ev), r.history(ev)),
 		out:          r.out,
 	}
 	turn.React(reactReceived)
@@ -93,7 +103,44 @@ func (r *Runtime) run(parent context.Context, task *taskqueue.Task) {
 		return
 	}
 	r.deliver(turn)
+	r.record(turn)
 	r.queue.Done(task)
+}
+
+func (r *Runtime) history(ev event.Event) []llm.Message {
+	if r.sessions == nil {
+		return nil
+	}
+	return r.sessions.History(ev.Actor.Person, time.Now())
+}
+
+// record saves the finished exchange to the person's session. The final
+// reply call becomes the text the user actually received, so history holds
+// what was delivered, not what the model drafted (D-046). A parked turn is
+// recorded when its task finishes, with the question and answer inline.
+func (r *Runtime) record(t *Turn) {
+	if r.sessions == nil {
+		return
+	}
+	var msgs []llm.Message
+	for _, m := range t.Conversation.TurnMessages() {
+		if m.Role == llm.RoleAssistant && len(m.ToolCalls) == 1 && m.ToolCalls[0].Function.Name == replyTool {
+			continue
+		}
+		msgs = append(msgs, m)
+	}
+	reply := t.Reply
+	if reply == "" {
+		reply = "(no reply was sent)"
+	}
+	msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: reply})
+	r.sessions.Record(t.Event.Actor.Person, session.Exchange{
+		At:        time.Now(),
+		Connector: t.Event.Origin.Connector,
+		Channel:   t.Event.Origin.Channel,
+		UserName:  t.Event.Actor.Name,
+		Messages:  msgs,
+	})
 }
 
 // park logs the already-sent question as the turn's output so every turn ends with one output record.
@@ -101,7 +148,7 @@ func (r *Runtime) park(t *Turn) {
 	telemetry.Log(t.Ctx, slog.LevelInfo, telemetry.Output, "agent: output",
 		"kind", "question", "connector", t.Event.Origin.Connector, "channel", t.Event.Origin.Channel,
 		telemetry.Content("content", t.Await.Question))
-	if err := r.queue.Park(t.Task, t.Await.Question, t.Await.Keys); err != nil {
+	if err := r.queue.Park(t.Task, t.Await.Question, t.Await.Keys, t.Pending); err != nil {
 		telemetry.Logger(t.Ctx).Error("agent: park failed; the answer will start a fresh task", "err", err)
 		r.queue.Done(t.Task)
 	}

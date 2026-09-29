@@ -43,7 +43,10 @@ type Tool struct {
 	// OpenWorld (MCP openWorldHint) marks tools that reach people or systems
 	// outside tobee. Always sent: absent means true in the MCP spec.
 	OpenWorld bool
-	Verbatim  bool
+	// Destructive (MCP destructiveHint) makes the host ask the user before
+	// running the call (D-047). Always sent: absent means true in the spec.
+	Destructive bool
+	Verbatim    bool
 }
 
 type Server struct {
@@ -91,7 +94,9 @@ func (s *Server) Add(t Tool) {
 		Name:        t.Name,
 		Description: t.Description,
 		InputSchema: schema,
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: t.ReadOnly, OpenWorldHint: &t.OpenWorld},
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint: t.ReadOnly, OpenWorldHint: &t.OpenWorld, DestructiveHint: &t.Destructive,
+		},
 	}
 	if t.Verbatim {
 		def.Meta = mcp.Meta{MetaVerbatim: true}

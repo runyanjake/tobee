@@ -57,7 +57,7 @@ Deferred until there is a concrete need (D-004 and later entries):
 
 Explicitly rejected:
 
-- Chat history or a rolling summarizer across turns (D-027).
+- A model-written rolling summary as conversation history (D-027); sessions record what happened instead (D-046).
 - A separate triage or classifier LLM call before acting (D-022 → D-023).
 - Fixed plan / execute / synthesize phases (D-024 → D-043).
 - Parsing tool calls the model wrote as text (D-025, `3e818f9`).

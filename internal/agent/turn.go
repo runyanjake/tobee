@@ -26,8 +26,14 @@ type Turn struct {
 
 	Reply string
 
-	// Await set means the runtime parks the task instead of replying (D-036).
-	Await *mcpserver.Await
+	// Await set means the runtime parks the task instead of replying (D-036);
+	// Pending is the tool call waiting on the user's approval, if that's why (D-047).
+	Await   *mcpserver.Await
+	Pending *taskqueue.PendingCall
+
+	// Actions records every tool that changed something or reached outside,
+	// with its real outcome. Code renders them under the reply (D-047).
+	Actions []Action
 
 	// Verbatim is appended to the reply by code, not restated by the model (D-030).
 	Verbatim []VerbatimBlock
@@ -36,6 +42,13 @@ type Turn struct {
 	Reactions []string
 
 	out *delivery.Router
+}
+
+// Action is one state-changing or outward tool call and what really happened.
+type Action struct {
+	Tool   string
+	OK     bool
+	Result string // first line of the tool's result or error
 }
 
 type VerbatimBlock struct {

@@ -36,18 +36,28 @@ type Task struct {
 }
 
 type Resume struct {
-	TaskID   string    `json:"taskId"`
-	Request  string    `json:"request"`
-	Question string    `json:"question"`
-	Asked    time.Time `json:"asked"`
+	TaskID   string       `json:"taskId"`
+	Request  string       `json:"request"`
+	Question string       `json:"question"`
+	Pending  *PendingCall `json:"pending,omitempty"`
+	Asked    time.Time    `json:"asked"`
+}
+
+// PendingCall is a tool call waiting on the user's approval (D-047). On
+// resume it runs exactly as proposed, or not at all.
+type PendingCall struct {
+	ID        string `json:"id"`
+	Tool      string `json:"tool"`
+	Arguments string `json:"arguments"`
 }
 
 type parked struct {
-	TaskID   string    `json:"taskId"`
-	Request  string    `json:"request"`
-	Question string    `json:"question"`
-	Keys     []string  `json:"keys"`
-	Asked    time.Time `json:"asked"`
+	TaskID   string       `json:"taskId"`
+	Request  string       `json:"request"`
+	Question string       `json:"question"`
+	Pending  *PendingCall `json:"pending,omitempty"`
+	Keys     []string     `json:"keys"`
+	Asked    time.Time    `json:"asked"`
 }
 
 type Queue struct {
@@ -131,7 +141,7 @@ func (q *Queue) Enqueue(ev event.Event) error {
 	}
 	t := &Task{ID: newID(), Event: ev, Enqueued: time.Now()}
 	if p := q.matchParked(ev); p != nil {
-		t.Resume = &Resume{TaskID: p.TaskID, Request: p.Request, Question: p.Question, Asked: p.Asked}
+		t.Resume = &Resume{TaskID: p.TaskID, Request: p.Request, Question: p.Question, Pending: p.Pending, Asked: p.Asked}
 		delete(q.parked, p.TaskID)
 		_ = os.Remove(q.parkedPath(p.TaskID))
 		slog.Info("taskqueue: event resumes parked task", "task", t.ID, "parked", p.TaskID)
@@ -197,13 +207,13 @@ func (q *Queue) Done(t *Task) {
 	}
 }
 
-func (q *Queue) Park(t *Task, question string, keys []string) error {
+func (q *Queue) Park(t *Task, question string, keys []string, pending *PendingCall) error {
 	request := t.Event.Content
 	if t.Resume != nil {
 		// A follow-up question keeps pointing at what the user first asked.
 		request = t.Resume.Request
 	}
-	p := &parked{TaskID: t.ID, Request: request, Question: question, Keys: keys, Asked: time.Now()}
+	p := &parked{TaskID: t.ID, Request: request, Question: question, Pending: pending, Keys: keys, Asked: time.Now()}
 	if err := writeJSON(q.parkedPath(t.ID), p); err != nil {
 		return err
 	}

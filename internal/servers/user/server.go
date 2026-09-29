@@ -58,6 +58,9 @@ func askHandler(out *delivery.Router) mcpserver.Handler {
 		}
 
 		keys := []string{event.ActorKey(addr, s.User)}
+		if s.Person != "" {
+			keys = append(keys, event.PersonKey(s.Person))
+		}
 		if msgID != "" {
 			keys = append([]string{event.ReplyKey(addr, msgID)}, keys...)
 		}

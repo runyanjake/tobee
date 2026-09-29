@@ -7,9 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/runyanjake/tobee/internal/datedname"
 	"github.com/runyanjake/tobee/internal/mcpserver"
 	"github.com/runyanjake/tobee/internal/workspace"
 )
@@ -51,16 +49,13 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 	})
 
 	srv.Add(mcpserver.Tool{
-		Name: "write",
-		Description: `Create or overwrite a file in a workspace area. Pass the filename you ` +
-			`want; the backend prepends today's date and kebab-cases the name. "My Notes.md" ` +
-			`becomes "YYYY.MM.DD-my-notes.md". Subdirectories are preserved. Fails if the area ` +
-			`is read-only.`,
+		Name:        "write",
+		Description: `Create or overwrite a file in a workspace area at exactly the path given. Fails if the area is read-only.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"area":    {"type": "string", "description": "Configured area name."},
-				"path":    {"type": "string", "description": "Filename (with optional subdir) relative to the area root. Date prefix and kebab-case applied automatically. Do not add a date yourself."},
+				"path":    {"type": "string", "description": "Path relative to the area root."},
 				"content": {"type": "string", "description": "Full file contents."}
 			},
 			"required": ["area", "path", "content"]
@@ -180,14 +175,10 @@ func writeHandler(areas *workspace.Areas) mcpserver.Handler {
 		if ar.ReadOnly {
 			return "", fmt.Errorf("area %q is read-only", ar.Name)
 		}
-		dated, err := datedname.Apply(in.Path, time.Now())
-		if err != nil {
+		if err := ar.FS.Write(in.Path, in.Content); err != nil {
 			return "", err
 		}
-		if err := ar.FS.Write(dated, in.Content); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("wrote %s%s/%s (%d bytes)", uriPrefix, ar.Name, dated, len(in.Content)), nil
+		return fmt.Sprintf("wrote %s%s/%s (%d bytes)", uriPrefix, ar.Name, strings.TrimPrefix(in.Path, "/"), len(in.Content)), nil
 	}
 }
 

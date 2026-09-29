@@ -280,6 +280,33 @@ func (h *Host) Tools() []llm.ToolSpec {
 	return out
 }
 
+// NeedsApproval follows MCP's destructiveHint, whose default is true for any
+// tool that isn't read-only: an unannotated third-party tool asks first (D-047).
+func (h *Host) NeedsApproval(name string) bool {
+	h.mu.RLock()
+	ref, ok := h.tools[name]
+	h.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	a := ref.tool.Annotations
+	if a != nil && a.ReadOnlyHint {
+		return false
+	}
+	return a == nil || a.DestructiveHint == nil || *a.DestructiveHint
+}
+
+// Category returns a catalog tool's category, or "" if unknown.
+func (h *Host) Category(name string) llm.Category {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ref, ok := h.tools[name]
+	if !ok {
+		return ""
+	}
+	return category(ref.tool.Annotations)
+}
+
 // category follows MCP's annotation defaults: a tool without hints may
 // write and may reach the outside world. Annotations only group tools in the
 // model's menu; nothing is allowed or refused on the strength of them (D-038).

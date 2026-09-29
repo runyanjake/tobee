@@ -7,7 +7,8 @@ A self-hosted personal AI agent (named after the family cat 🐾): it takes task
 - **Pluggable inputs.** Discord, an IMAP inbox, scheduled jobs, and MCP resource notifications all feed one durable task queue. Sources restart on failure and can be registered at runtime.
 - **MCP tool platform.** Built-in capabilities (memory, workspace, schedules, status, messaging) are MCP servers. Add third-party servers over stdio or HTTP with env vars alone. External servers are sandboxed by default.
 - **One agent loop, on rails.** Each model call is schema-constrained JSON choosing one tool, so the model cannot ramble or write tool calls as text. It replies as soon as it can: a greeting is one call, and only multi-step work shows a live checklist. Tools are grouped by MCP annotations into read / write / external. Simple messages get a one-call answer. Every model output is a forced tool call.
-- **Asks when unsure.** The agent can send a clarifying question, pause the task, and resume when the user answers.
+- **Conversations that follow you.** Each person has one session across Discord, email, and other connectors. After 10 idle minutes it's saved to memory as a transcript.
+- **Grounded replies.** Every change tobee makes is reported under the reply by code, deletions need your yes, and it can ask clarifying questions and resume on the answer.
 - **Plain-text memory as MCP resources.** Per-user and shared folder trees under `data/memory/`, addressed as `memory://user/…` and `memory://shared/…` and read through one `resources_read` tool. No database, no vector store, no chat history.
 - **Swappable model and reasoning.** The agent talks to an `llm.Model` interface; the OpenAI-compatible provider covers local and hosted backends by env. The reasoning strategy is an interface too.
 - **Traceable reasoning.** Every log line is tagged `input`, `thinking`, `action`, `output`, `llm`, or `system`, and turn logs carry a task ID.
@@ -88,6 +89,8 @@ Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every v
 | `AGENT_STRATEGY` | no | `react` | Reasoning strategy: the tool-calling agent loop. |
 | `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn. |
 | `AGENT_MAX_STEPS` | no | `12` | Model calls per turn; then one forced reply. |
+| `IDENTITY_<NAME>` | no | — | Links one person's accounts, e.g. `discord:2643…,email:me@example.com`, so sessions and memory follow them across connectors. |
+| `SESSION_IDLE_TIMEOUT` | no | `10m` | Inactivity before a conversation is saved to memory and a new one starts. |
 | `DISCORD_TOKEN` | one connector | — | Enables the Discord connector. |
 | `DISCORD_CHANNEL_ID` | no | *(all)* | Only handle this channel. |
 | `DISCORD_ALLOWED_USERS` | no | *(all)* | Comma-separated user IDs to accept. |
