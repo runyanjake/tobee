@@ -8,7 +8,8 @@
 - **Act with tools in one loop.** Calls one tool at a time until it can reply. Greetings and small talk are one call. Multi-step work gets a live checklist where the channel supports edits (D-043).
 - **Use any MCP server.** Built-in tools are MCP servers; external servers connect over stdio or HTTP with env config only. The model sees one catalog (D-033). External servers are untrusted by default (D-038).
 - **Ask when unsure.** `user_ask` sends a clarifying question and pauses the task until the user answers (D-036).
-- **Remember across messages.** Reads and writes plain-text memory files, split into a per-user tree and a shared tree (`memory_*`).
+- **Remember across messages.** Reads and writes plain-text memory files, split into a per-person tree and a shared tree (`memory_*`).
+- **Carry the conversation.** Each person has one live session across connectors, injected as history until it goes idle, then archived to memory as a transcript (D-045, D-046).
 - **Schedule its own follow-ups.** Creates one-shot (`at`) or recurring (`cron`) jobs. They survive restarts and fire back into the channel that created them (`schedule_*`).
 - **Report its own state.** `status_summary` and `status_report` return fixed, pre-formatted text about connectors, sources, the queue, MCP servers, and schedules, delivered word for word.
 - **Work with host files (optional).** Lists, reads, searches, and writes (unless read-only) inside operator-configured workspace areas (`workspace_*`).
@@ -16,7 +17,7 @@
 
 ## Supported Use Cases
 
-- Q&A and chit-chat answered directly by the planner.
+- Q&A and chit-chat answered on the first model call, by calling `reply` (D-043).
 - Remembering user preferences, facts, and corrections, then recalling them later.
 - Reminders, periodic check-ins, and deferred tasks ("check on this in an hour").
 - Emailing tobee a task and getting the answer back in the same thread.
@@ -67,7 +68,7 @@ Explicitly rejected:
 
 ## Current Operational Priorities
 
-From the open questions in the former decision log and the latest commits (2026-07-19):
+From the open questions in the former decision log and the latest commits (2026-09-29):
 
 1. **Confirm structured output in prod** (D-041). The cause of the text-written tool calls was found on 2026-09-28: Ollama's OpenAI endpoint ignores `tool_choice`. Every call now uses a JSON-schema `response_format`, which Ollama enforces by grammar. Verify on the prod Ollama and `qwen2.5:7b` that `agent: PROTOCOL VIOLATION` no longer appears and that tool choice is sensible.
 2. **Watch the agent loop on the prod model** (D-043): does `qwen2.5:7b` reply directly to chit-chat, look things up before answering, and call `plan` only for real multi-step work?

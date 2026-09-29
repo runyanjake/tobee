@@ -17,7 +17,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | 2026-07-02 | `d1a3864`, `c0bb476` | Progress reactions; generated content in code blocks. |
 | 2026-07-04 | `54e72ca` … `13ccc7a` | Strict tool-call protocol and no pre-loaded memory (D-025, D-026). LLM error retries. Per-message turns: sessions, summarizer, and janitor deleted (D-027). Prompts baked into the prod image. `prompts/persona` → `prompts/system` plus static tools catalogue (D-028). One `Conversation` per request with state templates (D-029). |
 | 2026-07-19 | `a974c76` … `1f2f5c5` | User text split from `<phase>` directives. Verbatim enforced in code, clock stamp, relative status `window` (D-030). Salvage parser added (D-031) then reverted. Temperature default 0.7 → 0.1, now configurable. Planner `direct_reply` fast path (D-032). |
-| 2026-09-28 | branch `mcp-platform` | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. Prompts cut to about a quarter of their size, with every `tool({args})` example removed. `llm.Model` interface; the OpenAI-compatible provider uses schema-constrained structured output instead of `tool_choice`, which Ollama ignores (D-041). MCP resources: memory and workspace files as `memory://` / `workspace://` URIs read through `resources_read`; the system prompt comes from pinned resources (D-042). Fixed a cross-user path traversal in the memory tools. Fixed plan/execute/synthesize phases replaced by one agent loop with `reply` and `plan` tools (D-043); tool categories from MCP annotations (D-044); send tools refuse the current conversation (a greeting had been answered twice). Per-person sessions across connectors (D-045, D-046), code-enforced grounding with action lines and approvals, `memory_delete` (D-047), no more date-stamped filenames (D-048). |
+| 2026-09-28 | `e9b81ea` … `ab78cd9` (on `main`) | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. Prompts cut to about a quarter of their size, with every `tool({args})` example removed. `llm.Model` interface; the OpenAI-compatible provider uses schema-constrained structured output instead of `tool_choice`, which Ollama ignores (D-041). MCP resources: memory and workspace files as `memory://` / `workspace://` URIs read through `resources_read`; the system prompt comes from pinned resources (D-042). Fixed a cross-user path traversal in the memory tools. Fixed plan/execute/synthesize phases replaced by one agent loop with `reply` and `plan` tools (D-043); tool categories from MCP annotations (D-044); send tools refuse the current conversation (a greeting had been answered twice). Per-person sessions across connectors (D-045, D-046), code-enforced grounding with action lines and approvals, `memory_delete` (D-047), no more date-stamped filenames (D-048). |
 
 ## Major Refactors & Migrations
 
@@ -32,8 +32,8 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
   8. direct-reply fast path (D-032)
   9. serial runtime over a task queue, with `PlanExecute` as one `Strategy` (D-034, D-037)
   10. one tool-calling agent loop with `reply` and `plan` as tools (D-043)
-- **Conversation state:** rolling summary, then saved ring buffer (D-016), then none (D-027), then none except parked questions (D-036).
-- **Tools:** `tools.Registry` plus Go tool packs, then MCP servers behind `mcphost.Host` (D-033). `internal/tools/{memory,workspace,schedule,status}` → `internal/servers/*`; `internal/tools/datedname` → `internal/datedname`. `prompts/system/05-tools.md` catalogue → `prompts/servers/<name>.md` instructions.
+- **Conversation state:** rolling summary, then saved ring buffer (D-016), then none (D-027), then none except parked questions (D-036), then one code-recorded session per person (D-045, D-046).
+- **Tools:** `tools.Registry` plus Go tool packs, then MCP servers behind `mcphost.Host` (D-033). `internal/tools/{memory,workspace,schedule,status}` → `internal/servers/*`; `internal/tools/datedname` → `internal/datedname` → deleted with D-048. `prompts/system/05-tools.md` catalogue → `prompts/servers/<name>.md` instructions.
 - **Input and output:** `integrations.Bus` (drop-on-full channel) and `Envelope` → `ingest.Engine`, `taskqueue.Queue`, and `event.Event` (D-034). `agent.Replies` → `delivery.Router` (D-035). `internal/integrations/discord` → `internal/connectors/discord`. The idle static tick `Scheduler` was deleted; `JobManager` is an ingest source.
 - **Memory access:** always-injected INDEX / profile / preferences, then tool-only recall (D-026), then resource reads by URI (D-042).
 - **Security fix (2026-09-28):** memory tools joined the model's path onto the scope directory and relied on `sandboxfs`, which only confines to the whole memory tree. `../<other-user>/…` could read or overwrite another user's files. Paths are now confined to the scope root. A test covers read, write, append, and list.
@@ -107,27 +107,30 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 ### Dead code
 
-- `Plan.Next`, `Plan.Render`, and `sandboxfs.FS.Exists` have no callers.
-- `Conversation.SurfacedKnowledge` and `StateData.SurfacedKnowledge` are placeholders for a future web/file search integration and are never filled in.
+- `StateData` is an empty struct: the one `turn` template takes no data, but the render path still threads it through.
+- Two stale comments: `agent.Config` says "step caps live on Executor" (there is no `Executor`; `maxSteps` is on `Loop`), and `scope.UserScope.Key` carries two doc comments, the first describing the pre-D-045 `<connector>/<user>` key.
 
 ### Test coverage
 
 Tests cover:
 
-- `internal/agent`: context builder, planner commit parsing, `renderReply`, and end-to-end runtime tests against a scripted `llm.Model` (ask → park → resume; verbatim delivery; the logged chain; unreadable output dropped)
+- `internal/agent`: context builder, `renderReply`, and end-to-end runtime tests against a scripted `llm.Model` (ask → park → resume; approval granted and declined; verbatim delivery; action lines; the logged chain; unreadable output dropped)
 - `internal/llm/openai`: request shape (structured output, no `tools` / `tool_choice`), schema building, ordering, and sanitizing, the tool menu, invalid-output rejection, native-call acceptance
-- `internal/mcphost`: catalog, results, trust gating, server config
+- `internal/mcphost`: catalog, results, trust gating, server config, pinned resources
 - `internal/taskqueue`: persistence, poison tasks, park/resume, expiry, capacity
 - `internal/ingest`: dedup, allowlists, restart, runtime registration
+- `internal/identity` and `internal/session`: account linking; history bounds, idle archive, transcripts
+- `internal/telemetry`: categories, correlation, content limits
 - `internal/connectors/email`: body parsing, threading headers, outbound allowlist
-- `internal/datedname`, `internal/servers/status`
+- `internal/connectors/discord`: addressed-message filter
+- `internal/servers/{memory,status,system}`: memory path confinement and archiving, status rendering, pinned prompt resources
 
 No tests cover:
 
-- `sandboxfs` (the security boundary)
-- the memory / workspace / schedule servers
+- `sandboxfs` (the security boundary), directly
+- the workspace and schedule servers
 - `scheduler` (job replay, misfire)
-- the Discord connector (address filter, mention rewriting, split)
+- the Discord split and mention rewriting
 - IMAP polling and SMTP sending against a live server
 - external servers over Streamable HTTP
 

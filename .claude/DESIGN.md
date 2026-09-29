@@ -35,6 +35,8 @@ flowchart LR
         sch["schedule"]
         st["status"]
         usr["user"]
+        res["resources"]
+        sys["system<br/>(pinned prompts)"]
         dsrv["discord"]
         esrv["email"]
     end
@@ -68,7 +70,7 @@ flowchart LR
 | `mcphost.LoadServers` | `internal/mcphost/config.go` | Parses `MCP_SERVER_<NAME>_*` into external server configs and builds their transports. |
 | `mcphost.ResourceSource` | `internal/mcphost` | Ingest source over `resources/subscribe`. Each update is read and emitted as a `notification` event. |
 | `mcpserver.Server` | `internal/mcpserver` | Builder for built-in servers. Re-attaches scope from `_meta`, turns handler errors into error results, recovers panics, and carries tobee metadata (`tobee/verbatim`, `tobee/await`). |
-| Built-in servers | `internal/servers/{memory,workspace,schedule,status,user}` | `memory_*`, `workspace_*`, `schedule_*`, `status_*`, `user_ask`. |
+| Built-in servers | `internal/servers/{memory,workspace,schedule,status,user,resources,system}` | `memory_*`, `workspace_*`, `schedule_*`, `status_*`, `user_ask`, `resources_*`; `system` serves the pinned prompt resources. |
 | Discord connector | `internal/connectors/discord` | Gateway source (addressed-message filter, mention rewriting), `Send` / `Edit` / `React` channel with 2000-character splitting, `discord_send_message`, `discord` Reporter. |
 | Email connector | `internal/connectors/email` | IMAP poller source (allowlisted senders, unseen only, ≤20 per poll, quoted history stripped), SMTP channel with `In-Reply-To` threading, `email_send`, `email` Reporter. |
 | `JobManager` | `internal/scheduler` | Model-created jobs as an ingest source: robfig cron for recurring, `time.AfterFunc` for one-shots, one JSON file per job, `schedules` Reporter. |
@@ -80,16 +82,16 @@ flowchart LR
 | `telemetry` | `internal/telemetry` | Log categories, a context-carried logger for correlation attributes, content truncation, and the handler that tags untagged records `cat=system` (D-040). |
 | `identity.Directory` | `internal/identity` | Links connector accounts to one person from `IDENTITY_<NAME>`. Unlinked accounts are their own person, `<connector>:<account>` (D-045). |
 | `session.Store` | `internal/session` | Each person's live conversation across connectors: saved to `data/sessions/`, injected as history, archived to memory after `SESSION_IDLE_TIMEOUT` (D-046). |
-| `scope.UserScope` | `internal/scope` | Connector, user, user name, channel, and thread. Travels on `ctx` in the runtime and as `_meta["tobee/scope"]` to trusted servers. `Dir()` returns `users/<connector>/<user>`, sanitized. |
+| `scope.UserScope` | `internal/scope` | Connector, user, user name, channel, and thread. Travels on `ctx` in the runtime and as `_meta["tobee/scope"]` to trusted servers. `Dir()` returns the person's memory tree, `users/<person>` (or `users/<connector>/<account>` when unlinked), sanitized. |
 
 ### Wiring order (`cmd/tobee/main.go`)
 
 1. Load `.env`. Read env vars (see the [README](../README.md#configuration--environment-variables)).
 2. Create the LLM client, the memory FS (`DATA_DIR/memory`, 64 KiB cap), and the workspace areas.
-3. Create the abilities registry, delivery router, task queue (`DATA_DIR/tasks`), ingest engine, and MCP host.
+3. Create the abilities registry, delivery router, task queue (`DATA_DIR/tasks`), and ingest engine. Load `IDENTITY_*` into the identity directory, give it to the engine, move any newly linked memory folders (D-045), open the session store (`DATA_DIR/sessions`, `SESSION_IDLE_TIMEOUT`, archiving through the memory server) (D-046), and create the MCP host.
 4. For each configured connector (Discord if `DISCORD_TOKEN`; email if `EMAIL_IMAP_ADDR`), register its delivery channel, ingest source, allowlist, MCP server, and Reporter. Exit if there are none.
 5. Create `JobManager` (`DATA_DIR/scheduler/jobs`) and register it as a source.
-6. Connect the built-in servers `memory`, `status`, `schedule`, `user`, and `workspace` (only if areas are configured). Each one's instructions come from `prompts/servers/<name>.md`.
+6. Connect the built-in servers `memory`, `status`, `schedule`, `user`, `resources`, `system` (pinned prompts; a load failure is logged, not fatal), and `workspace` (only if areas are configured). Each one's instructions come from `prompts/servers/<name>.md`.
 7. Connect external servers from `MCP_SERVER_*`. A failure is logged and skipped. Register a `ResourceSource` for each server with subscriptions.
 8. Load the system prompt fragments and state templates. If any are missing, log `prompts: MISSING` at ERROR and keep running.
 9. Build the strategy named by `AGENT_STRATEGY` and the runtime.
@@ -316,7 +318,7 @@ The model writes item 1 and item 2. Code writes item 3 and item 4, so what the r
 2. Each non-empty artifact as ```` ```<lang>\n<body>\n``` ````.
 3. Each verbatim block: single-line output is appended as plain text; multi-line output is wrapped in a bare code fence. Blocks with identical text appear once per turn.
 4. One line per action taken this turn: `✅ <tool>: <first line of the result>` or `❌ <tool>: <error, or "not run: not approved">` (D-047).
-4. Connector rendering. Discord turns outbound `@displayname` into `<@id>`, then splits at ≤2000 characters. Preferred break points, in order: after a closing fence, a paragraph break, a sentence end, a newline, then a hard cut. Email sends the text as a plain-text body.
+5. Connector rendering. Discord turns outbound `@displayname` into `<@id>`, then splits at ≤2000 characters. Preferred break points, in order: after a closing fence, a paragraph break, a sentence end, a newline, then a hard cut. Email sends the text as a plain-text body.
 
 ## Prompt Architecture
 
@@ -346,7 +348,7 @@ The model writes item 1 and item 2. Code writes item 3 and item 4, so what the r
 | Semantic | `user.md`, `facts/*.md` under a scope | `memory_write` / `memory_append` |
 | Procedural | `preferences.md`, `feedback/*.md` under a scope | `memory_write` / `memory_append` |
 
-No episodic tier: there are no sessions or summaries (D-027). Parked tasks keep only a request and a question, for up to 24h (D-036).
+Episodic memory is the person's live session, recorded by code and archived to `conversations/` on idle (D-046); the model never writes a summary (D-027). Parked tasks keep only a request and a question, for up to 24h (D-036).
 
 ### Layout
 
@@ -366,7 +368,7 @@ data/
 
 - The prompts name only `INDEX.md` as the table of contents. File layout within a scope is left to the model.
 - Paths are written exactly as given (D-048). `conversations/` holds session transcripts written by code.
-- Email users get their own tree, keyed by address: `users/email/me_example_com/`. The same person on Discord is a different user.
+- An unlinked email user gets their own tree, keyed by address: `users/email/me_example_com/`. Linking that address to a Discord account with `IDENTITY_<NAME>` gives both one tree, `users/<name>/` (D-045).
 
 ### Tools
 
@@ -422,7 +424,7 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-007 | No `!command` prefix control plane. | It turned into a second control plane. | Poking tools requires Go tests or a live LLM. |
 | D-008 | `data/` is fully gitignored; no seed files. | Memory is private to each install. | Fresh installs start empty. |
 | D-012 | System prompt fragments are `prompts/system/*.md`, ordered by numeric prefix; since D-042 they arrive as pinned resources. | Fragments are easy to edit. | Order is a filename convention. |
-| D-013 | Memory split into `shared/` and `users/<connector>/<id>/`; scope travels on `ctx` and in `_meta`. | Per-user isolation without a user table. | Search and list must never cross user trees; one person on two connectors is two users. |
+| D-013 | Memory split into `shared/` and a per-user tree; scope travels on `ctx` and in `_meta`. The tree is keyed by person since D-045 (`users/<person>/`, or `users/<connector>/<account>/` when unlinked). | Per-user isolation without a user table. | Search and list must never cross user trees. |
 | D-014, D-021 | Subsystems expose `Reporter.Render → (full, summary)` text; status tools compose it. | Consistent wording; no reach-in coupling. | Reporters format their own text. |
 | D-015 | Model-created jobs: one JSON file each, robfig cron plus `AfterFunc`, replayed at boot, misfire skip. | Reminders must survive restart and route back to the originating channel. | Missed one-shots are dropped silently. |
 | D-017 | Stable sections first in the system message. | Prefix caching on the LLM server. | Reordering sections must keep the stable-first order. |
@@ -485,6 +487,6 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 
 - **Grammar cost of large catalogs.** An `anyOf` over many external tools may be slow to compile on Ollama. Watch `agent: llm call` latency as servers are added.
 - **Small-model planning.** With `plan` optional, watch whether `qwen2.5:7b` plans genuinely multi-step work or skips it.
-- **Catalog size.** 13 built-in tools with Discord only, up to 19 with every built-in. Watch for tool-choice errors as external servers are added; per-source toolsets may be needed.
+- **Catalog size.** 14 built-in tools with Discord only, 19 with every built-in, plus `reply` and `plan` on every call. Watch for tool-choice errors as external servers are added; per-source toolsets may be needed.
 - **Streaming replies** vs. single-shot delivery.
 - **`INDEX.md` curation:** keep it human-maintained or let the agent own it.
