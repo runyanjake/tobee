@@ -36,7 +36,7 @@ func (r hostReporter) Render(_ context.Context, _ time.Time) (string, string) {
 			errs += st.errors
 			line += fmt.Sprintf(", %d calls, %d errors", st.calls, st.errors)
 			if !st.last.IsZero() {
-				line += fmt.Sprintf(", last %s", st.last.UTC().Format(time.RFC3339))
+				line += fmt.Sprintf(", last %s", st.last.Format(time.RFC3339))
 			}
 		}
 		full.WriteString(line + "\n")

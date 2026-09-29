@@ -19,6 +19,8 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 | 2026-07-19 | `a974c76` … `1f2f5c5` | User text split from `<phase>` directives. Verbatim enforced in code, clock stamp, relative status `window` (D-030). Salvage parser added (D-031) then reverted. Temperature default 0.7 → 0.1, now configurable. Planner `direct_reply` fast path (D-032). |
 | 2026-09-28 | `e9b81ea` … `ab78cd9` (on `main`) | MCP platform (D-033 … D-039). Tool packs → in-process MCP servers behind `mcphost.Host`; external servers over stdio / HTTP. Bus and `Integration` → ingest engine plus a durable task queue. Discord becomes a connector; email connector added. `user_ask` with parked tasks. `Strategy` interface. LLM backend fully env-configured. Tool names `<server>_<tool>`. Categorized logging of the reasoning chain (D-040): model reasoning and token usage parsed, tool calls and results logged, incremental prompt logs, `LOG_FORMAT`, `LOG_CONTENT_LIMIT`. Prompts cut to about a quarter of their size, with every `tool({args})` example removed. `llm.Model` interface; the OpenAI-compatible provider uses schema-constrained structured output instead of `tool_choice`, which Ollama ignores (D-041). MCP resources: memory and workspace files as `memory://` / `workspace://` URIs read through `resources_read`; the system prompt comes from pinned resources (D-042). Fixed a cross-user path traversal in the memory tools. Fixed plan/execute/synthesize phases replaced by one agent loop with `reply` and `plan` tools (D-043); tool categories from MCP annotations (D-044); send tools refuse the current conversation (a greeting had been answered twice). Per-person sessions across connectors (D-045, D-046), code-enforced grounding with action lines and approvals, `memory_delete` (D-047), no more date-stamped filenames (D-048). |
 
+| 2026-09-29 | (working tree) | One wall clock from `TZ`, stamped in `<context>` and used for every user-facing time (D-049). Discord addressing rewritten: DMs, role pings, and joined threads are addressed, each rule logged as `addressed_by`, and `DISCORD_CHANNEL_ID` no longer scopes out DMs or threads of that channel (D-050). |
+
 ## Major Refactors & Migrations
 
 - **How the agent loop's shape changed:**
@@ -83,8 +85,11 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 - **Accounts must be linked by the operator** (`IDENTITY_<NAME>`) for a person to be recognized across connectors.
 - **Old memory files keep their date-stamped names** from before D-048 (e.g. `2026.07.20-index.md`); nothing renames them.
 - **Answer matching is heuristic (D-036).** Without an explicit reply, the user's next message in that channel within 24h resumes the most recent question, even if it was about something else.
+- **Everything runs on one zone.** `TZ` is the instance's clock (D-049). A user in another zone gets the operator's wall clock, and a `TZ` change needs a restart. Logs are local time, so correlating them with UTC-stamped external systems means converting.
+- **Every DM is a turn** (D-050). With `DISCORD_ALLOWED_USERS` empty, anyone who can DM the bot can spend a turn; the allowlist is the only gate.
+- **Every message in a joined thread is a turn** (D-050). Once tobee posts in a thread it answers each following message there, even ones aimed at someone else.
 - **Discord specifics:**
-  - `Thread` is never set, and `Send` ignores it.
+  - `Thread` is never set on outbound addresses, and `Send` ignores it; a thread works only because a message in one carries the thread's own channel ID.
   - Multi-chunk replies return only the last chunk's ID. Plan-message edits assume the announcement fits in one chunk.
   - Requires the privileged Message Content intent.
   - Answers to `user_ask` must be addressed (reply, mention, or name) like any message.
@@ -122,7 +127,8 @@ Tests cover:
 - `internal/identity` and `internal/session`: account linking; history bounds, idle archive, transcripts
 - `internal/telemetry`: categories, correlation, content limits
 - `internal/connectors/email`: body parsing, threading headers, outbound allowlist
-- `internal/connectors/discord`: addressed-message filter
+- `internal/connectors/discord`: every addressing rule that needs no gateway lookup, role-ping matching, DM scoping
+- `internal/scheduler`: local wall-clock formatting of fire times
 - `internal/servers/{memory,status,system}`: memory path confinement and archiving, status rendering, pinned prompt resources
 
 No tests cover:
@@ -130,7 +136,7 @@ No tests cover:
 - `sandboxfs` (the security boundary), directly
 - the workspace and schedule servers
 - `scheduler` (job replay, misfire)
-- the Discord split and mention rewriting
+- the Discord split, mention rewriting, and the two lookups behind the role and thread rules (both need a live gateway)
 - IMAP polling and SMTP sending against a live server
 - external servers over Streamable HTTP
 

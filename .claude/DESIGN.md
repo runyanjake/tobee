@@ -116,11 +116,19 @@ flowchart LR
 | `schedule` | `timer` | the job creator | the creating channel | Always |
 | `mcp_<server>` | `notification` | none | `_REPLY_TO` | Server must be `_TRUSTED` |
 
-- **Discord addressing:**
-  - Drops messages from bots, from itself, and from outside the configured channel.
-  - Accepts a message only if it's addressed: a bot mention, a raw `<@id>` or `<@!id>`, a reply to the bot, or `\btobee\b` (case-insensitive).
-  - Rewrites inbound `<@id>` to `@name`.
-  - A reply to one of the bot's messages sets `InReplyTo`.
+- **Discord addressing** (D-050). Drops messages from bots and from itself. `DISCORD_CHANNEL_ID`, when set, admits that channel and its threads; DMs are never scoped out. A message is then addressed if any rule matches, checked in this order:
+
+  | Rule | `addressed_by` | Test |
+  |---|---|---|
+  | It's a DM | `dm` | `GuildID == ""` — a DM has no ambient chatter |
+  | Mentions the bot's user | `mention` | `m.Mentions`, or a raw `<@id>` / `<@!id>` token |
+  | Replies to one of the bot's messages | `reply` | `ReferencedMessage.Author` is the bot; also sets `InReplyTo` |
+  | Names it | `name` | `\btobee\b`, case-insensitive; also catches plain-text `@TOBEE` |
+  | Pings a role the bot holds | `role` | `m.MentionRoles` ∩ the bot's roles in that guild, `@everyone` excluded |
+  | Is in a thread the bot is in | `thread` | the channel is a thread and `ThreadMember` finds the bot |
+
+  The first four need no lookup. The last two use a per-guild role set and a per-channel thread record (10m TTL, dropped when the bot posts to that channel so a thread it just joined counts at once).
+  - Rewrites inbound `<@id>` to `@name` and `<@&id>` to `@rolename`, so a role ping doesn't reach the model as a raw snowflake.
 - **Email:**
   - Takes the first `text/plain` part; HTML-only mail is skipped.
   - Cuts the body at an `On … wrote:` line or `-----Original Message-----`, and drops `>` lines.
@@ -240,6 +248,7 @@ Replying to the origin is never a tool, and the send tools refuse the current co
 | Task attempts | 2 | `taskqueue.maxAttempts` |
 | Parked task TTL | 24h | `taskqueue.ParkTTL` |
 | Dedup window | 1024 events | `ingest.dedupSize` |
+| Discord channel/thread record | 10m | `discord.channelInfoTTL` |
 | Source restart backoff | 1s → 1m | `ingest` |
 | Email per poll / body | 20 messages / 16 KiB | `connectors/email` |
 | Memory / workspace file size cap | 64 KiB / 256 KiB | `main.go` / `WORKSPACE_MAX_FILE_SIZE` |
@@ -325,7 +334,7 @@ The model writes item 1 and item 2. Code writes item 3 and item 4, so what the r
 - **System message** (built once per request, `ContextBuilder.ComposeSystem`), in order:
   1. Pinned resources from trusted servers, in server then URI order, capped at 32 KiB. Today only the `system` server pins anything: `prompts/system/*.md` (identity, voice, behaviour, safety, tools), read fresh each turn.
   2. `<servers>`: each connected server's name, trusted instructions, and tool names. Built-in instructions are `prompts/servers/<name>.md`. The workspace server appends its area list.
-  3. `<context>`: `now` (RFC3339 plus a readable date), source, kind, connector, channel, thread, and user name and ID, or `user=none`.
+  3. `<context>`: `now` (RFC3339 plus a readable date and time), `tz=<IANA zone>`, source, kind, connector, channel, thread, and user name and ID, or `user=none`. The zone is what lets "4:40pm" become an instant (D-049).
 - **Turn directive** is one user-role message rendered from `prompts/state/turn.md`, wrapped in `<phase name="turn">`.
 - **Prompts carry no call syntax.** No `tool({args})` examples anywhere: the local model copied them as text instead of making a tool call (2026-09-28). Tool names appear bare; schemas come with the request.
 - **What each file owns.**
@@ -397,7 +406,7 @@ data/
 ## Other Subsystems
 
 - **Scheduled jobs:**
-  - `schedule_create` requires the turn scope to have a connector and a channel. Takes `at` (RFC3339 or `in <duration>`) or `cron` (5-field or `@every` / `@hourly` / …, no seconds).
+  - `schedule_create` requires the turn scope to have a connector and a channel. Takes `at` (RFC3339 or `in <duration>`) or `cron` (5-field or `@every` / `@hourly` / …, no seconds). Its result names the fire time in local wall-clock terms (`fires 4:49pm PDT today`) followed by the exact instant, because that line is what the user reads under the reply (D-047, D-049).
   - A fired job emits a `timer` event with the original connector, channel, thread, user, and user name. The content is `[scheduled fire: <name>] <prompt>`. The event ID is `<job>@<unix>`.
   - One-shots are deleted after firing. At boot, one-shots whose time has passed are deleted without running (misfire policy: skip).
   - A job that comes due while the source is stopped is skipped and left on disk for the misfire policy.
@@ -450,6 +459,8 @@ Decisions currently in force. IDs are cited in code comments; don't renumber. Su
 | D-046 | Each person has one live session: their messages, tool calls with real results, and delivered replies, injected as history until `SESSION_IDLE_TIMEOUT` of inactivity. Then code archives it as a markdown transcript in memory. | Follow-ups ("delete these") need the previous turn. D-027's failures came from per-channel buffers mixing users and model-written summaries; this is per person and records only what happened. | Up to 16 KiB of history per call. A long idle gap loses context by design. |
 | D-047 | Grounding is enforced in code. Every non-read call becomes an action line under the reply with its real outcome. Destructive calls (`destructiveHint`, MCP default true) run only after a plain yes to a code-written confirmation, exactly as proposed. Identical repeated reads return the earlier result. | The model claimed deletions it never made (no tool existed) and wrote a "removed files" note instead; prompts can't prevent that. | An extra round trip for every destructive call. Unannotated third-party tools ask first. |
 | D-048 | Memory and workspace paths are written exactly as given; no date prefix or renaming. | Date-stamping made `INDEX.md` unreachable (it became `2026.07.20-index.md`) and doubled dates in names. | Dated file names are now the model's choice. |
+| D-049 | The instance has one wall clock, set by `TZ`: `main` pins `time.Local` at boot, `<context>` stamps `now`, the readable time, and `tz=<zone>`, and every time a person reads (reminder confirmations, `schedule_list`, status reports) is local. | The container has no zone, so everything was UTC. The model was asked to turn "4:40pm" into an instant with no offset to convert from, and set a reminder 9 minutes off; the confirmation then read `23:49:47Z`, which no one can check at a glance. | `TZ` is now instance config in three places (`.env`, `.env.prod`, `Jenkinsfile`). Logs move to local time too. One instance has one zone; a user in another is not modelled. |
+| D-050 | A Discord message is for tobee if it is a DM, mentions its user, replies to one of its messages, names it, pings a role it holds, or is in a thread it belongs to. Each rule names itself in the log (`addressed_by`). `DISCORD_CHANNEL_ID` scopes guild channels only: DMs and threads of that channel always pass. | "@TOBEE" autocompletes to the bot's integration-managed role, which arrives as `<@&roleID>` and never appears in `m.Mentions`, so every such request was dropped as ambient. DMs and threads were dropped too whenever `DISCORD_CHANNEL_ID` was set. | Role and thread checks need a guild-member and thread-member lookup, cached per guild and per channel (10m, invalidated when the bot posts). Every message in a joined thread is a turn, and every DM is a turn: `DISCORD_ALLOWED_USERS` is the only gate left there. |
 
 ## Rejected Alternatives
 

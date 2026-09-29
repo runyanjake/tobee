@@ -3,7 +3,7 @@
 ## Core Capabilities
 
 - **Take input from many sources.** Discord messages, email to an agent-owned inbox, its own scheduled jobs, and change notifications from trusted MCP servers all arrive as events in one durable task queue (D-034). Sources can be added or removed without touching the agent.
-- **Chat through Discord.** Responds when mentioned (`@tobee` or a raw `<@id>`), replied to, or named as a whole word ("tobee, …"). Works in DMs and guild channels, and needs to be addressed in both. `DISCORD_CHANNEL_ID` and `DISCORD_ALLOWED_USERS` narrow it.
+- **Chat through Discord.** Answers every DM, and in a guild when mentioned (user or a role it holds), replied to, named as a whole word ("tobee, …"), or in a thread it is already in (D-050). `DISCORD_CHANNEL_ID` narrows which guild channel it listens to (its threads included); `DISCORD_ALLOWED_USERS` narrows who it answers.
 - **Handle email.** Polls an IMAP inbox for mail from allowlisted senders and replies in-thread over SMTP.
 - **Act with tools in one loop.** Calls one tool at a time until it can reply. Greetings and small talk are one call. Multi-step work gets a live checklist where the channel supports edits (D-043).
 - **Use any MCP server.** Built-in tools are MCP servers; external servers connect over stdio or HTTP with env config only. The model sees one catalog (D-033). External servers are untrusted by default (D-038).
@@ -13,6 +13,7 @@
 - **Schedule its own follow-ups.** Creates one-shot (`at`) or recurring (`cron`) jobs. They survive restarts and fire back into the channel that created them (`schedule_*`).
 - **Report its own state.** `status_summary` and `status_report` return fixed, pre-formatted text about connectors, sources, the queue, MCP servers, and schedules, delivered word for word.
 - **Work with host files (optional).** Lists, reads, searches, and writes (unless read-only) inside operator-configured workspace areas (`workspace_*`).
+- **Keep one wall clock.** `TZ` sets the zone the instance thinks in, so "remind me at 4:40pm" and every time it reports back mean the same thing (D-049).
 - **Swap the model by config.** Any OpenAI-compatible backend with tool calling, local or hosted (D-039). The reasoning strategy is pluggable (D-037).
 
 ## Supported Use Cases

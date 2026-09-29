@@ -22,6 +22,8 @@ func New(instructions string, m *scheduler.JobManager) *mcpserver.Server {
 		Description: `Schedule a future prompt to yourself. Exactly one of "at" or "cron" must be set.
 
 - at:   RFC3339 timestamp ("2026-06-26T18:30:00-07:00") OR relative ("in 10m", "in 2h30m") for a one-shot.
+        A clock time the user names ("4:40pm") is local: build it from the now and tz stamped in <context>,
+        and prefer an absolute timestamp with that offset over a duration you worked out in your head.
 - cron: standard 5-field cron expression ("0 9 * * MON-FRI") OR robfig descriptor ("@every 30m", "@hourly", "@daily").
 
 When the schedule fires, the "prompt" text is delivered as the next user-message-equivalent on the same channel that created the job, prefixed with "[scheduled fire: <name>]". Use this for reminders, follow-ups, and periodic checks. Returns the job id — keep it if you may want to cancel.`,
@@ -102,13 +104,13 @@ func createHandler(m *scheduler.JobManager) mcpserver.Handler {
 		if err != nil {
 			return "", err
 		}
-		when := ""
+		// This line is what the user sees under the reply (D-047), so it says
+		// the fire time the way a clock does, in the local zone.
 		if created.IsRecurring() {
-			when = "cron=" + created.Cron
-		} else {
-			when = "at=" + created.At.Format(time.RFC3339)
+			return fmt.Sprintf("scheduled %s (cron %s)", created.ID, created.Cron), nil
 		}
-		return fmt.Sprintf("scheduled %s (%s)", created.ID, when), nil
+		return fmt.Sprintf("scheduled %s (fires %s, %s)", created.ID,
+			scheduler.FormatWhen(created.At), created.At.Format(time.RFC3339)), nil
 	}
 }
 
@@ -141,7 +143,7 @@ func listHandler(m *scheduler.JobManager) mcpserver.Handler {
 		for _, j := range jobs {
 			when := j.Cron
 			if when == "" {
-				when = "at " + j.At.Format(time.RFC3339)
+				when = scheduler.FormatWhen(j.At)
 			}
 			label := j.Name
 			if label == "" {

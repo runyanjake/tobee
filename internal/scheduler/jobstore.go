@@ -31,6 +31,33 @@ type Job struct {
 
 func (j Job) IsRecurring() bool { return j.Cron != "" }
 
+// FormatWhen renders a fire time the way a person reads a clock, in the
+// process's local zone (TZ). Reminder confirmations and status reports are
+// read by humans, and an RFC3339 instant in UTC reads as the wrong time.
+func FormatWhen(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	// Calendar days in the local zone: Truncate would cut on UTC midnight and
+	// call 6pm local "tomorrow".
+	t = t.Local()
+	now := time.Now().Local()
+	switch {
+	case sameDay(t, now):
+		return t.Format("3:04pm MST") + " today"
+	case sameDay(t, now.AddDate(0, 0, 1)):
+		return t.Format("3:04pm MST") + " tomorrow"
+	default:
+		return t.Format("Mon 2 Jan 3:04pm MST")
+	}
+}
+
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
+
 // JobStore keeps one "<id>.json" file per job, written atomically.
 type JobStore struct {
 	mu      sync.Mutex

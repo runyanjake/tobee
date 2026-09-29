@@ -20,7 +20,7 @@ func (r mailReporter) Render(_ context.Context, _ time.Time) (string, string) {
 	defer r.m.mu.Unlock()
 	doing := fmt.Sprintf("polling %s every %s", r.m.cfg.Mailbox, r.m.cfg.Interval)
 	if !r.m.lastPoll.IsZero() {
-		doing += fmt.Sprintf(", last poll %s", r.m.lastPoll.UTC().Format(time.RFC3339))
+		doing += fmt.Sprintf(", last poll %s", r.m.lastPoll.Format(time.RFC3339))
 	}
 	if r.m.lastErr != "" {
 		doing += fmt.Sprintf(", last error: %s", r.m.lastErr)

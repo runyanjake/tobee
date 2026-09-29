@@ -40,7 +40,9 @@ func TestComposeSystemStampsTheClock(t *testing.T) {
 
 	for _, want := range []string{
 		"now=2026-07-19T14:30:00Z",
-		"Sunday, 19 July 2026",
+		"Sunday, 19 July 2026 2:30pm UTC",
+		// Without the zone, a user's "4:40pm" has no offset to convert from (D-049).
+		"tz=UTC",
 		"connector=discord",
 		"channel=123",
 		"user=jake",

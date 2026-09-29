@@ -45,7 +45,7 @@ func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string
 			if ev.OneShot {
 				suffix = " (one-shot)"
 			}
-			fmt.Fprintf(&full, "  - %s at %s%s\n", name, ev.At.UTC().Format(time.RFC3339), suffix)
+			fmt.Fprintf(&full, "  - %s at %s%s\n", name, FormatWhen(ev.At), suffix)
 		}
 	}
 	if len(jobs) == 0 {
@@ -59,11 +59,11 @@ func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string
 			}
 			schedule := j.Cron
 			if schedule == "" && !j.At.IsZero() {
-				schedule = fmt.Sprintf("once at %s", j.At.UTC().Format(time.RFC3339))
+				schedule = fmt.Sprintf("once at %s", FormatWhen(j.At))
 			}
 			line := fmt.Sprintf("  - %s — %s", name, schedule)
 			if next := r.m.nextFire(j); !next.IsZero() {
-				line += fmt.Sprintf(", next %s", next.UTC().Format(time.RFC3339))
+				line += fmt.Sprintf(", next %s", FormatWhen(next))
 			}
 			full.WriteString(line + "\n")
 		}

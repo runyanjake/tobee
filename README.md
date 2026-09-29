@@ -89,10 +89,11 @@ Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every v
 | `AGENT_STRATEGY` | no | `react` | Reasoning strategy: the tool-calling agent loop. |
 | `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn. |
 | `AGENT_MAX_STEPS` | no | `12` | Model calls per turn; then one forced reply. |
+| `TZ` | no | UTC | IANA zone the instance thinks in — reminders, `<context>`, status reports, logs. A container has no zone, so leaving this unset means UTC. |
 | `IDENTITY_<NAME>` | no | — | Links one person's accounts, e.g. `discord:2643…,email:me@example.com`, so sessions and memory follow them across connectors. |
 | `SESSION_IDLE_TIMEOUT` | no | `10m` | Inactivity before a conversation is saved to memory and a new one starts. |
 | `DISCORD_TOKEN` | one connector | — | Enables the Discord connector. |
-| `DISCORD_CHANNEL_ID` | no | *(all)* | Only handle this channel. |
+| `DISCORD_CHANNEL_ID` | no | *(all)* | Only handle this guild channel and its threads. DMs are never scoped out. |
 | `DISCORD_ALLOWED_USERS` | no | *(all)* | Comma-separated user IDs to accept. |
 | `EMAIL_IMAP_ADDR` | one connector | — | Enables the email connector (`host:993` for TLS). |
 | `EMAIL_SMTP_ADDR`, `EMAIL_USERNAME`, `EMAIL_PASSWORD`, `EMAIL_FROM` | with email | — | Mailbox credentials and sender address. |

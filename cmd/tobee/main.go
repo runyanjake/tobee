@@ -46,6 +46,7 @@ func main() {
 	}
 
 	setupLogging()
+	setupTimezone()
 
 	dataDir := envOr("DATA_DIR", "data")
 	promptsDir := envOr("PROMPTS_DIR", "prompts")
@@ -281,6 +282,25 @@ func setupLogging() {
 		slog.Warn("LOG_FORMAT: unrecognised value; using text", "value", format)
 	}
 	telemetry.SetContentLimit(mustInt("LOG_CONTENT_LIMIT", 4000))
+}
+
+// setupTimezone pins time.Local from TZ. The container has no zone of its
+// own, so without this every wall-clock time the model reads in <context>
+// and writes into a reminder is UTC, and "4:40pm" needs an offset it was
+// never given.
+func setupTimezone() {
+	name := strings.TrimSpace(os.Getenv("TZ"))
+	if name == "" {
+		slog.Warn("TZ: not set; wall-clock times use " + time.Local.String() + " (UTC in a container)")
+		return
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		slog.Error("TZ: unknown zone; keeping "+time.Local.String(), "tz", name, "err", err)
+		return
+	}
+	time.Local = loc
+	slog.Info("clock: local zone set", "tz", loc.String(), "now", time.Now().Format(time.RFC3339))
 }
 
 func parseLogLevel(s string) (slog.Level, error) {

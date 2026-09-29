@@ -24,6 +24,9 @@ pipeline {
     AI_PROVIDER_URL    = 'http://ollama:11434'
     AI_MODEL           = 'qwen2.5:7b'
     DISCORD_CHANNEL_ID = '1479309607724650649'
+    // Wall-clock zone for reminders and <context>. Without it the container
+    // runs on UTC and the agent schedules against the wrong clock (D-049).
+    TZ                 = 'America/Los_Angeles'
   }
 
   options {
@@ -63,6 +66,7 @@ AI_MODEL=${AI_MODEL}
 OLLAMA_KEEP_ALIVE=24h
 DISCORD_TOKEN=${DISCORD_TOKEN}
 DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID}
+TZ=${TZ}
 DATA_DIR=data
 PROMPTS_DIR=prompts
 LOG_LEVEL=${LOG_LEVEL}

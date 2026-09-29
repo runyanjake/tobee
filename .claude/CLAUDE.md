@@ -131,6 +131,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - New capabilities are MCP tools, never a side channel. A built-in server uses `internal/mcpserver`, gets a `prompts/servers/<name>.md` instructions file, and is connected with `host.ConnectInProcess`. Every tool needs a real JSON-Schema `InputSchema`; set `ReadOnly` when it doesn't write (D-033).
 - Third-party tools arrive through `MCP_SERVER_<NAME>_*`, not code. Don't relax trust: untrusted servers get no scope, no prompt instructions, no verbatim/await, and no subscriptions (D-038).
 - A source that admits third-party text (like email) needs an allowlist, enforced in code.
+- Whether an inbound message is for tobee is decided by the connector, and each rule names itself in the log so a dropped message can be explained (D-050). A channel restriction scopes group chatter, never DMs.
 
 ### Prompts & config
 
@@ -141,7 +142,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
   - the `<servers>` / `<context>` scaffolding in `context.go`
   - the workspace area list appended to its instructions
 - Prompts are baked into the prod image (a rebuild ships changes). Dev compose bind-mounts them (a restart picks up changes).
-- `.env` is the config surface. New variables go in `.env.example` with a one-line comment and are read in `cmd/tobee/main.go`.
+- `.env` is the config surface. New variables go in `.env.example` with a one-line comment and are read in `cmd/tobee/main.go`. Anything the prod deploy needs also goes in `.env.prod.example` and the `Jenkinsfile`'s rendered env file.
+- One instance, one wall clock: `TZ` pins `time.Local` at boot and `<context>` carries `tz`. Times a person reads are local; don't reintroduce `.UTC()` in user-facing text (D-049).
 - TODO: The runtime image has no `USER` directive, so the container runs as root. Decide whether non-root is required.
 
 ### Git
@@ -153,7 +155,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-049**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-051**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

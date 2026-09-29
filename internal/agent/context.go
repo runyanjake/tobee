@@ -53,8 +53,11 @@ func (b *ContextBuilder) ComposeSystem(ctx context.Context, ev event.Event) stri
 	}
 
 	// The model has no clock; without this it dates from its training cutoff.
+	// The zone is stamped too: a user saying "4:40pm" means local wall clock,
+	// and the model can't convert that without knowing the offset it is in.
 	now := b.now()
-	fmt.Fprintf(&sb, "<context>now=%s (%s)", now.Format(time.RFC3339), now.Format("Monday, 2 January 2006"))
+	fmt.Fprintf(&sb, "<context>now=%s (%s) tz=%s",
+		now.Format(time.RFC3339), now.Format("Monday, 2 January 2006 3:04pm MST"), now.Location())
 	fmt.Fprintf(&sb, " source=%s kind=%s", ev.Source, ev.Kind)
 	fmt.Fprintf(&sb, " connector=%s channel=%s", ev.Origin.Connector, ev.Origin.Channel)
 	if ev.Origin.Thread != "" {

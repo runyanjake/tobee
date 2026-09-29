@@ -4,7 +4,7 @@
 |---|---|
 | **Ability** | A capability implemented outside the LLM turn. Today: introspection through `internal/abilities`. |
 | **Actor** | Who caused an event: `event.Actor{ID, Name, Person}`. Empty for notifications. The ID is per connector (Discord user ID, email address); `Person` is filled in by the ingest engine from the identity directory (D-045). |
-| **Addressed message** | A Discord message tobee will process: a bot mention, raw `<@id>` or `<@!id>`, a reply to the bot, or the whole word `tobee`. Everything else is dropped as ambient chatter. |
+| **Addressed message** | A Discord message tobee will process: a DM, a mention of its user, a reply to one of its messages, the whole word `tobee`, a ping of a role it holds, or any message in a thread it is in. The matching rule is logged as `addressed_by`; everything else is dropped as ambient chatter (D-050). |
 | **Address** | Where output goes: `event.Address{Connector, Channel, Thread}`. An event's `Origin` is the address its reply is sent to. |
 | **Allowlist** | Per-source list of admitted actor IDs (`ingest.Engine.Allow`). `DISCORD_ALLOWED_USERS` (optional), `EMAIL_ALLOWED` (required; also limits outbound mail). |
 | **Area** | See *Workspace area*. |
@@ -15,7 +15,7 @@
 | **Catalog** | The union of every connected server's tools, as the model sees them: `<server>_<tool>` names. Built by `mcphost.Host` from `tools/list`. |
 | **Channel** | (1) A `delivery.Channel`: a connector's `Send`, plus optional `Editor` and `Reactor`. (2) A connector-specific conversation ID in an `Address` (Discord channel ID, email address). |
 | **Connector** | A package for one external system that can be an ingest source, a delivery channel, and an MCP server at once: `connectors/discord`, `connectors/email`. |
-| **`<context>` tag** | The system-message section stamping `now`, source, kind, connector, channel, thread, and user (or `user=none`) for the turn. |
+| **`<context>` tag** | The system-message section stamping `now` (instant plus readable local time), `tz`, source, kind, connector, channel, thread, and user (or `user=none`) for the turn. |
 | **Conversation** | The `agent.Conversation` for one task: the system message, the person's session history, then this turn's growing `[]llm.Message`. Harness directives are marked so `TurnMessages` can leave them out of the session. |
 | **D-0xx** | A design decision ID. Current ones are in `DESIGN.md#key-decisions`, superseded ones in `IMPLEMENTATION.md`. Cited in code comments; never reused. |
 | **Deliver** | The runtime's last step: send `Turn.Reply` to the event's origin, then clear reactions (success) or add ❌ (empty reply). |
@@ -34,6 +34,7 @@
 | **Identity / person** | The human behind one or more connector accounts, linked with `IDENTITY_<NAME>` (D-045). |
 | **Session** | A person's live conversation across connectors. It's injected as history and archived to `memory://user/conversations/` after `SESSION_IDLE_TIMEOUT` (D-046). |
 | **Memory scope** | `user` (`data/memory/users/<person>/`), `shared` (`data/memory/shared/`), or `both` (search and list only). |
+| **Local zone** | The one wall clock the instance thinks in, from `TZ`. Pinned onto `time.Local` at boot, stamped in `<context>`, and used for every time a person reads (D-049). |
 | **Misfire policy: skip** | One-shot jobs whose time passed while tobee was down are deleted at boot, not run. |
 | **Model (`llm.Model`)** | The agent's only interface to an LLM: `Decide` returns exactly one call to one offered tool (D-041). Implemented by the OpenAI-compatible provider in `internal/llm/openai`. |
 | **Nudge** | The short "could not be read as a tool call" user message appended before the single retry of a phase. The unreadable output itself is dropped. |

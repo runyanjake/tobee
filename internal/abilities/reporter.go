@@ -47,10 +47,10 @@ func (r *Registry) Names() []string {
 
 // RenderReport shows silent reporters as "(idle)" so the user sees they were asked.
 func (r *Registry) RenderReport(ctx context.Context, since time.Time) string {
-	now := time.Now().UTC()
+	now := time.Now()
 	var b strings.Builder
 	fmt.Fprintf(&b, "tobee status — window %s → %s\n",
-		since.UTC().Format(time.RFC3339), now.Format(time.RFC3339))
+		since.Local().Format(time.RFC3339), now.Format(time.RFC3339))
 	for _, rep := range r.sorted() {
 		full, _ := rep.Render(ctx, since)
 		full = strings.TrimSpace(full)

@@ -75,12 +75,12 @@ func discordDoingLine(connected bool, connect time.Time, channel string, lastRx 
 	if !connected {
 		return "offline"
 	}
-	parts := []string{fmt.Sprintf("connected since %s", connect.UTC().Format(time.RFC3339))}
+	parts := []string{fmt.Sprintf("connected since %s", connect.Format(time.RFC3339))}
 	if channel != "" {
 		parts = append(parts, fmt.Sprintf("channel=%s", channel))
 	}
 	if !lastRx.IsZero() {
-		parts = append(parts, fmt.Sprintf("last RX %s", lastRx.UTC().Format(time.RFC3339)))
+		parts = append(parts, fmt.Sprintf("last RX %s", lastRx.Format(time.RFC3339)))
 	}
 	return strings.Join(parts, ", ")
 }

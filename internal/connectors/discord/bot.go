@@ -39,6 +39,14 @@ type Bot struct {
 	namesMu sync.RWMutex
 	names   map[string]string // user ID → display name
 
+	// Lookups behind the addressing rules. Both are cheap in-memory hits
+	// after the first message from a guild or channel.
+	rolesMu sync.RWMutex
+	roles   map[string]map[string]bool // guild ID → role IDs the bot holds
+
+	chanMu sync.Mutex
+	chans  map[string]channelInfo // channel ID → thread shape and membership
+
 	statsMu sync.RWMutex
 	rxLog   []rxEvent
 	rxHead  int
@@ -51,6 +59,17 @@ type rxEvent struct {
 	At time.Time
 	Ch string
 }
+
+// channelInfo answers "is this a thread, whose, and are we in it" without a
+// REST call per message. Invalidated when the bot posts to the channel.
+type channelInfo struct {
+	isThread bool
+	parentID string
+	botIn    bool // the bot is a member of this thread
+	at       time.Time
+}
+
+const channelInfoTTL = 10 * time.Minute
 
 const rxRingSize = 32
 
@@ -70,6 +89,8 @@ func New(cfg Config) (*Bot, error) {
 		session:   session,
 		channelID: cfg.ChannelID,
 		names:     make(map[string]string),
+		roles:     make(map[string]map[string]bool),
+		chans:     make(map[string]channelInfo),
 		rxLog:     make([]rxEvent, rxRingSize),
 	}
 	session.AddHandler(b.onReady)
@@ -120,7 +141,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	if m.Author == nil || m.Author.Bot || m.Author.ID == s.State.User.ID {
 		return
 	}
-	if b.channelID != "" && m.ChannelID != b.channelID {
+	if !b.inScope(s, m) {
 		return
 	}
 
@@ -129,7 +150,8 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		b.remember(u)
 	}
 
-	if !b.isAddressed(s, m) {
+	addressed, why := b.isAddressed(s, m)
+	if !addressed {
 		mentionIDs := make([]string, 0, len(m.Mentions))
 		for _, u := range m.Mentions {
 			if u != nil {
@@ -139,11 +161,11 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		slog.Debug("discord: ambient (not addressed); dropping",
 			"channel", m.ChannelID, "author", displayName(m.Author),
 			"self_id", s.State.User.ID, "is_dm", m.GuildID == "",
-			"mentions", mentionIDs, "content", m.Content)
+			"mentions", mentionIDs, "roles", m.MentionRoles, "content", m.Content)
 		return
 	}
 
-	content := strings.TrimSpace(b.rewriteMentions(m.Content))
+	content := strings.TrimSpace(b.rewriteMentions(b.rewriteRoles(s, m.GuildID, m.Content)))
 	if content == "" {
 		return
 	}
@@ -153,7 +175,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	slog.Debug("discord: message received",
 		"channel", m.ChannelID, "author", authorName,
 		"author_id", m.Author.ID, "is_dm", m.GuildID == "",
-		"content", content)
+		"addressed_by", why, "content", content)
 
 	b.emitMu.RLock()
 	emit := b.emit
@@ -181,22 +203,182 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 // because @ is a non-word character.
 var nameRe = regexp.MustCompile(`(?i)\btobee\b`)
 
-// isAddressed filters out ambient chatter. The raw <@id> check covers mentions
-// missing from m.Mentions due to gateway state races.
-func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) bool {
+// isAddressed decides whether a message is for tobee and says which rule
+// admitted it (D-050). Cheap in-memory rules run before any lookup, so an
+// ambient message costs nothing but a regex.
+func (b *Bot) isAddressed(s *discordgo.Session, m *discordgo.MessageCreate) (bool, string) {
 	selfID := s.State.User.ID
+	if ok, why := addressedInMessage(m, selfID); ok {
+		return true, why
+	}
+	switch {
+	case b.mentionsOwnRole(s, m, selfID):
+		return true, "role"
+	case b.inOwnThread(s, m.ChannelID, selfID):
+		return true, "thread"
+	}
+	return false, ""
+}
+
+// addressedInMessage holds the rules the message answers by itself, with no
+// guild or channel lookup.
+func addressedInMessage(m *discordgo.MessageCreate, selfID string) (bool, string) {
+	switch {
+	case m.GuildID == "":
+		// A DM has no ambient chatter: every message in it is the request.
+		return true, "dm"
+	case mentionsUser(m, selfID):
+		return true, "mention"
+	case repliesToUser(m, selfID):
+		return true, "reply"
+	case nameRe.MatchString(m.Content):
+		return true, "name"
+	}
+	return false, ""
+}
+
+// mentionsUser also checks the raw tokens: a mention can be missing from
+// m.Mentions on a gateway state race. `!` is the legacy nickname form.
+func mentionsUser(m *discordgo.MessageCreate, userID string) bool {
+	if userID == "" {
+		return false
+	}
 	for _, u := range m.Mentions {
-		if u != nil && u.ID == selfID {
+		if u != nil && u.ID == userID {
 			return true
 		}
 	}
-	if selfID != "" && (strings.Contains(m.Content, "<@"+selfID+">") || strings.Contains(m.Content, "<@!"+selfID+">")) {
+	return strings.Contains(m.Content, "<@"+userID+">") || strings.Contains(m.Content, "<@!"+userID+">")
+}
+
+func repliesToUser(m *discordgo.MessageCreate, userID string) bool {
+	ref := m.ReferencedMessage
+	return userID != "" && ref != nil && ref.Author != nil && ref.Author.ID == userID
+}
+
+// mentionsOwnRole catches "@TOBEE" resolving to the bot's integration-managed
+// role rather than its user: Discord sends <@&roleID>, which never appears in
+// m.Mentions, so this read as ambient chatter before D-050.
+func (b *Bot) mentionsOwnRole(s *discordgo.Session, m *discordgo.MessageCreate, selfID string) bool {
+	if len(m.MentionRoles) == 0 || m.GuildID == "" {
+		return false
+	}
+	return pingsRole(m.MentionRoles, m.GuildID, b.selfRoles(s, m.GuildID, selfID))
+}
+
+// pingsRole reports whether any pinged role is one of own. The @everyone role's
+// ID is the guild's own, and pinging everyone is not addressing tobee.
+func pingsRole(pinged []string, guildID string, own map[string]bool) bool {
+	for _, id := range pinged {
+		if id != "" && id != guildID && own[id] {
+			return true
+		}
+	}
+	return false
+}
+
+// selfRoles is the set of role IDs the bot holds in a guild. State usually has
+// the bot's own member from GUILD_CREATE; the REST fallback is cached because
+// roles change far less often than messages arrive.
+func (b *Bot) selfRoles(s *discordgo.Session, guildID, selfID string) map[string]bool {
+	if selfID == "" {
+		return nil
+	}
+	if member, err := s.State.Member(guildID, selfID); err == nil && member != nil {
+		return roleSet(member.Roles)
+	}
+	b.rolesMu.RLock()
+	cached, ok := b.roles[guildID]
+	b.rolesMu.RUnlock()
+	if ok {
+		return cached
+	}
+	member, err := s.GuildMember(guildID, selfID)
+	if err != nil {
+		slog.Debug("discord: own guild roles unreadable; role pings will read as ambient",
+			"guild", guildID, "err", err)
+		return nil
+	}
+	set := roleSet(member.Roles)
+	b.rolesMu.Lock()
+	b.roles[guildID] = set
+	b.rolesMu.Unlock()
+	return set
+}
+
+func roleSet(ids []string) map[string]bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
+// inOwnThread admits every message in a thread tobee is a member of — it is
+// already part of that conversation, so follow-ups need no mention.
+func (b *Bot) inOwnThread(s *discordgo.Session, channelID, selfID string) bool {
+	if selfID == "" {
+		return false
+	}
+	info := b.channelInfo(s, channelID, selfID)
+	return info.isThread && info.botIn
+}
+
+// inScope applies DISCORD_CHANNEL_ID. A DM is always in scope, and so is a
+// thread hanging off the configured channel: a thread has its own channel ID,
+// so a plain equality check would drop every message in one.
+func (b *Bot) inScope(s *discordgo.Session, m *discordgo.MessageCreate) bool {
+	if b.channelID == "" || m.GuildID == "" || m.ChannelID == b.channelID {
 		return true
 	}
-	if ref := m.ReferencedMessage; ref != nil && ref.Author != nil && ref.Author.ID == selfID {
-		return true
+	info := b.channelInfo(s, m.ChannelID, s.State.User.ID)
+	return info.isThread && info.parentID == b.channelID
+}
+
+// channelInfo caches the thread shape of a channel and whether the bot is in
+// it. One REST pair per channel per TTL at worst; Send invalidates the entry
+// so a thread the bot just posted in is recognised immediately.
+func (b *Bot) channelInfo(s *discordgo.Session, channelID, selfID string) channelInfo {
+	b.chanMu.Lock()
+	if info, ok := b.chans[channelID]; ok && time.Since(info.at) < channelInfoTTL {
+		b.chanMu.Unlock()
+		return info
 	}
-	return nameRe.MatchString(m.Content)
+	b.chanMu.Unlock()
+
+	info := channelInfo{at: time.Now()}
+	ch, err := s.State.Channel(channelID)
+	if err != nil || ch == nil {
+		if ch, err = s.Channel(channelID); err != nil {
+			slog.Debug("discord: channel unreadable; treating as a plain channel",
+				"channel", channelID, "err", err)
+			b.cacheChannel(channelID, info)
+			return info
+		}
+	}
+	if ch.IsThread() {
+		info.isThread = true
+		info.parentID = ch.ParentID
+		if selfID != "" {
+			// A 404 here is the normal "not a member" answer.
+			_, err := s.ThreadMember(channelID, selfID, false)
+			info.botIn = err == nil
+		}
+	}
+	b.cacheChannel(channelID, info)
+	return info
+}
+
+func (b *Bot) cacheChannel(channelID string, info channelInfo) {
+	b.chanMu.Lock()
+	b.chans[channelID] = info
+	b.chanMu.Unlock()
+}
+
+func (b *Bot) forgetChannel(channelID string) {
+	b.chanMu.Lock()
+	delete(b.chans, channelID)
+	b.chanMu.Unlock()
 }
 
 // Send returns the last chunk's ID; edits only make sense for one-chunk
@@ -217,6 +399,9 @@ func (b *Bot) Send(_ context.Context, to event.Address, text string) (string, er
 			lastID = msg.ID
 		}
 	}
+	// Posting to a thread joins it; a stale "not a member" would keep the
+	// thread rule off for the rest of the TTL.
+	b.forgetChannel(to.Channel)
 	return lastID, nil
 }
 
@@ -337,6 +522,29 @@ func (b *Bot) rewriteMentions(s string) string {
 			return tok
 		}
 		return "@" + name
+	})
+}
+
+// roleRe matches role mentions. "@TOBEE" becomes one of these whenever the
+// bot's managed role shares its name, so the raw token would otherwise reach
+// the model as noise.
+var roleRe = regexp.MustCompile(`<@&(\d+)>`)
+
+// rewriteRoles names the role, leaving unresolvable IDs as raw tokens.
+func (b *Bot) rewriteRoles(s *discordgo.Session, guildID, content string) string {
+	if guildID == "" || !strings.Contains(content, "<@&") {
+		return content
+	}
+	return roleRe.ReplaceAllStringFunc(content, func(tok string) string {
+		m := roleRe.FindStringSubmatch(tok)
+		if len(m) != 2 {
+			return tok
+		}
+		role, err := s.State.Role(guildID, m[1])
+		if err != nil || role == nil || role.Name == "" {
+			return tok
+		}
+		return "@" + role.Name
 	})
 }
 

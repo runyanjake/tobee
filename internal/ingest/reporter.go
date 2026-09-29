@@ -39,7 +39,7 @@ func (r engineReporter) Render(_ context.Context, _ time.Time) (string, string) 
 		line := fmt.Sprintf("  - %s: %s, %d admitted, %d dropped, %d restarts",
 			s.src.Name(), state, s.admitted, s.dropped, s.restarts)
 		if !s.lastAt.IsZero() {
-			line += fmt.Sprintf(", last event %s", s.lastAt.UTC().Format(time.RFC3339))
+			line += fmt.Sprintf(", last event %s", s.lastAt.Format(time.RFC3339))
 		}
 		if s.lastErr != "" {
 			line += fmt.Sprintf(", last error: %s", s.lastErr)
