@@ -58,15 +58,16 @@ func (r discReporter) Render(_ context.Context, since time.Time) (string, string
 	}
 	full.WriteString("Waiting: —\n")
 
+	// Being connected with nothing to show is not news; say what was handled,
+	// or that the connection is down (D-053).
 	var summary string
 	switch {
 	case !connected:
-		summary = "Discord is offline"
+		summary = "I'm not connected to Discord right now"
 	case inbound == 0:
-		summary = "Discord is connected with no recent messages"
+		summary = ""
 	default:
-		summary = fmt.Sprintf("Discord is connected and saw %d inbound message%s in the window",
-			inbound, discordPlural(inbound))
+		summary = fmt.Sprintf("I've handled %d message%s on Discord", inbound, discordPlural(inbound))
 	}
 	return full.String(), summary
 }

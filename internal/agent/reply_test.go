@@ -123,15 +123,16 @@ func TestRenderReplyAppendsWhatWentWrong(t *testing.T) {
 		replyArgs{Spoken: "I couldn't find any reminders for you to clear today."},
 		nil, nil,
 		[]Problem{
-			{Kind: "repeated", Tool: "schedule_list", Detail: "called again with the same arguments; not run a second time"},
-			{Kind: "budget", Detail: "ran out of steps after 12 model calls"},
+			{Kind: "repeated", Tool: "schedule_list", Detail: "I kept calling schedule_list the same way (3 times), so I stopped using it"},
+			{Kind: "budget", Detail: "I ran out of steps after 12 tries, so this may be unfinished"},
 		},
 	)
+	// Every line speaks as tobee about what it tried (D-053).
 	for _, want := range []string{
 		"I couldn't find any reminders",
-		"⚠️ Didn't finish cleanly:",
-		"• schedule_list: called again with the same arguments",
-		"• ran out of steps after 12 model calls, so the request may be unfinished",
+		"⚠️ I didn't finish this cleanly:",
+		"• I kept calling schedule_list the same way (3 times), so I stopped using it",
+		"• I ran out of steps after 12 tries, so this may be unfinished",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("renderReply() missing %q:\n%s", want, got)
@@ -143,8 +144,8 @@ func TestRenderReplyAppendsWhatWentWrong(t *testing.T) {
 // without this the user hears nothing about it.
 func TestRenderReplyReportsReadFailures(t *testing.T) {
 	got := renderReply(replyArgs{Spoken: "Here's what I have."}, nil, nil,
-		[]Problem{{Kind: "tool_error", Tool: "memory_search", Detail: "scope \"user\" needs a user"}})
-	if !strings.Contains(got, "• memory_search: failed — scope \"user\" needs a user") {
+		[]Problem{{Kind: "tool_error", Tool: "memory_search", Detail: `I tried memory_search and it failed: scope "user" needs a user`}})
+	if !strings.Contains(got, `• I tried memory_search and it failed: scope "user" needs a user`) {
 		t.Fatalf("renderReply() missing the read failure:\n%s", got)
 	}
 }
@@ -176,8 +177,8 @@ func TestRecoveredProblemsAreNotShown(t *testing.T) {
 		t.Fatalf("Problems = %+v, want the recovered entry kept for the session", turn.Problems)
 	}
 
-	turn.AddProblem("unreadable", "", "failed twice")
-	if got := renderProblems(turn.Problems); !strings.Contains(got, "wasn't usable") {
+	turn.AddProblem("unreadable", "", "I couldn't put together a usable tool call, twice over")
+	if got := renderProblems(turn.Problems); !strings.Contains(got, "I couldn't put together a usable tool call") {
 		t.Fatalf("renderProblems() = %q, want the promoted problem shown", got)
 	}
 }

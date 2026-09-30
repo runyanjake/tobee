@@ -60,19 +60,19 @@
 | **Reaction lifecycle** | ✅ received → 🧠 planning → 💭 executing on the inbound message. Cleared on success or park; ❌ on failure. |
 | **`reply`** | The loop's tool that answers and ends the turn: `{spoken, artifacts}`. |
 | **`plan`** | The loop's checklist tool for multi-step work. Shown only with 2+ steps on connectors that can edit it. |
-| **Reporter** | `abilities.Reporter`, a subsystem's `Render(ctx, since) → (full, summary)` text for status tools. Current reporters: `discord`, `email`, `ingest`, `mcp`, `schedules`, `tasks`. |
+| **Reporter** | `abilities.Reporter`, a subsystem's `Render(ctx, since) → (full, summary)` text for status tools. Current reporters: `discord`, `email`, `ingest`, `mcp`, `schedules`, `tasks`. `summary` speaks as tobee about activity and is empty when there is nothing to say; `full` is operator detail (D-053). |
 | **Resource source** | `mcphost.ResourceSource`: an ingest source that subscribes to a trusted server's resources and emits a notification event on each update. |
 | **Resume keys** | Strings that match an answer to a parked task: `reply:<connector>:<channel>:<msgID>` (explicit reply) and `actor:<connector>:<channel>:<userID>` (fallback). |
 | **Runtime** | `agent.Runtime`, the serial worker: dequeue a task, run the strategy, deliver or park (D-005). |
 | **Sandbox** | `sandboxfs.FS`, a filesystem rooted at one directory that rejects absolute, volume-qualified, and `..` paths and enforces a size cap. |
-| **Scheduled fire** | The timer event a job emits when it fires. Content `[scheduled fire: <name>] <prompt>`, routed to the creating channel and user. |
+| **Scheduled fire** | The timer event a job emits when it fires. Content `[reminder due: <name>] <prompt>`, routed to the creating channel and user. A `timer` turn is told to say the reminder, not describe it (D-053). |
 | **Scope (`UserScope`)** | The per-turn connector / user / person / user name / channel / thread, attached to `ctx` via `scope.With` and sent to trusted servers in `_meta`. `Dir()` is the person's memory tree. |
 | **Serial worker** | See *Runtime*. |
 | **Server (MCP server)** | A provider of tools (and optionally resources) speaking MCP. Built-in or external. |
 | **`<servers>` block** | The system-message section listing each connected server with its instructions and tools. |
 | **Source** | An `ingest.Source`: anything with `Name()` and `Run(ctx, emit)` that produces events. `discord`, `email`, `schedule`, `mcp_<server>`. |
 | **`spoken`** | The plain-text part of `reply`, in tobee's voice. |
-| **Status tools** | `status_summary` and `status_report`. Verbatim tools rendering Reporter output over a relative `window`. |
+| **Status tools** | `status_summary` and `status_report`. Verbatim tools rendering Reporter output over a relative `window`. The summary is tobee's own activity in the first person; the report is the operator's detail (D-053). |
 | **Strategy** | An `agent.Strategy`: a reasoning scheme that turns a `Turn` into a reply or an await. The agent loop (`react`) is the only one (D-037). |
 | **System prompt** | Pinned resources (`prompts/system/*.md` in filename order), plus `<servers>` and `<context>`. Sent once as message 0. |
 | **Task** | `taskqueue.Task`: an event, a `Resume` if it answers a parked question, and an attempt count. Persisted until done. |

@@ -49,9 +49,11 @@ func (r engineReporter) Render(_ context.Context, _ time.Time) (string, string) 
 	}
 	full.WriteString("Done: —\nWaiting: —\n")
 
-	summary := fmt.Sprintf("%d input source%s running", len(runs)-down, plural(len(runs)-down))
+	// Sources being up is the normal case and says nothing a person needs;
+	// one being down is worth saying (D-053).
+	summary := ""
 	if down > 0 {
-		summary += fmt.Sprintf(", %d down", down)
+		summary = fmt.Sprintf("%d of my %d inputs %s down", down, len(runs), isAre(down))
 	}
 	return full.String(), summary
 }
@@ -61,4 +63,11 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+func isAre(n int) string {
+	if n == 1 {
+		return "is"
+	}
+	return "are"
 }

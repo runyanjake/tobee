@@ -72,7 +72,7 @@ func (l *Loop) Handle(t *Turn) {
 	if r := t.Task.Resume; r != nil && r.Pending != nil {
 		l.resolveApproval(ctx, t, r.Pending)
 	}
-	directive, err := l.states.RenderPhase("turn", StateData{})
+	directive, err := l.states.RenderPhase("turn", StateData{Kind: string(t.Event.Kind)})
 	if err != nil {
 		telemetry.Logger(ctx).Error("agent: turn directive failed", "err", err)
 		return
@@ -91,18 +91,18 @@ func (l *Loop) Handle(t *Turn) {
 		case errors.Is(err, llm.ErrInvalidDecision):
 			// The unreadable output is dropped so later calls can't continue it.
 			if invalid++; invalid > 1 {
-				t.AddProblem("unreadable", "", "the model's answer wasn't a usable tool call, twice over")
+				t.AddProblem("unreadable", "", "I couldn't put together a usable tool call, twice over, so I stopped")
 				return
 			}
-			t.AddRecovered("unreadable", "", "the model's answer wasn't a usable tool call; the step was retried")
+			t.AddRecovered("unreadable", "", "I couldn't put together a usable tool call and tried the step again")
 			conv.AppendHarness(llm.Message{Role: llm.RoleUser, Content: invalidNudge})
 			continue
 		case err != nil:
 			if failures++; failures > 1 || ctx.Err() != nil {
-				t.AddProblem("model_error", "", firstLine(err.Error()))
+				t.AddProblem("model_error", "", "I couldn't finish thinking this through: "+firstLine(err.Error()))
 				return
 			}
-			t.AddRecovered("model_error", "", firstLine(err.Error()))
+			t.AddRecovered("model_error", "", "I hit an error thinking and tried again: "+firstLine(err.Error()))
 			continue
 		}
 
@@ -131,14 +131,14 @@ func (l *Loop) Handle(t *Turn) {
 
 	// Out of steps: one last call that can only reply.
 	telemetry.Logger(ctx).Warn("agent: step budget spent; forcing a reply", "max_steps", l.maxSteps)
-	t.AddProblem("budget", "", fmt.Sprintf("ran out of steps after %d model calls", l.maxSteps))
+	t.AddProblem("budget", "", fmt.Sprintf("I ran out of steps after %d tries, so this may be unfinished", l.maxSteps))
 	conv.AppendHarness(llm.Message{Role: llm.RoleUser, Content: budgetNudge})
 	d, err := decide(ctx, l.model, conv, []llm.ToolSpec{replySpec()})
 	if err == nil {
 		l.reply(ctx, t, d.Call)
 		return
 	}
-	t.AddProblem("model_error", "", "the final reply could not be produced")
+	t.AddProblem("model_error", "", "I couldn't put my reply together")
 	// A tool may already have rendered an answer, and the problem list is worth
 	// sending even on its own: silence hides what went wrong (D-051).
 	t.Reply = strings.TrimSpace(renderReply(replyArgs{}, t.Verbatim, t.Actions, t.Problems))
@@ -247,11 +247,12 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 	if prev, ok := seen[key]; ok {
 		note := repeatNote
 		st.suppressed[name]++
-		detail := "called again with the same arguments; not run a second time"
+		detail := fmt.Sprintf("I called %s twice the same way, so the second one didn't run", name)
 		if st.suppressed[name] >= maxSuppressed {
 			st.closed[name] = true
 			note = fmt.Sprintf(closedNote, name)
-			detail = fmt.Sprintf("called with the same arguments %d times; closed for the turn", st.suppressed[name]+1)
+			detail = fmt.Sprintf("I kept calling %s the same way (%d times), so I stopped using it",
+				name, st.suppressed[name]+1)
 		}
 		telemetry.Log(ctx, slog.LevelWarn, telemetry.Action, "agent: tool call repeated; not run",
 			"tool", name, "call_id", call.ID, "suppressed", st.suppressed[name], "closed", st.closed[name])
@@ -270,11 +271,11 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 	case err != nil:
 		content = fmt.Sprintf("error: %v", err)
 		status, level = "failed", slog.LevelWarn
-		t.AddProblem("tool_error", name, firstLine(err.Error()))
+		t.AddProblem("tool_error", name, fmt.Sprintf("I tried %s and it failed: %s", name, firstLine(err.Error())))
 	case res.IsError:
 		content = "error: " + res.Text
 		status, level = "error", slog.LevelWarn
-		t.AddProblem("tool_error", name, firstLine(res.Text))
+		t.AddProblem("tool_error", name, fmt.Sprintf("I tried %s and it failed: %s", name, firstLine(res.Text)))
 	case res.Await != nil:
 		status = "await"
 		t.Await = res.Await
@@ -340,7 +341,7 @@ func (l *Loop) resolveApproval(ctx context.Context, t *Turn, p *taskqueue.Pendin
 		t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: p.ID, Name: p.Tool,
 			Content: "Not run: the user did not approve."})
 		t.Actions = append(t.Actions, Action{Tool: p.Tool, OK: false, Result: "not run: not approved"})
-		t.AddProblem("declined", p.Tool, "the user did not approve it")
+		t.AddProblem("declined", p.Tool, fmt.Sprintf("I didn't run %s because you didn't approve it", p.Tool))
 		return
 	}
 	telemetry.Log(ctx, slog.LevelInfo, telemetry.Action, "agent: approval granted", "tool", p.Tool)

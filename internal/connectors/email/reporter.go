@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/runyanjake/tobee/internal/abilities"
@@ -29,7 +30,11 @@ func (r mailReporter) Render(_ context.Context, _ time.Time) (string, string) {
 
 	summary := ""
 	if r.m.received > 0 || r.m.sent > 0 {
-		summary = fmt.Sprintf("Email has received %d and sent %d message%s since boot", r.m.received, r.m.sent, plural(r.m.sent))
+		summary = fmt.Sprintf("I've read %d email%s and sent %d since starting up",
+			r.m.received, plural(r.m.received), r.m.sent)
+	}
+	if r.m.lastErr != "" {
+		summary = strings.TrimSpace(summary + " (my last mail check failed: " + r.m.lastErr + ")")
 	}
 	return full, summary
 }

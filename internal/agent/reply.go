@@ -98,6 +98,8 @@ func renderReply(args replyArgs, verbatim []VerbatimBlock, actions []Action, pro
 // renderProblems is the code-written account of a turn that didn't work: the
 // model's own words can't be trusted to carry it, as a turn that spent every
 // step repeating one read still reported "no reminders to clear" (D-051).
+// Each Detail is already a first-person sentence, written where the fact is
+// known, so this only has to frame them (D-053).
 func renderProblems(problems []Problem) string {
 	if len(problems) == 0 {
 		return ""
@@ -108,36 +110,10 @@ func renderProblems(problems []Problem) string {
 			continue
 		}
 		if sb.Len() == 0 {
-			sb.WriteString("⚠️ Didn't finish cleanly:")
+			sb.WriteString("⚠️ I didn't finish this cleanly:")
 		}
 		sb.WriteString("\n• ")
-		if p.Tool != "" {
-			sb.WriteString(p.Tool)
-			sb.WriteString(": ")
-		}
-		sb.WriteString(problemText(p))
+		sb.WriteString(strings.TrimSpace(p.Detail))
 	}
 	return sb.String()
-}
-
-// problemText keeps the wording the user's, not the protocol's.
-func problemText(p Problem) string {
-	switch p.Kind {
-	case "budget":
-		return p.Detail + ", so the request may be unfinished"
-	case "repeated":
-		return p.Detail
-	case "unreadable":
-		return "the model's answer wasn't usable, so a step was retried"
-	case "model_error":
-		return p.Detail
-	case "declined":
-		return "not run — " + p.Detail
-	case "tool_error":
-		return "failed — " + p.Detail
-	}
-	if p.Detail != "" {
-		return p.Detail
-	}
-	return p.Kind
 }

@@ -22,9 +22,12 @@ func (r queueReporter) Render(_ context.Context, _ time.Time) (string, string) {
 	case pending == 0 && parked == 0:
 		summary = ""
 	case parked == 0:
-		summary = fmt.Sprintf("%d task%s queued", pending, plural(pending))
+		summary = fmt.Sprintf("I have %d request%s still queued", pending, plural(pending))
+	case pending == 0:
+		summary = fmt.Sprintf("I'm waiting on your answer to %d question%s", parked, plural(parked))
 	default:
-		summary = fmt.Sprintf("%d task%s queued and %d waiting on an answer", pending, plural(pending), parked)
+		summary = fmt.Sprintf("I have %d request%s queued and I'm waiting on your answer to %d",
+			pending, plural(pending), parked)
 	}
 	return full, summary
 }

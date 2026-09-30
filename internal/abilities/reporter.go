@@ -11,8 +11,14 @@ import (
 	"time"
 )
 
-// Reporter's Render returns full (status_report) and one-sentence summary (status_summary)
-// text, shown verbatim; return "" when there is nothing to say. Name must be unique.
+// Reporter's Render returns full (status_report) and one-sentence summary
+// (status_summary) text, shown verbatim; return "" when there is nothing to
+// say. Name must be unique.
+//
+// The summary is read by a person, so it speaks as tobee ("I've handled 2
+// messages") and reports activity — what was done, what failed, what is
+// waiting. Inventory, counts of connected things and internal names belong in
+// the full report, which is the operator's view (D-053).
 type Reporter interface {
 	Name() string
 	Render(ctx context.Context, since time.Time) (full, summary string)
@@ -82,7 +88,7 @@ func (r *Registry) RenderSummary(ctx context.Context, since time.Time) string {
 		parts = append(parts, summary)
 	}
 	if len(parts) == 0 {
-		return "Everything quiet."
+		return "I've been idle — nothing to report."
 	}
 	return strings.Join(parts, " ")
 }

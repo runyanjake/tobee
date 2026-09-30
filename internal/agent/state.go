@@ -11,8 +11,12 @@ import (
 	"text/template"
 )
 
-// StateData is the render context for prompts/state/*.md.
-type StateData struct{}
+// StateData is the render context for prompts/state/*.md. Kind is the event's
+// kind, so the one turn directive can say what a timer means without a second
+// phase (D-043, D-053).
+type StateData struct {
+	Kind string
+}
 
 // StateTemplates are parsed at boot; a render failure is a programming error, not bad input.
 type StateTemplates struct {

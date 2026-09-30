@@ -26,11 +26,11 @@ func New(instructions string, m *scheduler.JobManager) *mcpserver.Server {
         and prefer an absolute timestamp with that offset over a duration you worked out in your head.
 - cron: standard 5-field cron expression ("0 9 * * MON-FRI") OR robfig descriptor ("@every 30m", "@hourly", "@daily").
 
-When the schedule fires, the "prompt" text is delivered as the next user-message-equivalent on the same channel that created the job, prefixed with "[scheduled fire: <name>]". Use this for reminders, follow-ups, and periodic checks. Returns the job id — keep it if you may want to cancel.`,
+When the time arrives the "prompt" text comes back to you as a new message on the same channel, prefixed with "[reminder due: <name>]" — at that point you say it to the user, you don't describe the schedule. Use this for reminders, follow-ups, and periodic checks. Returns the job id — keep it if you may want to cancel.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"prompt": {"type": "string", "description": "What to say to yourself when the timer fires. Write it as a directive (\"check the deploy status and report back\")."},
+				"prompt": {"type": "string", "description": "The note that comes back to you when the time arrives. For a reminder, write what the user needs to hear (\"leave for basketball with Damian\"); for a task, write the directive (\"check the deploy status and report back\"). Not a confirmation — you are writing to your future self, not to the user."},
 				"at":     {"type": "string", "description": "RFC3339 absolute time or \"in <duration>\". Mutually exclusive with cron."},
 				"cron":   {"type": "string", "description": "Cron expression for recurring fires. Mutually exclusive with at."},
 				"name":   {"type": "string", "description": "Optional short label used in logs and the fire marker."}
@@ -54,8 +54,9 @@ When the schedule fires, the "prompt" text is delivered as the next user-message
 	})
 
 	srv.Add(mcpserver.Tool{
-		Name:        "list",
-		Description: `List currently scheduled jobs. Returns "<id>  <when>  <name>  <prompt>" rows.`,
+		Name: "list",
+		Description: `The reminders and recurring jobs set right now, as "<id>  <when>  <name>  <prompt>" rows. ` +
+			`This is what to call whenever the user asks what reminders or schedules they have.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {}

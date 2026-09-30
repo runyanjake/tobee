@@ -258,12 +258,15 @@ func (m *JobManager) fire(id string) {
 	}
 }
 
+// formatPrompt frames a fire as the note tobee left itself, now due. The old
+// "[scheduled fire: …]" wording read as a status line, and the model answered
+// by describing the schedule instead of saying the thing (D-053).
 func formatPrompt(j Job) string {
 	label := j.Name
 	if label == "" {
 		label = j.ID
 	}
-	return fmt.Sprintf("[scheduled fire: %s] %s", label, j.Prompt)
+	return fmt.Sprintf("[reminder due: %s] %s", label, j.Prompt)
 }
 
 func validate(j *Job) error {

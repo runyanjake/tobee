@@ -43,9 +43,16 @@ func (r hostReporter) Render(_ context.Context, _ time.Time) (string, string) {
 	}
 	full.WriteString("Done: —\nWaiting: —\n")
 
-	summary := fmt.Sprintf("%d MCP server%s connected", len(servers), plural(len(servers)))
-	if errs > 0 {
-		summary += fmt.Sprintf(", %d of %d tool calls failed since boot", errs, calls)
+	// The summary is read by a person, so it reports what was done, not what
+	// is plugged in: server inventory belongs in status_report (D-053).
+	summary := ""
+	switch {
+	case calls == 0:
+		summary = ""
+	case errs == 0:
+		summary = fmt.Sprintf("I've made %d tool call%s since starting up", calls, plural(calls))
+	default:
+		summary = fmt.Sprintf("I've made %d tool call%s since starting up and %d failed", calls, plural(calls), errs)
 	}
 	return full.String(), summary
 }

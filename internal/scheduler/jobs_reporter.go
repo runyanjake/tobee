@@ -74,13 +74,11 @@ func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string
 	case len(jobs) == 0 && len(done) == 0:
 		summary = ""
 	case len(jobs) == 0:
-		summary = fmt.Sprintf("%d job%s fired in window, none still scheduled",
-			len(done), schedPlural(len(done)))
+		summary = fmt.Sprintf("%d reminder%s of yours went off", len(done), schedPlural(len(done)))
 	case len(done) == 0:
-		summary = fmt.Sprintf("%d job%s scheduled, none fired in window",
-			len(jobs), schedPlural(len(jobs)))
+		summary = fmt.Sprintf("I'm holding %d reminder%s for you", len(jobs), schedPlural(len(jobs)))
 	default:
-		summary = fmt.Sprintf("%d job%s fired in window, %d still scheduled",
+		summary = fmt.Sprintf("%d reminder%s of yours went off and I'm still holding %d",
 			len(done), schedPlural(len(done)), len(jobs))
 	}
 	return full.String(), summary

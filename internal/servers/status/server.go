@@ -31,8 +31,9 @@ func New(instructions string, reps *abilities.Registry) *mcpserver.Server {
 
 	srv.Add(mcpserver.Tool{
 		Name: "summary",
-		Description: "Brief few-sentence overview of tobee's current activity across subsystems. " +
-			"Use for general 'how are things?' / 'what are you up to?' inquiries. " +
+		Description: "How you yourself have been doing: messages handled, tool calls, failures, what you are waiting on. " +
+			"Use for 'how are things?' / 'what are you up to?'. " +
+			"Not for the user's own things — their reminders are schedule_list and their notes are in memory. " +
 			"Renders the finished answer itself — calling this tool answers the question. " +
 			"Optional window=duration (\"1h\", \"24h\", \"7d\"; default 1h).",
 		InputSchema: windowSchema,
@@ -43,8 +44,8 @@ func New(instructions string, reps *abilities.Registry) *mcpserver.Server {
 
 	srv.Add(mcpserver.Tool{
 		Name: "report",
-		Description: "Strict full-detail status block per subsystem (connectors, schedules, ingest, mcp, …). " +
-			"Use when the user asks for specifics — failures, schedules, exact next-fire times, channel filters. " +
+		Description: "Strict full-detail status block per subsystem (connectors, schedules, ingest, mcp, …), for an operator. " +
+			"Use when the user asks about tobee's internals — failures, restarts, exact next-fire times, channel filters. " +
 			"Prefer status_summary for general inquiries. " +
 			"Renders the finished answer itself — calling this tool answers the question. " +
 			"Optional window=duration (\"1h\", \"24h\", \"7d\"; default 1h).",

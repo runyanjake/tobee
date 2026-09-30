@@ -551,8 +551,8 @@ func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 	sent := h.chat.sent[len(h.chat.sent)-1]
 	for _, want := range []string{
 		"I couldn't find anything to clear.",
-		"⚠️ Didn't finish cleanly:",
-		"status_summary: called with the same arguments 3 times; closed for the turn",
+		"⚠️ I didn't finish this cleanly:",
+		"I kept calling status_summary the same way (3 times), so I stopped using it",
 	} {
 		if !strings.Contains(sent, want) {
 			t.Fatalf("reply missing %q:\n%s", want, sent)
@@ -640,7 +640,7 @@ func TestSessionCarriesWhatFailed(t *testing.T) {
 	if outcome == "" {
 		t.Fatalf("the next turn carried no outcome:\n%+v", h.llm.requests[len(h.llm.requests)-1])
 	}
-	for _, want := range []string{`status="replied"`, "steps=", "failed: status_summary: called again"} {
+	for _, want := range []string{`status="replied"`, "steps=", "failed: I called status_summary twice the same way"} {
 		if !strings.Contains(outcome, want) {
 			t.Fatalf("outcome missing %q:\n%s", want, outcome)
 		}
@@ -659,6 +659,46 @@ func TestCleanTurnCarriesNoOutcome(t *testing.T) {
 	for _, m := range h.llm.requests[1] {
 		if strings.HasPrefix(m.Content, "<outcome") {
 			t.Fatalf("clean turn recorded an outcome: %s", m.Content)
+		}
+	}
+}
+
+// A fired reminder is the note coming due, not a question about the schedule:
+// the directive tells the model to say it, because it had been repeating the
+// confirmation it gave when the reminder was created (D-053).
+func TestTimerTurnIsBriefedToRemind(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(call{name: "reply", args: `{"spoken":"Time to leave for basketball with Damian."}`})
+
+	ev := chatEvent("e1", "[reminder due: basketball] leave for basketball with Damian", "")
+	ev.Kind = event.KindTimer
+	h.runNext(t, ev)
+
+	var directive string
+	for _, m := range h.llm.requests[0] {
+		if strings.Contains(m.Content, `<phase name="turn">`) {
+			directive = m.Content
+		}
+	}
+	if directive == "" {
+		t.Fatalf("no turn directive:\n%+v", h.llm.requests[0])
+	}
+	for _, want := range []string{"note you left yourself", "Say it to the user now"} {
+		if !strings.Contains(directive, want) {
+			t.Fatalf("timer directive missing %q:\n%s", want, directive)
+		}
+	}
+}
+
+// An ordinary message must not be told it is a reminder coming due.
+func TestMessageTurnIsNotBriefedToRemind(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(call{name: "reply", args: `{"spoken":"Hey."}`})
+	h.runNext(t, chatEvent("e1", "hey", ""))
+
+	for _, m := range h.llm.requests[0] {
+		if strings.Contains(m.Content, "note you left yourself") {
+			t.Fatalf("a plain message got the timer briefing:\n%s", m.Content)
 		}
 	}
 }

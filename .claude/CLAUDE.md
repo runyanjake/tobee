@@ -114,6 +114,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - History is the person's session, recorded by code: user messages, tool calls with real results, and delivered replies (D-046). Don't store model drafts or summaries in it, and don't key it by channel or connector; key by person (D-045).
 - Anything the reply says happened must be backed by code: action lines come from real tool results, and destructive calls go through the code-written approval (D-047). Never make a prompt instruction the only guard against a false claim or a destructive action.
 - What went wrong is reported by code too. Record it on the turn with `AddProblem` (or `AddRecovered` when a retry fixed it) and let `renderReply` and the session outcome carry it; a nudge asking the model to admit a failure is not a guard (D-051).
+- Text code puts in front of a person speaks as tobee, in the first person, about what it did — Reporter summaries, the failure block, action lines. Counts of connected things are operator detail and belong in `status_report`, not in a reply (D-053). Write the sentence where the fact is known, so `Problem.Detail` is already the finished line.
 - When the loop stops making progress, take the option away instead of asking it to stop: an identical repeat closes that tool for the turn by leaving it out of the schema (D-051).
 - New reasoning schemes implement `agent.Strategy` and are selected by `AGENT_STRATEGY` (D-037). The runtime owns scope, budget, delivery, and parking; a strategy only fills `Turn.Reply` or `Turn.Await`.
 - Keep the turn budget and `AGENT_MAX_STEPS`. Don't raise or remove them to make one case work.
@@ -159,7 +160,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-053**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-054**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

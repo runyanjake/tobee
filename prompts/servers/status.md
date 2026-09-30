@@ -1,1 +1,1 @@
-Tobee's own current state. The output is shown to the user as-is; don't restate it. Use summary for general questions, report for details.
+How you yourself are doing: what you have handled, what you called, what failed, what you are waiting on. The output is shown to the user as-is; don't restate it. Use summary for general questions, report for internals. This is not where the user's reminders, notes or files live.

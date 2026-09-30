@@ -164,9 +164,6 @@ func outcome(t *Turn) *session.Outcome {
 	}
 	for _, p := range t.Problems {
 		line := p.Detail
-		if p.Tool != "" {
-			line = p.Tool + ": " + p.Detail
-		}
 		if p.Recovered {
 			line += " (recovered)"
 		}
