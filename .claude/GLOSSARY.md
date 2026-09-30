@@ -30,12 +30,14 @@
 | **`_meta`** | MCP's per-request/result metadata field. tobee uses `tobee/scope` (request), `tobee/verbatim` (tool definition), and `tobee/await` (result), only with trusted servers. |
 | **Log category** | The `cat` attribute on every log record: `input`, `thinking`, `action`, `output`, `llm`, or `system` (D-040). |
 | **Problem** | `agent.Problem{Kind, Tool, Detail, Recovered}`: one thing that didn't work this turn. Unrecovered ones are rendered under the reply; all are saved to the session (D-051). |
-| **Outcome** | `session.Outcome`: a turn's code-written result — status, steps, actions, problems. Injected into later turns as `<outcome>` when notable, and kept in the archived transcript (D-051). |
+| **Outcome** | `session.Outcome`: a turn's code-written result — status, steps, actions, problems. Injected into later turns as `<outcome>` and kept in the archived transcript whenever the turn acted, failed, or didn't reply (D-051, D-054). |
 | **Closed tool** | A tool withdrawn from the decision schema for the rest of a turn after an identical repeat, so the loop cannot keep calling it (D-051). |
 | **Action line** | A code-written line under the reply for each non-read tool call this turn, e.g. `✅ memory_delete: deleted …` (D-047). |
 | **Approval** | The code-written "Confirm: <tool> <args>" question a destructive call waits on. Only a plain yes runs the call, exactly as proposed (D-047). |
 | **Identity / person** | The human behind one or more connector accounts, linked with `IDENTITY_<NAME>` (D-045). |
 | **Session** | A person's live conversation across connectors. It's injected as history and archived to `memory://user/conversations/` after `SESSION_IDLE_TIMEOUT` (D-046). |
+| **`<memory-files>`** | The pinned manifest of the current user's saved memory paths — names only, transcripts counted, capped at 1 KiB. Structural context, like `<servers>` (D-054). |
+| **Mentioner** | `delivery.Mentioner`, a connector that can format a ping for one of its user IDs (`<@id>` on Discord). Used to address a `timer` reply to the person (D-054). |
 | **Core memory** | The one memory file pinned into every system prompt: the current user's `lessons.md`, capped at 1 KiB and read fresh each turn (D-052). Everything else in memory is tool-read. |
 | **Lesson** | One dated imperative line in `lessons.md`, drawn from a failed session by the reflection pass. Guidance, not fact; plain text a human can edit. |
 | **Reflection pass** | `agent.Reflector`: one model call when a session with failures closes, turning its recorded outcomes into at most three lessons. The only model call outside a turn, gated by `AGENT_REFLECT` (D-052). |
@@ -50,7 +52,7 @@
 | **Phase directive / state template** | A user-role message rendered from `prompts/state/<phase>.md` and wrapped in `<phase name="…">`. Only `turn` exists since D-043. |
 | **Plan** | `agent.Plan`: a `Goal` and ordered `steps` of `{title, status}` (`pending` / `active` / `done` / `skipped`). Set by the `plan` tool, exists only for the turn, and only drives the progress message. |
 | **Prefix cache** | LLM-server KV cache reuse when consecutive requests share leading tokens. Why the system message keeps stable sections first and is never rebuilt mid-turn. |
-| **Pinned resource** | A resource a trusted server marks priority 1. The host puts its text in every system prompt (D-042). The `system` server pins the prompt fragments; the `memory` server pins the user's capped `lessons.md` (D-052). |
+| **Pinned resource** | A resource a trusted server gives a priority above 0. The host puts its text in every system prompt, highest priority first (D-042). The `system` server pins the prompt fragments at 1; the `memory` server pins `lessons.md` (0.6) and `<memory-files>` (0.5) below them, so per-turn text never precedes stable text (D-017, D-052, D-054). |
 | **Protocol violation** | Model output that is not a valid choice of an offered tool (`llm.ErrInvalidDecision`). With constrained decoding it means the server ignored the schema. Logged at ERROR, dropped, nudged, retried once. |
 | **Structured output** | A JSON Schema sent as `response_format` that the server enforces while decoding (a grammar on Ollama). How every model call is made (D-041). |
 | **Tool menu** | The `<tools>` block the provider appends to each request, describing the offered tools. The schema constrains output, but the model never sees it. |

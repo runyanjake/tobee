@@ -416,6 +416,16 @@ func (b *Bot) Edit(_ context.Context, to event.Address, messageID, text string) 
 	return nil
 }
 
+// Mention is the ping Discord parses in message content. The ID we store is
+// the author's user snowflake (event.Actor.ID ← m.Author.ID), which is what
+// <@id> needs; the display name is not usable for this (D-054).
+func (b *Bot) Mention(userID string) string {
+	if strings.TrimSpace(userID) == "" {
+		return ""
+	}
+	return "<@" + userID + ">"
+}
+
 // React ignores ctx: discordgo's REST calls don't take one. Removing the
 // bot's own reaction needs no Manage Messages permission.
 func (b *Bot) React(_ context.Context, to event.Address, messageID, emoji string, add bool) error {

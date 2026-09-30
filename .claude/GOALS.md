@@ -8,10 +8,10 @@
 - **Act with tools in one loop.** Calls one tool at a time until it can reply. Greetings and small talk are one call. Multi-step work gets a live checklist where the channel supports edits (D-043).
 - **Use any MCP server.** Built-in tools are MCP servers; external servers connect over stdio or HTTP with env config only. The model sees one catalog (D-033). External servers are untrusted by default (D-038).
 - **Ask when unsure.** `user_ask` sends a clarifying question and pauses the task until the user answers (D-036).
-- **Remember across messages.** Reads and writes plain-text memory files, split into a per-person tree and a shared tree (`memory_*`).
+- **Remember across messages.** Reads and writes plain-text memory files, split into a per-person tree and a shared tree (`memory_*`). It always sees which files it has already saved, and code refuses a second file for something already covered (D-054).
 - **Carry the conversation.** Each person has one live session across connectors, injected as history until it goes idle, then archived to memory as a transcript (D-045, D-046).
 - **Learn from failing.** A turn records what it tried and what went wrong, says so under the reply, and carries it into later turns; when a conversation with failures ends, it distils lessons into a capped `lessons.md` that is pinned into every later prompt (D-051, D-052).
-- **Schedule its own follow-ups.** Creates one-shot (`at`) or recurring (`cron`) jobs. They survive restarts and fire back into the channel that created them (`schedule_*`).
+- **Schedule its own follow-ups.** Creates one-shot (`at`) or recurring (`cron`) jobs. They survive restarts and fire back into the channel that created them (`schedule_*`), pinging the person who asked (D-054).
 - **Report its own state.** `status_summary` says in its own voice what it has handled, called, failed at and is waiting on; `status_report` is the operator's full detail. Both are delivered word for word (D-030, D-053).
 - **Work with host files (optional).** Lists, reads, searches, and writes (unless read-only) inside operator-configured workspace areas (`workspace_*`).
 - **Keep one wall clock.** `TZ` sets the zone the instance thinks in, so "remind me at 4:40pm" and every time it reports back mean the same thing (D-049).

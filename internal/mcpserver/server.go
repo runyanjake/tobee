@@ -160,6 +160,10 @@ type Resource struct {
 	Description string
 	MIMEType    string
 	Pinned      bool
+	// PinPriority orders pinned resources in the system prompt, highest
+	// first. Default 1. Give per-turn text a lower value so it lands after
+	// text that never changes and the stable prefix stays cacheable (D-017).
+	PinPriority float64
 	Read        func(ctx context.Context) (string, error)
 }
 
@@ -180,7 +184,11 @@ var ErrNotFound = errors.New("resource not found")
 func (s *Server) AddResource(r Resource) {
 	def := &mcp.Resource{URI: r.URI, Name: r.Name, Description: r.Description, MIMEType: r.MIMEType}
 	if r.Pinned {
-		def.Annotations = &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 1}
+		priority := r.PinPriority
+		if priority <= 0 {
+			priority = 1
+		}
+		def.Annotations = &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: priority}
 	}
 	s.srv.AddResource(def, s.wrapRead(r.MIMEType, func(ctx context.Context, _ string) (string, error) {
 		return r.Read(ctx)

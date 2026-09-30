@@ -70,3 +70,36 @@ func TestReadRoutesByTemplatePrefix(t *testing.T) {
 		t.Fatalf("Resources() = %+v", list)
 	}
 }
+
+// Priority orders the system prompt so per-turn text lands after text that
+// never changes, keeping the stable prefix cacheable (D-017, D-054). Without
+// this, the memory server's blocks sorted ahead of the system prompt by name.
+func TestPinnedHighestPriorityFirst(t *testing.T) {
+	h := New()
+	defer h.Close()
+
+	variable := mcpserver.New("memory", "")
+	variable.AddResource(mcpserver.Resource{URI: "memory://user/.files", Name: "files",
+		Pinned: true, PinPriority: 0.5,
+		Read: func(context.Context) (string, error) { return "changes often", nil }})
+	variable.AddResource(mcpserver.Resource{URI: "memory://user/lessons.md", Name: "lessons",
+		Pinned: true, PinPriority: 0.6,
+		Read: func(context.Context) (string, error) { return "changes rarely", nil }})
+
+	_ = h.ConnectInProcess(context.Background(), variable)
+	_ = h.ConnectInProcess(context.Background(), resourceServer("system", "system://prompt/00-a.md"))
+
+	got, err := h.Pinned(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"system://prompt/00-a.md", "memory://user/lessons.md", "memory://user/.files"}
+	if len(got) != len(want) {
+		t.Fatalf("Pinned() = %+v, want %d blocks", got, len(want))
+	}
+	for i, uri := range want {
+		if got[i].URI != uri {
+			t.Fatalf("Pinned()[%d] = %q, want %q (order: %+v)", i, got[i].URI, uri, got)
+		}
+	}
+}

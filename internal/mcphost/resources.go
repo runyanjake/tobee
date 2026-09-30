@@ -64,7 +64,14 @@ func (h *Host) refreshResources(ctx context.Context, c *conn) error {
 }
 
 func pinned(r *mcp.Resource) bool {
-	return r.Annotations != nil && r.Annotations.Priority >= 1
+	return r.Annotations != nil && r.Annotations.Priority > 0
+}
+
+func pinPriority(r *mcp.Resource) float64 {
+	if r.Annotations == nil {
+		return 0
+	}
+	return r.Annotations.Priority
 }
 
 // Resources lists every server's resources and templates, sorted by server.
@@ -85,13 +92,17 @@ func (h *Host) Resources() []ResourceInfo {
 	return out
 }
 
-// Pinned reads every pinned resource of every trusted server, in server
-// then URI order, stopping at maxPinnedBytes. Untrusted servers cannot pin:
-// that would put third-party text in the system prompt (D-038, D-042).
+// Pinned reads every pinned resource of every trusted server, highest
+// priority first and then by server and URI, stopping at maxPinnedBytes.
+// Priority orders the system prompt, so text that never changes precedes text
+// that changes per turn and the stable prefix stays cacheable (D-017, D-042).
+// Untrusted servers cannot pin: that would put third-party text in the system
+// prompt (D-038).
 func (h *Host) Pinned(ctx context.Context) ([]Pinned, error) {
 	type ref struct {
-		c   *conn
-		uri string
+		c        *conn
+		uri      string
+		priority float64
 	}
 	h.mu.RLock()
 	var refs []ref
@@ -101,11 +112,12 @@ func (h *Host) Pinned(ctx context.Context) ([]Pinned, error) {
 		}
 		for _, r := range c.resources {
 			if pinned(r) {
-				refs = append(refs, ref{c, r.URI})
+				refs = append(refs, ref{c, r.URI, pinPriority(r)})
 			}
 		}
 	}
 	h.mu.RUnlock()
+	sort.SliceStable(refs, func(i, j int) bool { return refs[i].priority > refs[j].priority })
 
 	var out []Pinned
 	total := 0

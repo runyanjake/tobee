@@ -88,7 +88,9 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 ### Scope
 
 - Don't build deferred features without discussing them first: vector search, exposing tobee as an MCP server, streaming replies, a non-OpenAI provider abstraction. See [GOALS.md](GOALS.md#non-goals--out-of-scope).
-- Anything pinned into the system prompt needs a hard cap in code, and a turn without a user pins nothing from memory (D-052).
+- Anything pinned into the system prompt needs a hard cap in code, and a turn without a user pins nothing from memory (D-052, D-054). Give it a `PinPriority` below the system fragments' 1 if it changes per turn, so the stable prefix stays cacheable (D-017).
+- Before the agent can be expected to check whether it has done something already, the answer has to be in front of it: what exists goes in `<memory-files>`, what was done goes in the exchange's `Outcome`. Where a duplicate would be silent, refuse it in code (D-054).
+- A connector's user ID is what pings a person (`delivery.Mentioner`); the display name never is. Only replies the person isn't waiting for are addressed to them.
 - No backwards-compatibility shims or parallel old/new code paths. Pick one path.
 - Don't add an interface until a second implementation exists. There is one `sandboxfs.FS`. `agent.Strategy` (D-037) and `llm.Model` (D-041) are deliberate exceptions.
 - Don't add parsers that recover tool calls the model wrote as text, and don't accept prose where a phase requires a tool call (D-025). A salvage parser was built and reverted in `3e818f9`.
@@ -160,7 +162,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-054**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-055**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

@@ -702,3 +702,52 @@ func TestMessageTurnIsNotBriefedToRemind(t *testing.T) {
 		}
 	}
 }
+
+// A reminder lands long after the person last wrote, so it pings them. The ID
+// used is the connector's user ID from the inbound message (D-054).
+func TestTimerReplyPingsTheUser(t *testing.T) {
+	h := newHarness(t)
+	pinger := &mentioningChat{}
+	h.out.Register("chat", pinger)
+
+	h.llm.script(call{name: "reply", args: `{"spoken":"Time to leave for basketball."}`})
+	ev := chatEvent("e1", "[reminder due: basketball] leave for basketball", "")
+	ev.Kind = event.KindTimer
+	h.runNext(t, ev)
+
+	if got := pinger.sent[len(pinger.sent)-1]; got != "<@u1> Time to leave for basketball." {
+		t.Fatalf("sent = %q, want the reply addressed to the user", got)
+	}
+}
+
+// An answer to something the person just asked needs no ping.
+func TestMessageReplyDoesNotPing(t *testing.T) {
+	h := newHarness(t)
+	pinger := &mentioningChat{}
+	h.out.Register("chat", pinger)
+
+	h.llm.script(call{name: "reply", args: `{"spoken":"Hey."}`})
+	h.runNext(t, chatEvent("e1", "hey", ""))
+
+	if got := pinger.sent[len(pinger.sent)-1]; got != "Hey." {
+		t.Fatalf("sent = %q, want no ping", got)
+	}
+}
+
+// A connector with no mention syntax is left alone.
+func TestTimerReplyUnchangedWithoutMentions(t *testing.T) {
+	h := newHarness(t)
+	h.llm.script(call{name: "reply", args: `{"spoken":"Time to leave."}`})
+	ev := chatEvent("e1", "[reminder due: x] leave", "")
+	ev.Kind = event.KindTimer
+	h.runNext(t, ev)
+
+	if got := h.chat.sent[len(h.chat.sent)-1]; got != "Time to leave." {
+		t.Fatalf("sent = %q, want the reply unchanged", got)
+	}
+}
+
+// mentioningChat is a channel that can ping, like Discord.
+type mentioningChat struct{ chat }
+
+func (c *mentioningChat) Mention(userID string) string { return "<@" + userID + ">" }

@@ -66,9 +66,12 @@ func (o *Outcome) Line() string {
 	return b.String()
 }
 
-// Notable reports whether this outcome is worth showing a later turn.
+// Notable reports whether this outcome is worth showing a later turn: what
+// was changed counts as much as what failed. A turn that wrote a file has to
+// be visible to the next one, or the agent starts a second file for something
+// it already saved (D-054).
 func (o *Outcome) Notable() bool {
-	return o != nil && (len(o.Problems) > 0 || o.Status != "replied")
+	return o != nil && (len(o.Acted) > 0 || len(o.Problems) > 0 || o.Status != "replied")
 }
 
 type Session struct {
@@ -287,10 +290,14 @@ func (sess *Session) Markdown() string {
 				fmt.Fprintf(&b, "> result: %s\n", oneLine(m.Content))
 			}
 		}
-		// What went wrong is part of the record: a transcript that only shows
-		// the reply teaches the wrong lesson when the reply was wrong (D-051).
+		// What was changed and what went wrong are both part of the record: a
+		// transcript that only shows the reply teaches the wrong lesson when the
+		// reply was wrong, and loses what was written (D-051, D-054).
 		if o := ex.Outcome; o.Notable() {
 			fmt.Fprintf(&b, "\n> outcome: %s after %d step%s\n", o.Status, o.Steps, plural(o.Steps))
+			for _, a := range o.Acted {
+				fmt.Fprintf(&b, "> did: %s\n", a)
+			}
 			for _, p := range o.Problems {
 				fmt.Fprintf(&b, "> failed: %s\n", p)
 			}

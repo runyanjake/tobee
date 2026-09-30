@@ -239,3 +239,118 @@ func TestAppendLessonsIgnoresNothingToSay(t *testing.T) {
 		t.Fatal("an empty lesson list created the file")
 	}
 }
+
+// The model wrote shopping_list/INDEX.md while shopping_list.md existed,
+// leaving the user with two lists and no error (D-054).
+func TestWriteRefusesASecondHomeForTheSameThing(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/shopping_list.md", "- eggs")
+
+	res, err := h.Call(ctx, "memory_write",
+		json.RawMessage(`{"path":"shopping_list/INDEX.md","content":"- milk"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Text, "memory://user/shopping_list.md") {
+		t.Fatalf("res = %+v, want a refusal naming the existing file", res)
+	}
+	if fs.Exists("users/discord/me/shopping_list/INDEX.md") {
+		t.Fatal("the duplicate file was written anyway")
+	}
+
+	// Writing to the file that already holds it works.
+	res, err = h.Call(ctx, "memory_write",
+		json.RawMessage(`{"path":"shopping_list.md","content":"- eggs\n- milk"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("res = %+v, err = %v, want the existing path to be writable", res, err)
+	}
+}
+
+func TestWriteClashDetection(t *testing.T) {
+	_, fs, _ := setup(t)
+	root := scopedRoot{Label: "user", Dir: "users/discord/me"}
+	_ = fs.Write("users/discord/me/shopping_list.md", "x")
+	_ = fs.Write("users/discord/me/topics/food.md", "x")
+
+	tests := []struct {
+		name, write, want string
+	}{
+		{"a directory over an existing file", "shopping_list/INDEX.md", "shopping_list.md"},
+		{"a different separator", "shopping-list.md", "shopping_list.md"},
+		{"a different extension", "shopping_list.txt", "shopping_list.md"},
+		{"overwriting the same path", "shopping_list.md", ""},
+		{"a genuinely new file", "recipes.md", ""},
+		{"a new file in an existing directory", "topics/wine.md", ""},
+		{"a nested name that collides", "topics/food/notes.md", "topics/food.md"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clashingPath(fs, root, "users/discord/me/"+tc.write)
+			if got != tc.want {
+				t.Fatalf("clashingPath(%q) = %q, want %q", tc.write, got, tc.want)
+			}
+		})
+	}
+}
+
+// Case is compared in the stem rather than through the filesystem, which is
+// case-insensitive on macOS and not on the prod host.
+func TestNormalizeStem(t *testing.T) {
+	same := []string{"shopping_list.md", "Shopping-List.md", "shopping list.txt", "shoppinglist"}
+	want := normalizeStem(same[0])
+	for _, p := range same[1:] {
+		if got := normalizeStem(p); got != want {
+			t.Fatalf("normalizeStem(%q) = %q, want %q", p, got, want)
+		}
+	}
+	if normalizeStem("recipes.md") == want {
+		t.Fatal("normalizeStem collapsed two different names")
+	}
+}
+
+// Knowing what exists shouldn't need a tool call the model won't make (D-054).
+func TestManifestIsPinnedWithNamesOnly(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/shopping_list.md", "- eggs and other secrets")
+	_ = fs.Write("users/discord/me/conversations/2026/09/29-0214.md", "a transcript")
+	_ = fs.Write("users/discord/me/conversations/2026/09/29-2202.md", "another")
+
+	var block string
+	pinned, err := h.Pinned(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pinned {
+		if strings.Contains(p.Text, "<memory-files>") {
+			block = p.Text
+		}
+	}
+	if block == "" {
+		t.Fatalf("the manifest was not pinned: %+v", pinned)
+	}
+	for _, want := range []string{"INDEX.md", "shopping_list.md", "conversations/ (2 saved conversations)"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("manifest missing %q:\n%s", want, block)
+		}
+	}
+	// Names only: no contents, and no transcript paths crowding it out.
+	if strings.Contains(block, "secrets") || strings.Contains(block, "29-0214") {
+		t.Fatalf("manifest leaked contents or transcript paths:\n%s", block)
+	}
+	if strings.Contains(block, lessonsPath) {
+		t.Fatalf("lessons are pinned in full already:\n%s", block)
+	}
+}
+
+func TestManifestEmptyWithoutAUser(t *testing.T) {
+	h, _, _ := setup(t)
+	pinned, err := h.Pinned(context.Background())
+	if err != nil {
+		t.Fatalf("Pinned() = %v, want no error with no scope", err)
+	}
+	for _, p := range pinned {
+		if strings.Contains(p.Text, "<memory-files>") {
+			t.Fatalf("a manifest was pinned with no user: %q", p.Text)
+		}
+	}
+}

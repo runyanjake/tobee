@@ -103,6 +103,7 @@ func (r *Runtime) run(parent context.Context, task *taskqueue.Task) {
 		r.park(turn)
 		return
 	}
+	r.addressUser(turn)
 	r.deliver(turn)
 	r.record(turn)
 	r.queue.Done(task)
@@ -173,6 +174,19 @@ func outcome(t *Turn) *session.Outcome {
 		return nil // a clean turn's messages already say everything
 	}
 	return o
+}
+
+// addressUser pings the person when the reply arrives out of the blue. A
+// reminder lands minutes or hours after they last wrote, so it has to get
+// their attention; an answer to something they just asked does not (D-054).
+// Connectors with no mention syntax are left alone.
+func (r *Runtime) addressUser(t *Turn) {
+	if t.Reply == "" || t.Event.Kind != event.KindTimer {
+		return
+	}
+	if m := r.out.Mention(t.Event.Origin.Connector, t.Event.Actor.ID); m != "" {
+		t.Reply = m + " " + t.Reply
+	}
 }
 
 // park logs the already-sent question as the turn's output so every turn ends with one output record.

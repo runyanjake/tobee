@@ -137,3 +137,24 @@ func TestInScopeAllowsDMsWhenAChannelIsConfigured(t *testing.T) {
 		t.Fatal("inScope(configured channel) = false, want true")
 	}
 }
+
+// The ID we carry from an inbound message is the user snowflake, which is what
+// <@id> needs; the display name would not ping anyone (D-054).
+func TestMentionUsesTheUserID(t *testing.T) {
+	b, err := New(Config{Token: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Mention("264301820258680834"); got != "<@264301820258680834>" {
+		t.Fatalf("Mention() = %q", got)
+	}
+	if got := b.Mention(""); got != "" {
+		t.Fatalf("Mention(\"\") = %q, want empty", got)
+	}
+	// The author ID an event carries is exactly this field.
+	m := msg("hi")
+	m.Author = &discordgo.User{ID: "264301820258680834", GlobalName: "jake"}
+	if b.Mention(m.Author.ID) != "<@264301820258680834>" {
+		t.Fatal("Mention() does not match the inbound author ID")
+	}
+}

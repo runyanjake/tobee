@@ -27,6 +27,12 @@ type Reactor interface {
 	React(ctx context.Context, to event.Address, messageID, emoji string, add bool) error
 }
 
+// Mentioner formats a ping for one of the connector's user IDs. Implemented
+// only where the platform has a mention syntax; email, for instance, does not.
+type Mentioner interface {
+	Mention(userID string) string
+}
+
 type Router struct {
 	mu       sync.RWMutex
 	channels map[string]Channel
@@ -103,6 +109,23 @@ func (r *Router) React(ctx context.Context, to event.Address, messageID, emoji s
 		return ErrUnsupported
 	}
 	return rc.React(ctx, to, messageID, emoji, add)
+}
+
+// Mention returns the connector's ping for userID, or "" when the connector
+// has no mention syntax or the user isn't known.
+func (r *Router) Mention(connector, userID string) string {
+	if userID == "" {
+		return ""
+	}
+	c, err := r.get(connector)
+	if err != nil {
+		return ""
+	}
+	m, ok := c.(Mentioner)
+	if !ok {
+		return ""
+	}
+	return m.Mention(userID)
 }
 
 func (r *Router) Names() []string {

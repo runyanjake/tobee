@@ -26,6 +26,13 @@ const (
 	lessonsMaxBytes  = 1024
 	lessonsMaxPerRun = 3
 	lessonLineMax    = 200
+
+	// The manifest is names only, capped, so the model knows what it has
+	// already saved without reading any of it (D-054).
+	manifestURI       = uriPrefix + "user/.files"
+	manifestMaxFiles  = 50
+	manifestMaxBytes  = 1024
+	conversationsRoot = "conversations"
 )
 
 // lessonsPreamble is framing, like the <servers> and <context> scaffolding:
@@ -44,6 +51,21 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 		Read:     readResource(fs),
 	})
 
+	// Pinned: the model kept starting a second file for something it had
+	// already saved, because knowing what exists needed a tool call it didn't
+	// make. Names only, so this stays structural context like <servers> (D-054).
+	srv.AddResource(mcpserver.Resource{
+		URI:         manifestURI,
+		Name:        "files",
+		Description: "The paths already saved in the user's memory. Names only, no contents.",
+		MIMEType:    "text/markdown",
+		Pinned:      true,
+		// Last of the pinned blocks: it changes whenever a file is saved, so
+		// everything above it stays cacheable (D-017).
+		PinPriority: 0.5,
+		Read:        readManifest(fs),
+	})
+
 	// Pinned, so guidance that must always apply doesn't depend on the model
 	// choosing to look for it (D-052). Read fresh each turn, per user.
 	srv.AddResource(mcpserver.Resource{
@@ -52,6 +74,9 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 		Description: "What earlier turns learned from failing. Editable like any memory file.",
 		MIMEType:    "text/markdown",
 		Pinned:      true,
+		// After the system fragments, before the manifest: lessons change
+		// rarely, the file list changes often.
+		PinPriority: 0.6,
 		Read:        readLessons(fs),
 	})
 
@@ -230,6 +255,12 @@ func writeHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		full, err := joinScope(root, in.Path)
 		if err != nil {
 			return "", err
+		}
+		// Creating a second home for something already saved is worse than a
+		// refusal: the user ends up with two shopping lists and no error (D-054).
+		if clash := clashingPath(fs, root, full); clash != "" {
+			return "", fmt.Errorf("%s already holds this: write there instead, or delete it first",
+				uri(root.Label, clash))
 		}
 		if err := fs.Write(full, in.Content); err != nil {
 			return "", err
@@ -489,4 +520,129 @@ func trimToBytes(lines []string, max int) string {
 		}
 		lines = lines[1:]
 	}
+}
+
+// manifestPreamble is framing, like the <servers> and <context> scaffolding.
+const manifestPreamble = "Files you have already saved for this user. " +
+	"Before writing, check whether one of these is already the place for it — " +
+	"read it and append rather than starting a second file for the same thing."
+
+// readManifest lists the user's memory paths, names only. Transcripts are
+// counted rather than listed: one per closed conversation would crowd out
+// everything worth seeing. Never an error — no user or no files means nothing
+// is pinned (D-054).
+func readManifest(fs *sandboxfs.FS) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		s, ok := scope.From(ctx)
+		if !ok || !s.HasUser() {
+			return "", nil
+		}
+		dir := s.Dir()
+		all, err := fs.List(dir)
+		if err != nil {
+			return "", nil
+		}
+		var files []string
+		transcripts := 0
+		for _, f := range all {
+			rel := strings.TrimPrefix(strings.TrimPrefix(f, dir), "/")
+			switch {
+			case rel == "" || rel == lessonsPath || strings.HasPrefix(rel, "."):
+				continue // already pinned in full, or ours
+			case strings.HasPrefix(rel, conversationsRoot+"/"):
+				transcripts++
+			default:
+				files = append(files, rel)
+			}
+		}
+		if len(files) == 0 && transcripts == 0 {
+			return "", nil
+		}
+		if len(files) > manifestMaxFiles {
+			files = append(files[:manifestMaxFiles], fmt.Sprintf("…and %d more", len(files)-manifestMaxFiles))
+		}
+		if transcripts > 0 {
+			files = append(files, fmt.Sprintf("%s/ (%d saved conversation%s)",
+				conversationsRoot, transcripts, plural(transcripts)))
+		}
+		body := trimToBytes(files, manifestMaxBytes)
+		return "<memory-files>\n" + manifestPreamble + "\n" + strings.TrimRight(body, "\n") + "\n</memory-files>", nil
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// clashingPath names an existing file that is plainly the same thing as full,
+// or "" when the write is new ground. Only high-confidence cases count: an
+// exact overwrite is fine, and so are genuinely different names.
+//
+// The case that prompted this: "shopping_list.md" existed and the model wrote
+// "shopping_list/INDEX.md", leaving two lists (D-054).
+func clashingPath(fs *sandboxfs.FS, root scopedRoot, full string) string {
+	if fs.Exists(full) {
+		return "" // overwriting the same path is the intended way to update
+	}
+	rel := strings.TrimPrefix(strings.TrimPrefix(full, root.Dir), "/")
+	if rel == "" {
+		return ""
+	}
+	existing, err := fs.List(root.Dir)
+	if err != nil {
+		return ""
+	}
+
+	// A directory segment of the new path is already a file: "shopping_list/…"
+	// under an existing "shopping_list.md".
+	segments := strings.Split(path.Dir(rel), "/")
+	for i := range segments {
+		if segments[i] == "." || segments[i] == "" {
+			continue
+		}
+		prefix := strings.Join(segments[:i+1], "/")
+		if hit := matchStem(existing, root.Dir, prefix); hit != "" {
+			return hit
+		}
+	}
+	// A sibling with the same name in a different spelling: shopping-list.md,
+	// ShoppingList.md, shopping_list.txt.
+	return matchStem(existing, root.Dir, rel)
+}
+
+// matchStem finds an existing file whose path matches target once extensions,
+// case, and word separators are ignored.
+func matchStem(existing []string, dir, target string) string {
+	want := normalizeStem(target)
+	if want == "" {
+		return ""
+	}
+	for _, f := range existing {
+		rel := strings.TrimPrefix(strings.TrimPrefix(f, dir), "/")
+		if rel == "" || rel == target {
+			continue
+		}
+		if normalizeStem(rel) == want {
+			return rel
+		}
+	}
+	return ""
+}
+
+// normalizeStem drops the extension, lowercases, and removes separators, so
+// "Shopping-List.md" and "shopping_list.txt" are the same name.
+func normalizeStem(p string) string {
+	p = strings.TrimSuffix(p, path.Ext(p))
+	var b strings.Builder
+	for _, r := range strings.ToLower(p) {
+		switch r {
+		case '-', '_', ' ', '.':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
