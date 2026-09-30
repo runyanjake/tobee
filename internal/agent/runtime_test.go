@@ -525,8 +525,9 @@ func TestQuestionAnsweredFromAnotherConnector(t *testing.T) {
 
 // The reported failure: asked to clear reminders, the model called one read
 // 12 times, never tried the tool that would have done the job, and then said
-// there was nothing to clear. The repeat now closes the tool so the loop
-// can't continue, and code says what went wrong (D-051).
+// there was nothing to clear. The repeat closes the tool so the loop can't
+// continue (D-051), and the turn still ends with a correct-looking answer, so
+// the user is not warned about it — the session keeps the record (D-055).
 func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 	h := newHarness(t, statusServer())
 	h.llm.script(
@@ -548,11 +549,42 @@ func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 		t.Fatal("closing a tool emptied the menu")
 	}
 
+	// The answer arrived, so the reply stays clean.
+	sent := h.chat.sent[len(h.chat.sent)-1]
+	if strings.Contains(sent, "⚠️") {
+		t.Fatalf("a recovered repeat was reported to the user:\n%s", sent)
+	}
+
+	// The record is kept for the session and for reflection.
+	msgs := h.sessions.History("jake", time.Now())
+	var outcome string
+	for _, m := range msgs {
+		if strings.HasPrefix(m.Content, "<outcome") {
+			outcome = m.Content
+		}
+	}
+	if !strings.Contains(outcome, "I kept calling status_summary the same way (3 times)") {
+		t.Fatalf("the repeat was not recorded in the session:\n%s", outcome)
+	}
+}
+
+// Out of steps, the repeats that burned them are worth explaining (D-055).
+func TestBudgetPromotesTheRepeatsThatCausedIt(t *testing.T) {
+	h := newHarness(t, statusServer())
+	h.loop.maxSteps = 3
+	h.llm.script(
+		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{}`},
+		call{name: "reply", args: `{"spoken":"Partly done."}`},
+	)
+	h.runNext(t, chatEvent("e1", "loop forever", ""))
+
 	sent := h.chat.sent[len(h.chat.sent)-1]
 	for _, want := range []string{
-		"I couldn't find anything to clear.",
 		"⚠️ I didn't finish this cleanly:",
-		"I kept calling status_summary the same way (3 times), so I stopped using it",
+		"I kept calling status_summary the same way",
+		"I ran out of steps after 3 tries",
 	} {
 		if !strings.Contains(sent, want) {
 			t.Fatalf("reply missing %q:\n%s", want, sent)

@@ -82,7 +82,7 @@ func TestPinnedHighestPriorityFirst(t *testing.T) {
 	variable.AddResource(mcpserver.Resource{URI: "memory://user/.files", Name: "files",
 		Pinned: true, PinPriority: 0.5,
 		Read: func(context.Context) (string, error) { return "changes often", nil }})
-	variable.AddResource(mcpserver.Resource{URI: "memory://user/lessons.md", Name: "lessons",
+	variable.AddResource(mcpserver.Resource{URI: "memory://user/.tobee/lessons.md", Name: "lessons",
 		Pinned: true, PinPriority: 0.6,
 		Read: func(context.Context) (string, error) { return "changes rarely", nil }})
 
@@ -93,7 +93,7 @@ func TestPinnedHighestPriorityFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"system://prompt/00-a.md", "memory://user/lessons.md", "memory://user/.files"}
+	want := []string{"system://prompt/00-a.md", "memory://user/.tobee/lessons.md", "memory://user/.files"}
 	if len(got) != len(want) {
 		t.Fatalf("Pinned() = %+v, want %d blocks", got, len(want))
 	}

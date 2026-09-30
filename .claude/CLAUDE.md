@@ -108,6 +108,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 ### Filesystem & memory
 
 - Every read or write under `data/memory/` or a workspace area goes through `sandboxfs.FS`. Never call `os.*` on those paths. `resolve()` is the security boundary (D-003, D-019).
+- tobee's own state is not the model's to edit. Anything code owns goes under `.tobee/` in a scope, or outside `data/memory/` entirely; tool handlers refuse writes and deletes there, and code writes it through the FS directly (D-055). Don't put code-owned state in user space and rely on the model leaving it alone.
+- Warn the user about a problem only when it cost them something: record everything on the turn, mark what the loop recovered from, and let running out of steps promote it (D-055).
 - Never commit `data/`, `.env`, or `.env.prod`.
 
 ### Agent loop
@@ -162,7 +164,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-055**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-056**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

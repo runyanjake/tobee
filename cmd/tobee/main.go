@@ -81,6 +81,7 @@ func main() {
 	}
 	engine.SetIdentities(people)
 	memoryserver.LinkIdentities(memFS, people.People())
+	memoryserver.MigrateReserved(memFS)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

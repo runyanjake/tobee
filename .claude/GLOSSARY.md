@@ -35,12 +35,14 @@
 | **Action line** | A code-written line under the reply for each non-read tool call this turn, e.g. `✅ memory_delete: deleted …` (D-047). |
 | **Approval** | The code-written "Confirm: <tool> <args>" question a destructive call waits on. Only a plain yes runs the call, exactly as proposed (D-047). |
 | **Identity / person** | The human behind one or more connector accounts, linked with `IDENTITY_<NAME>` (D-045). |
-| **Session** | A person's live conversation across connectors. It's injected as history and archived to `memory://user/conversations/` after `SESSION_IDLE_TIMEOUT` (D-046). |
+| **Session** | A person's live conversation across connectors, saved in `data/sessions/` where no tool can reach it. Injected as history and archived to `memory://user/.tobee/conversations/` after `SESSION_IDLE_TIMEOUT` (D-046, D-055). |
 | **`<memory-files>`** | The pinned manifest of the current user's saved memory paths — names only, transcripts counted, capped at 1 KiB. Structural context, like `<servers>` (D-054). |
 | **Mentioner** | `delivery.Mentioner`, a connector that can format a ping for one of its user IDs (`<@id>` on Discord). Used to address a `timer` reply to the person (D-054). |
 | **Core memory** | The one memory file pinned into every system prompt: the current user's `lessons.md`, capped at 1 KiB and read fresh each turn (D-052). Everything else in memory is tool-read. |
 | **Lesson** | One dated imperative line in `lessons.md`, drawn from a failed session by the reflection pass. Guidance, not fact; plain text a human can edit. |
 | **Reflection pass** | `agent.Reflector`: one model call when a session with failures closes, turning its recorded outcomes into at most three lessons. The only model call outside a turn, gated by `AGENT_REFLECT` (D-052). |
+| **Reserved area** | `.tobee/` inside a memory scope: `lessons.md` and `conversations/`, written by code, readable and searchable by the model, refused by every write and delete tool (D-055). |
+| **User space** | Everything in a scope outside `.tobee/` — the files the model creates and edits for the person. |
 | **Memory scope** | `user` (`data/memory/users/<person>/`), `shared` (`data/memory/shared/`), or `both` (search and list only). |
 | **Local zone** | The one wall clock the instance thinks in, from `TZ`. Pinned onto `time.Local` at boot, stamped in `<context>`, and used for every time a person reads (D-049). |
 | **Misfire policy: skip** | One-shot jobs whose time passed while tobee was down are deleted at boot, not run. |

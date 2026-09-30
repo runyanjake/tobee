@@ -20,9 +20,15 @@ const (
 	sharedRoot = "shared"
 	uriPrefix  = "memory://"
 
+	// reservedDir is tobee's own area inside a scope. Code writes it, the
+	// model may read and search it, and no tool may change or delete it: the
+	// conversation record and what it learned are not the model's to edit,
+	// however it is asked (D-055).
+	reservedDir = ".tobee"
+
 	// Lessons are the one memory file put in every system prompt (D-052).
 	// The caps are what make that safe: a bounded block, not a growing one.
-	lessonsPath      = "lessons.md"
+	lessonsPath      = reservedDir + "/lessons.md"
 	lessonsMaxBytes  = 1024
 	lessonsMaxPerRun = 3
 	lessonLineMax    = 200
@@ -32,7 +38,7 @@ const (
 	manifestURI       = uriPrefix + "user/.files"
 	manifestMaxFiles  = 50
 	manifestMaxBytes  = 1024
-	conversationsRoot = "conversations"
+	conversationsRoot = reservedDir + "/conversations"
 )
 
 // lessonsPreamble is framing, like the <servers> and <context> scaffolding:
@@ -256,6 +262,9 @@ func writeHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		if err != nil {
 			return "", err
 		}
+		if err := checkWritable(root, full); err != nil {
+			return "", err
+		}
 		// Creating a second home for something already saved is worse than a
 		// refusal: the user ends up with two shopping lists and no error (D-054).
 		if clash := clashingPath(fs, root, full); clash != "" {
@@ -285,6 +294,9 @@ func appendHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		}
 		full, err := joinScope(root, in.Path)
 		if err != nil {
+			return "", err
+		}
+		if err := checkWritable(root, full); err != nil {
 			return "", err
 		}
 		if err := fs.Append(full, in.Content); err != nil {
@@ -387,6 +399,9 @@ func deleteHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		for _, u := range in.URIs {
 			full, err := resolveURI(ctx, u)
 			if err == nil {
+				err = checkDeletable(full)
+			}
+			if err == nil {
 				err = fs.Delete(full)
 			}
 			if err != nil {
@@ -445,13 +460,14 @@ func LinkIdentities(fs *sandboxfs.FS, people map[string][]string) {
 	}
 }
 
-// ArchiveTranscript writes a closed session under the person's
-// conversations/ folder, where memory_search and resources_read reach it.
+// ArchiveTranscript writes a closed session into the person's reserved area,
+// where memory_search and resources_read still reach it but no tool can change
+// it (D-055).
 func ArchiveTranscript(fs *sandboxfs.FS, person string, started time.Time, markdown string) error {
 	dir := scope.UserScope{Person: person, User: person}.Dir()
-	path := fmt.Sprintf("%s/conversations/%s.md", dir, started.UTC().Format("2006/01/02-1504"))
+	path := fmt.Sprintf("%s/%s/%s.md", dir, conversationsRoot, started.Local().Format("2006/01/02-1504"))
 	for i := 2; fs.Exists(path); i++ {
-		path = fmt.Sprintf("%s/conversations/%s-%d.md", dir, started.UTC().Format("2006/01/02-1504"), i)
+		path = fmt.Sprintf("%s/%s/%s-%d.md", dir, conversationsRoot, started.Local().Format("2006/01/02-1504"), i)
 	}
 	return fs.Write(path, markdown)
 }
@@ -547,10 +563,12 @@ func readManifest(fs *sandboxfs.FS) func(context.Context) (string, error) {
 		for _, f := range all {
 			rel := strings.TrimPrefix(strings.TrimPrefix(f, dir), "/")
 			switch {
-			case rel == "" || rel == lessonsPath || strings.HasPrefix(rel, "."):
-				continue // already pinned in full, or ours
+			case rel == "":
+				continue
 			case strings.HasPrefix(rel, conversationsRoot+"/"):
-				transcripts++
+				transcripts++ // counted, never listed: one per conversation would crowd this out
+			case reservedRel(rel) || strings.HasPrefix(rel, "."):
+				continue // tobee's own area, and lessons are pinned in full already
 			default:
 				files = append(files, rel)
 			}
@@ -562,7 +580,7 @@ func readManifest(fs *sandboxfs.FS) func(context.Context) (string, error) {
 			files = append(files[:manifestMaxFiles], fmt.Sprintf("…and %d more", len(files)-manifestMaxFiles))
 		}
 		if transcripts > 0 {
-			files = append(files, fmt.Sprintf("%s/ (%d saved conversation%s)",
+			files = append(files, fmt.Sprintf("%s/ (%d saved conversation%s, readable but not writable)",
 				conversationsRoot, transcripts, plural(transcripts)))
 		}
 		body := trimToBytes(files, manifestMaxBytes)
@@ -645,4 +663,109 @@ func normalizeStem(p string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// reservedRel reports whether a scope-relative path is inside tobee's own
+// area, which no tool may write to or delete (D-055).
+func reservedRel(rel string) bool {
+	rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
+	return rel == reservedDir || strings.HasPrefix(rel, reservedDir+"/")
+}
+
+// checkWritable refuses writes into the reserved area. The session record and
+// what tobee learned are written by code; a tool must not be able to rewrite
+// them, however the request is phrased.
+func checkWritable(root scopedRoot, full string) error {
+	rel := strings.TrimPrefix(strings.TrimPrefix(full, root.Dir), "/")
+	if reservedRel(rel) {
+		return fmt.Errorf("%s is tobee's own area and is not writable; it holds the conversation record and what was learned",
+			uri(root.Label, reservedDir+"/"))
+	}
+	return nil
+}
+
+// checkDeletable refuses deletes anywhere in a reserved area. It works on the
+// FS-relative path, so it covers every scope at once.
+func checkDeletable(full string) error {
+	if underReserved(full) {
+		return fmt.Errorf("this is in tobee's own area and is not deletable")
+	}
+	return nil
+}
+
+// underReserved reports whether any segment of an FS-relative path is the
+// reserved directory.
+func underReserved(p string) bool {
+	for _, seg := range strings.Split(strings.TrimPrefix(path.Clean("/"+p), "/"), "/") {
+		if seg == reservedDir {
+			return true
+		}
+	}
+	return false
+}
+
+// MigrateReserved moves transcripts and lessons written before D-055 into each
+// user's reserved area. Idempotent, and it only touches paths directly under a
+// person root so a user's own "conversations" folder is left alone.
+func MigrateReserved(fs *sandboxfs.FS) {
+	files, err := fs.List("")
+	if err != nil {
+		slog.Warn("memory: reserved-area migration skipped", "err", err)
+		return
+	}
+	// A person root is "users/<name>" when linked and "users/<connector>/<account>"
+	// when not, and nothing in the path says which. Shallow roots win: if
+	// users/jake holds the old files then users/jake/deep/conversations is the
+	// user's own folder, not a second person.
+	shallow := map[string]bool{}
+	for _, f := range files {
+		if underReserved(f) {
+			continue // already protected; a second pass must be a no-op
+		}
+		if root, _, ok := legacyAt(f, 2); ok {
+			shallow[root] = true
+		}
+	}
+	moved := 0
+	for _, f := range files {
+		if underReserved(f) {
+			continue
+		}
+		root, rest, ok := legacyAt(f, 2)
+		if !ok {
+			if root, rest, ok = legacyAt(f, 3); ok && shallow[path.Dir(root)] {
+				ok = false // the parent is the person root; this is user space
+			}
+		}
+		if !ok {
+			continue
+		}
+		target := root + "/" + reservedDir + "/" + rest
+		if fs.Exists(target) {
+			continue
+		}
+		if err := fs.Rename(f, target); err != nil {
+			slog.Error("memory: could not protect an old file", "path", f, "err", err)
+			continue
+		}
+		moved++
+	}
+	if moved > 0 {
+		slog.Info("memory: moved code-owned files into the reserved area", "files", moved, "dir", reservedDir)
+	}
+}
+
+// legacyAt reports whether p is a pre-D-055 code-owned file sitting directly
+// under a person root of the given depth ("users/<name>" is 2).
+func legacyAt(p string, depth int) (root, rest string, ok bool) {
+	segs := strings.Split(p, "/")
+	if len(segs) <= depth || segs[0] != "users" {
+		return "", "", false
+	}
+	tail := strings.Join(segs[depth:], "/")
+	switch {
+	case tail == "lessons.md", strings.HasPrefix(tail, "conversations/"):
+		return strings.Join(segs[:depth], "/"), tail, true
+	}
+	return "", "", false
 }

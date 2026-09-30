@@ -31,8 +31,8 @@ const (
 	// A repeat is refused by argument set, never by tool: widening a search
 	// after it came back empty is the right next move, so the note asks for it.
 	repeatNote = "\n\n(Same arguments as earlier in this turn, so this was not run again. " +
-		"Use this result, call it with different arguments if you need different information, " +
-		"or call another tool.)"
+		"If this answers the question, reply now. If you need different information, " +
+		"call it with different arguments or call another tool.)"
 	closedNote = "\n\n(Same arguments again. %s is closed for the rest of this turn: " +
 		"call a different tool or reply with what you have.)"
 )
@@ -132,6 +132,7 @@ func (l *Loop) Handle(t *Turn) {
 	// Out of steps: one last call that can only reply.
 	telemetry.Logger(ctx).Warn("agent: step budget spent; forcing a reply", "max_steps", l.maxSteps)
 	t.AddProblem("budget", "", fmt.Sprintf("I ran out of steps after %d tries, so this may be unfinished", l.maxSteps))
+	t.PromoteProblems()
 	conv.AppendHarness(llm.Message{Role: llm.RoleUser, Content: budgetNudge})
 	d, err := decide(ctx, l.model, conv, []llm.ToolSpec{replySpec()})
 	if err == nil {
@@ -256,7 +257,10 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 		}
 		telemetry.Log(ctx, slog.LevelWarn, telemetry.Action, "agent: tool call repeated; not run",
 			"tool", name, "call_id", call.ID, "suppressed", st.suppressed[name], "closed", st.closed[name])
-		t.AddProblem("repeated", name, detail)
+		// Recorded for the session either way, but only shown if the turn ends
+		// badly: a repeat the loop absorbed and then answered correctly is
+		// self-correction, not something to warn about (D-055).
+		t.AddRecovered("repeated", name, detail)
 		t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Name: name, Content: prev + note})
 		return
 	}

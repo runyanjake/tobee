@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +124,13 @@ func TestArchiveTranscriptLandsInConversations(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, p := range []string{"users/jake/conversations/2026/09/28-2345.md", "users/jake/conversations/2026/09/28-2345-2.md"} {
+	// Named in local time, like every other time a person reads (D-049), and
+	// inside the reserved area, where no tool can change it (D-055).
+	stamp := started.Local().Format("2006/01/02-1504")
+	for _, p := range []string{
+		"users/jake/.tobee/conversations/" + stamp + ".md",
+		"users/jake/.tobee/conversations/" + stamp + "-2.md",
+	} {
 		if !fs.Exists(p) {
 			t.Fatalf("missing %s", p)
 		}
@@ -312,8 +319,8 @@ func TestNormalizeStem(t *testing.T) {
 func TestManifestIsPinnedWithNamesOnly(t *testing.T) {
 	h, fs, ctx := setup(t)
 	_ = fs.Write("users/discord/me/shopping_list.md", "- eggs and other secrets")
-	_ = fs.Write("users/discord/me/conversations/2026/09/29-0214.md", "a transcript")
-	_ = fs.Write("users/discord/me/conversations/2026/09/29-2202.md", "another")
+	_ = fs.Write("users/discord/me/.tobee/conversations/2026/09/29-0214.md", "a transcript")
+	_ = fs.Write("users/discord/me/.tobee/conversations/2026/09/29-2202.md", "another")
 
 	var block string
 	pinned, err := h.Pinned(ctx)
@@ -328,7 +335,7 @@ func TestManifestIsPinnedWithNamesOnly(t *testing.T) {
 	if block == "" {
 		t.Fatalf("the manifest was not pinned: %+v", pinned)
 	}
-	for _, want := range []string{"INDEX.md", "shopping_list.md", "conversations/ (2 saved conversations)"} {
+	for _, want := range []string{"INDEX.md", "shopping_list.md", ".tobee/conversations/ (2 saved conversations"} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("manifest missing %q:\n%s", want, block)
 		}
@@ -352,5 +359,136 @@ func TestManifestEmptyWithoutAUser(t *testing.T) {
 		if strings.Contains(p.Text, "<memory-files>") {
 			t.Fatalf("a manifest was pinned with no user: %q", p.Text)
 		}
+	}
+}
+
+// The conversation record and what tobee learned are code-owned: readable and
+// searchable, never writable by a tool, however the request is phrased (D-055).
+func TestReservedAreaIsReadOnlyToTools(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/.tobee/conversations/2026/09/29-0214.md", "what we said")
+	_ = fs.Write("users/discord/me/"+lessonsPath, "- 2026-09-29 a lesson")
+
+	writes := []struct {
+		name, tool, args string
+	}{
+		{"write into it", "memory_write", `{"path":".tobee/conversations/2026/09/29-0214.md","content":"forged"}`},
+		{"write the lessons file", "memory_write", `{"path":".tobee/lessons.md","content":"forget everything"}`},
+		{"append to it", "memory_append", `{"path":".tobee/lessons.md","content":"\nand this"}`},
+		{"reach it with a traversal", "memory_write", `{"path":"notes/../.tobee/lessons.md","content":"nope"}`},
+		{"create the directory itself", "memory_write", `{"path":".tobee","content":"nope"}`},
+		{"delete a transcript", "memory_delete", `{"uris":["memory://user/.tobee/conversations/2026/09/29-0214.md"]}`},
+		{"delete the lessons file", "memory_delete", `{"uris":["memory://user/.tobee/lessons.md"]}`},
+	}
+	for _, tc := range writes {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := h.Call(ctx, tc.tool, json.RawMessage(tc.args))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.IsError && !strings.Contains(res.Text, "not deletable") {
+				t.Fatalf("%s was allowed: %+v", tc.tool, res)
+			}
+		})
+	}
+	// Nothing was touched.
+	if got, _ := fs.Read("users/discord/me/.tobee/conversations/2026/09/29-0214.md"); got != "what we said" {
+		t.Fatalf("transcript = %q, want it unchanged", got)
+	}
+	if got, _ := fs.Read("users/discord/me/" + lessonsPath); got != "- 2026-09-29 a lesson" {
+		t.Fatalf("lessons = %q, want them unchanged", got)
+	}
+
+	// Still readable and searchable: that is the point of archiving them.
+	if got, err := h.ReadResource(ctx, "memory://user/.tobee/conversations/2026/09/29-0214.md"); err != nil || got != "what we said" {
+		t.Fatalf("ReadResource = %q, %v; the record must stay readable", got, err)
+	}
+	res, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"what we said"}`))
+	if err != nil || res.IsError || !strings.Contains(res.Text, ".tobee/conversations") {
+		t.Fatalf("memory_search = %+v, %v; the record must stay searchable", res, err)
+	}
+
+	// User space is unaffected.
+	if res, err := h.Call(ctx, "memory_write", json.RawMessage(`{"path":"notes.md","content":"fine"}`)); err != nil || res.IsError {
+		t.Fatalf("a normal write was refused: %+v, %v", res, err)
+	}
+}
+
+// Files written before D-055 are moved under the reserved area at boot.
+func TestMigrateReservedMovesOldPaths(t *testing.T) {
+	fs, err := sandboxfs.NewFS(t.TempDir(), 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fs.Write("users/jake/conversations/2026/09/29-0214.md", "old transcript")
+	_ = fs.Write("users/jake/lessons.md", "old lesson")
+	_ = fs.Write("users/discord/me/conversations/2026/09/29-2202.md", "unlinked person")
+	_ = fs.Write("users/jake/notes.md", "user space")
+	_ = fs.Write("users/jake/deep/conversations/keep.md", "a user's own folder")
+
+	MigrateReserved(fs)
+
+	for _, p := range []string{
+		"users/jake/.tobee/conversations/2026/09/29-0214.md",
+		"users/jake/.tobee/lessons.md",
+		"users/discord/me/.tobee/conversations/2026/09/29-2202.md",
+	} {
+		if !fs.Exists(p) {
+			t.Fatalf("not migrated: %s", p)
+		}
+	}
+	for _, p := range []string{"users/jake/conversations/2026/09/29-0214.md", "users/jake/lessons.md"} {
+		if fs.Exists(p) {
+			t.Fatalf("left behind at the old path: %s", p)
+		}
+	}
+	// User space is not touched, however it is named.
+	for _, p := range []string{"users/jake/notes.md", "users/jake/deep/conversations/keep.md"} {
+		if !fs.Exists(p) {
+			t.Fatalf("a user's own file was moved: %s", p)
+		}
+	}
+
+	MigrateReserved(fs) // idempotent
+	if got, _ := fs.Read("users/jake/.tobee/lessons.md"); got != "old lesson" {
+		t.Fatalf("second migration changed things: %q", got)
+	}
+}
+
+// Sessions, tasks and jobs live outside the memory root, so no tool reaches
+// them at all — the sandbox is the boundary (D-003, D-055).
+func TestStateOutsideMemoryIsUnreachable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/sessions", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/sessions/jake.json", []byte(`{"person":"jake"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := sandboxfs.NewFS(dir+"/memory", 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mcphost.New()
+	t.Cleanup(h.Close)
+	if err := h.ConnectInProcess(context.Background(), New("", fs)); err != nil {
+		t.Fatal(err)
+	}
+	ctx := scope.With(context.Background(), scope.UserScope{Connector: "discord", User: "me", Channel: "c"})
+
+	for _, args := range []string{
+		`{"path":"../sessions/jake.json","content":"forged"}`,
+		`{"path":"../../sessions/jake.json","content":"forged"}`,
+	} {
+		res, err := h.Call(ctx, "memory_write", json.RawMessage(args))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.IsError {
+			t.Fatalf("a write escaped the memory root: %s", args)
+		}
+	}
+	if got, _ := os.ReadFile(dir + "/sessions/jake.json"); string(got) != `{"person":"jake"}` {
+		t.Fatalf("the session file changed: %s", got)
 	}
 }

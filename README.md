@@ -91,7 +91,7 @@ Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every v
 | `AGENT_MAX_STEPS` | no | `12` | Model calls per turn; then one forced reply. |
 | `TZ` | no | UTC | IANA zone the instance thinks in — reminders, `<context>`, status reports, logs. A container has no zone, so leaving this unset means UTC. |
 | `IDENTITY_<NAME>` | no | — | Links one person's accounts, e.g. `discord:2643…,email:me@example.com`, so sessions and memory follow them across connectors. |
-| `AGENT_REFLECT` | no | `true` | When a conversation with failures ends, draw up to 3 lessons from it into `memory://user/lessons.md`, which is pinned into every prompt. One extra model call per such conversation. |
+| `AGENT_REFLECT` | no | `true` | When a conversation with failures ends, draw up to 3 lessons from it into `memory://user/.tobee/lessons.md`, which is pinned into every prompt. One extra model call per such conversation. |
 | `SESSION_IDLE_TIMEOUT` | no | `10m` | Inactivity before a conversation is saved to memory and a new one starts. |
 | `DISCORD_TOKEN` | one connector | — | Enables the Discord connector. |
 | `DISCORD_CHANNEL_ID` | no | *(all)* | Only handle this guild channel and its threads. DMs are never scoped out. |

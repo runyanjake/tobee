@@ -84,6 +84,15 @@ func (t *Turn) AddProblem(kind, tool, detail string) { t.problem(kind, tool, det
 // AddRecovered records something that went wrong and was then handled.
 func (t *Turn) AddRecovered(kind, tool, detail string) { t.problem(kind, tool, detail, true) }
 
+// PromoteProblems makes every recorded problem visible. Called when the turn
+// runs out of steps: wasted steps that cost the answer are worth explaining,
+// even though each one on its own was recovered (D-055).
+func (t *Turn) PromoteProblems() {
+	for i := range t.Problems {
+		t.Problems[i].Recovered = false
+	}
+}
+
 func (t *Turn) problem(kind, tool, detail string, recovered bool) {
 	for i, p := range t.Problems {
 		if p.Kind == kind && p.Tool == tool {
