@@ -26,7 +26,7 @@ const (
 // Protocol scaffolding, like tool descriptions, lives in code.
 const (
 	invalidNudge = "Your last response could not be read as a tool call. Call exactly one tool."
-	budgetNudge  = "You are out of steps. Reply now with what you have, and say what wasn't done."
+	budgetNudge  = "You cannot make more tool calls on this turn. Reply now with what you have, and say what wasn't done."
 	verbatimNote = "\n\n(Shown to the user as-is with your reply. Don't repeat it.)"
 	// A repeat is refused by argument set, never by tool: widening a search
 	// after it came back empty is the right next move, so the note asks for it.
@@ -37,27 +37,44 @@ const (
 		"call a different tool or reply with what you have.)"
 )
 
-// maxSuppressed is how many refused repeats a tool gets before it is closed.
-// Refusing the exact call is not enough on its own: the context barely
-// changes, so a low-temperature model makes the same choice again (D-051).
-const maxSuppressed = 2
+const (
+	// maxSuppressed is how many refused repeats a tool gets before it is
+	// closed. Refusing the exact call is not enough on its own: the context
+	// barely changes, so a low-temperature model makes the same choice
+	// again (D-051).
+	maxSuppressed = 2
+
+	// maxStaleCalls ends a turn that has stopped learning anything. This
+	// replaces a cap on the number of calls: counting calls punished long
+	// honest work — a coarse search, three reads, two writes is fine — while
+	// still letting a tight loop spend the whole budget. What matters is
+	// whether a call returned something new, not how many there have been
+	// (D-057).
+	maxStaleCalls = 3
+
+	// replyReserve is held back from the turn budget so there is always time
+	// for the closing reply rather than ending on a bare ❌. It is capped at a
+	// quarter of the budget, so a short budget still gets to do some work.
+	replyReserve = 15 * time.Second
+
+	// maxConversationBytes is a backstop, not a budget: without a call cap, a
+	// pathological turn could otherwise grow until the model's context
+	// window overflows.
+	maxConversationBytes = 192 * 1024
+)
 
 // Loop is the tool-calling agent loop (ReAct): each model call picks one
 // tool, until the model calls reply. Planning and replying are tools the
 // model chooses, not fixed phases, so a greeting costs one call (D-043).
 type Loop struct {
-	model    llm.Model
-	tools    *mcphost.Host
-	states   *StateTemplates
-	out      *delivery.Router
-	maxSteps int
+	model  llm.Model
+	tools  *mcphost.Host
+	states *StateTemplates
+	out    *delivery.Router
 }
 
-func NewLoop(model llm.Model, host *mcphost.Host, states *StateTemplates, out *delivery.Router, maxSteps int) *Loop {
-	if maxSteps <= 0 {
-		maxSteps = 12
-	}
-	return &Loop{model: model, tools: host, states: states, out: out, maxSteps: maxSteps}
+func NewLoop(model llm.Model, host *mcphost.Host, states *StateTemplates, out *delivery.Router) *Loop {
+	return &Loop{model: model, tools: host, states: states, out: out}
 }
 
 func (l *Loop) Name() string { return "react" }
@@ -83,7 +100,23 @@ func (l *Loop) Handle(t *Turn) {
 	invalid, failures := 0, 0
 	seen := map[string]string{} // call key → result, cleared when anything changes
 	st := newRepeatState()
-	for step := 1; step <= l.maxSteps; step++ {
+	reserve := replyReserve
+	if dl, ok := ctx.Deadline(); ok {
+		if quarter := time.Until(dl) / 4; quarter < reserve {
+			reserve = quarter
+		}
+	}
+	for step := 1; ; step++ {
+		if stop := l.stalled(ctx, conv, st, reserve); stop.reason != "" {
+			// One line per cause, so each is greppable on its own tag (D-059).
+			telemetry.Log(ctx, slog.LevelWarn, telemetry.Action, "agent: "+stop.event,
+				"steps", t.Steps, "stale", st.stale, "closed", len(st.closed),
+				"distinct_results", len(st.results), "conversation_bytes", conv.Bytes(),
+				"reason", stop.reason)
+			t.AddProblem("stalled", "", stop.reason)
+			t.PromoteProblems()
+			break
+		}
 		t.Steps = step
 		sctx := telemetry.With(ctx, "step", step)
 		d, err := decide(sctx, l.model, conv, l.offer(st.closed))
@@ -129,10 +162,7 @@ func (l *Loop) Handle(t *Turn) {
 		}
 	}
 
-	// Out of steps: one last call that can only reply.
-	telemetry.Logger(ctx).Warn("agent: step budget spent; forcing a reply", "max_steps", l.maxSteps)
-	t.AddProblem("budget", "", fmt.Sprintf("I ran out of steps after %d tries, so this may be unfinished", l.maxSteps))
-	t.PromoteProblems()
+	// Stalled or out of time: one last call that can only reply.
 	conv.AppendHarness(llm.Message{Role: llm.RoleUser, Content: budgetNudge})
 	d, err := decide(ctx, l.model, conv, []llm.ToolSpec{replySpec()})
 	if err == nil {
@@ -168,14 +198,54 @@ func (l *Loop) offer(closed map[string]bool) []llm.ToolSpec {
 	})
 }
 
-// repeatState tracks refused repeats per tool and which tools that has closed.
+// repeatState tracks refused repeats per tool, which tools that has closed,
+// and whether the turn is still learning anything (D-051, D-057).
 type repeatState struct {
 	suppressed map[string]int
 	closed     map[string]bool
+	results    map[string]bool // every distinct result this turn
+	stale      int             // consecutive calls that returned nothing new
 }
 
 func newRepeatState() *repeatState {
-	return &repeatState{suppressed: map[string]int{}, closed: map[string]bool{}}
+	return &repeatState{suppressed: map[string]int{}, closed: map[string]bool{}, results: map[string]bool{}}
+}
+
+// sawResult records a tool result and reports whether it was new. A call whose
+// answer is already in the conversation has not moved the turn forward, even
+// when the call itself was not an exact repeat.
+func (s *repeatState) sawResult(content string) bool {
+	if s.results[content] {
+		s.stale++
+		return false
+	}
+	s.results[content] = true
+	s.stale = 0
+	return true
+}
+
+// stop says why a turn should make no more calls: event names the log line,
+// reason is the sentence the user will read (D-053).
+type stop struct {
+	event  string
+	reason string
+}
+
+// stalled decides whether the turn should stop making calls. Each cause gets
+// its own log event so a loop in production can be found by tag rather than by
+// reading a field (D-057, D-059).
+func (l *Loop) stalled(ctx context.Context, conv *Conversation, st *repeatState, reserve time.Duration) stop {
+	switch {
+	case st.stale >= maxStaleCalls:
+		return stop{"turn stalled", fmt.Sprintf(
+			"I made %d calls in a row that told me nothing new, so I stopped digging", st.stale)}
+	case conv.Bytes() > maxConversationBytes:
+		return stop{"turn too large", "this turn got too large to keep working on, so it may be unfinished"}
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < reserve {
+		return stop{"turn out of time", "I ran out of time before finishing, so this may be unfinished"}
+	}
+	return stop{}
 }
 
 func replySpec() llm.ToolSpec {
@@ -255,8 +325,14 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 			detail = fmt.Sprintf("I kept calling %s the same way (%d times), so I stopped using it",
 				name, st.suppressed[name]+1)
 		}
+		st.stale++ // a cached answer is by definition nothing new
 		telemetry.Log(ctx, slog.LevelWarn, telemetry.Action, "agent: tool call repeated; not run",
-			"tool", name, "call_id", call.ID, "suppressed", st.suppressed[name], "closed", st.closed[name])
+			"tool", name, "call_id", call.ID, "suppressed", st.suppressed[name], "stale", st.stale,
+			telemetry.Content("args", call.Function.Arguments))
+		if st.closed[name] {
+			telemetry.Log(ctx, slog.LevelWarn, telemetry.Action, "agent: tool closed",
+				"tool", name, "suppressed", st.suppressed[name], "for", "the rest of this turn")
+		}
 		// Recorded for the session either way, but only shown if the turn ends
 		// badly: a repeat the loop absorbed and then answered correctly is
 		// self-correction, not something to warn about (D-055).
@@ -270,14 +346,20 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 	start := time.Now()
 	res, err := l.tools.Call(ctx, name, json.RawMessage(call.Function.Arguments))
 	content := res.Text
+	// sig is what the call actually told us, before any note code adds to it:
+	// two tools returning the same data must look the same, or a loop that
+	// alternates between them reads as progress (D-057).
+	sig := res.Text
 	status, level := "ok", slog.LevelInfo
 	switch {
 	case err != nil:
 		content = fmt.Sprintf("error: %v", err)
+		sig = content
 		status, level = "failed", slog.LevelWarn
 		t.AddProblem("tool_error", name, fmt.Sprintf("I tried %s and it failed: %s", name, firstLine(err.Error())))
 	case res.IsError:
 		content = "error: " + res.Text
+		sig = content
 		status, level = "error", slog.LevelWarn
 		t.AddProblem("tool_error", name, fmt.Sprintf("I tried %s and it failed: %s", name, firstLine(res.Text)))
 	case res.Await != nil:
@@ -288,8 +370,9 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 		status = "verbatim"
 		content += verbatimNote
 	}
+	fresh := st.sawResult(sig)
 	telemetry.Log(ctx, level, telemetry.Action, "agent: tool result",
-		"tool", name, "call_id", call.ID, "status", status,
+		"tool", name, "call_id", call.ID, "status", status, "fresh", fresh,
 		"duration_ms", time.Since(start).Milliseconds(), telemetry.Content("content", res.Text))
 	t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Name: name, Content: content})
 

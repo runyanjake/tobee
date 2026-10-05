@@ -120,7 +120,7 @@ func newHarness(t *testing.T, extra ...*mcpserver.Server) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop := NewLoop(fake, host, states, out, 12)
+	loop := NewLoop(fake, host, states, out)
 	q, err := taskqueue.Open(t.TempDir(), 10)
 	if err != nil {
 		t.Fatal(err)
@@ -251,13 +251,17 @@ func TestPlanShownOnlyWhenMultiStepAndEditable(t *testing.T) {
 	}
 }
 
-// Out of steps, the loop forces one reply-only call instead of failing silently.
-func TestBudgetForcesReply(t *testing.T) {
+// A turn that stops learning anything is forced to reply rather than failing
+// silently. There is no call cap: staleness is what ends it (D-057).
+func TestStallForcesReply(t *testing.T) {
 	h := newHarness(t, statusServer())
-	h.loop.maxSteps = 2
+	// Four different calls, each returning the same thing: not repeats, but no
+	// progress either, which is what a call cap could never tell apart.
 	h.llm.script(
 		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{"window":"2h"}`},
+		call{name: "status_summary", args: `{"window":"3h"}`},
+		call{name: "status_summary", args: `{"window":"4h"}`},
 		call{name: "reply", args: `{"spoken":"Partly done."}`},
 	)
 	h.runNext(t, chatEvent("e1", "loop forever", ""))
@@ -330,13 +334,14 @@ func TestTurnLogsTheReasoningChain(t *testing.T) {
 		}
 		chain = append(chain, cat+" "+rec["msg"].(string))
 	}
+	// Each record carries both its category and its scannable tag (D-040, D-058).
 	want := []string{
-		"input agent: input",
-		"thinking agent: reasoning",
-		"thinking agent: plan",
-		"action agent: tool call",
-		"action agent: tool result",
-		"output agent: output",
+		"input [INPUT] agent: input",
+		"thinking [REASONING] agent: reasoning",
+		"thinking [PLAN] agent: plan",
+		"action [TOOL_CALL] agent: tool call",
+		"action [TOOL_RESULT] agent: tool result",
+		"output [OUTPUT] agent: output",
 	}
 	if strings.Join(chain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("chain =\n%s\nwant\n%s", strings.Join(chain, "\n"), strings.Join(want, "\n"))
@@ -346,6 +351,11 @@ func TestTurnLogsTheReasoningChain(t *testing.T) {
 func statusServer() *mcpserver.Server {
 	s := mcpserver.New("status", "")
 	s.Add(mcpserver.Tool{Name: "summary", Verbatim: true, ReadOnly: true, Handler: func(context.Context, json.RawMessage) (string, error) {
+		return "Everything quiet.", nil
+	}})
+	// A second way to ask the same thing, for testing a loop that varies the
+	// tool rather than the arguments.
+	s.Add(mcpserver.Tool{Name: "quiet", ReadOnly: true, Handler: func(context.Context, json.RawMessage) (string, error) {
 		return "Everything quiet.", nil
 	}})
 	return s
@@ -568,14 +578,15 @@ func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 	}
 }
 
-// Out of steps, the repeats that burned them are worth explaining (D-055).
-func TestBudgetPromotesTheRepeatsThatCausedIt(t *testing.T) {
+// Stopping early promotes the repeats that caused it, so the thin answer is
+// explained (D-055, D-057).
+func TestStallPromotesTheRepeatsThatCausedIt(t *testing.T) {
 	h := newHarness(t, statusServer())
-	h.loop.maxSteps = 3
 	h.llm.script(
 		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{}`}, // an exact repeat, refused
+		call{name: "status_summary", args: `{"window":"2h"}`},
+		call{name: "status_summary", args: `{"window":"3h"}`},
 		call{name: "reply", args: `{"spoken":"Partly done."}`},
 	)
 	h.runNext(t, chatEvent("e1", "loop forever", ""))
@@ -583,12 +594,35 @@ func TestBudgetPromotesTheRepeatsThatCausedIt(t *testing.T) {
 	sent := h.chat.sent[len(h.chat.sent)-1]
 	for _, want := range []string{
 		"⚠️ I didn't finish this cleanly:",
-		"I kept calling status_summary the same way",
-		"I ran out of steps after 3 tries",
+		"I called status_summary twice the same way",
+		"told me nothing new, so I stopped digging",
 	} {
 		if !strings.Contains(sent, want) {
 			t.Fatalf("reply missing %q:\n%s", want, sent)
 		}
+	}
+}
+
+// Long honest work is not a loop: many distinct calls each returning something
+// new must not be cut off, which a call cap used to do (D-057).
+func TestManyProductiveCallsAreNotStopped(t *testing.T) {
+	mem, fs := memoryServer(t)
+	for i := 0; i < 20; i++ {
+		_ = fs.Write(fmt.Sprintf("users/jake/note%02d.md", i), fmt.Sprintf("unique body %d", i))
+	}
+	h := newHarness(t, mem)
+	var script []call
+	for i := 0; i < 20; i++ {
+		script = append(script, call{name: "memory_search",
+			args: fmt.Sprintf(`{"query":"unique body %d","scope":"user"}`, i)})
+	}
+	script = append(script, call{name: "reply", args: `{"spoken":"Read all twenty."}`})
+	h.llm.script(script...)
+	h.runNext(t, chatEvent("e1", "read every note", ""))
+
+	sent := h.chat.sent[len(h.chat.sent)-1]
+	if sent != "Read all twenty." {
+		t.Fatalf("sent = %q, want the plain reply with no stall warning", sent)
 	}
 }
 
@@ -715,7 +749,12 @@ func TestTimerTurnIsBriefedToRemind(t *testing.T) {
 	if directive == "" {
 		t.Fatalf("no turn directive:\n%+v", h.llm.requests[0])
 	}
-	for _, want := range []string{"note you left yourself", "Say it to the user now"} {
+	for _, want := range []string{
+		"note you left yourself",
+		"the way a person reminds someone",
+		// It must know it can go and find the context the note left out (D-059).
+		"search memory for the words in the note",
+	} {
 		if !strings.Contains(directive, want) {
 			t.Fatalf("timer directive missing %q:\n%s", want, directive)
 		}
@@ -783,3 +822,61 @@ func TestTimerReplyUnchangedWithoutMentions(t *testing.T) {
 type mentioningChat struct{ chat }
 
 func (c *mentioningChat) Mention(userID string) string { return "<@" + userID + ">" }
+
+// A loop must be findable in the logs by tag, with the counters that explain
+// it, not just a thin warning (D-059).
+func TestStallIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(telemetry.NewHandler(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))))
+	defer slog.SetDefault(prev)
+
+	h := newHarness(t, statusServer())
+	h.llm.script(
+		call{name: "status_summary", args: `{}`},
+		call{name: "status_summary", args: `{}`}, // refused
+		call{name: "status_summary", args: `{}`}, // refused again: the tool closes
+		call{name: "status_quiet", args: `{}`},   // a different call, the same answer
+		call{name: "reply", args: `{"spoken":"Partly done."}`},
+	)
+	task := h.runNext(t, chatEvent("e1", "loop forever", ""))
+
+	var repeated, closed, stalled map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		switch msg, _ := rec["msg"].(string); {
+		case strings.Contains(msg, "[TOOL_CALL_REPEATED]"):
+			repeated = rec
+		case strings.Contains(msg, "[TOOL_CLOSED]"):
+			closed = rec
+		case strings.Contains(msg, "[TURN_STALLED]"):
+			stalled = rec
+		}
+	}
+	if repeated == nil || closed == nil || stalled == nil {
+		var tags []string
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			var rec map[string]any
+			if json.Unmarshal([]byte(line), &rec) == nil {
+				tags = append(tags, rec["msg"].(string))
+			}
+		}
+		t.Fatalf("missing loop records: repeated=%v closed=%v stalled=%v\nsaw:\n%s",
+			repeated != nil, closed != nil, stalled != nil, strings.Join(tags, "\n"))
+	}
+	if repeated["tool"] != "status_summary" || repeated["cat"] != "action" {
+		t.Fatalf("repeat record = %v", repeated)
+	}
+	// The stall line carries the counters that explain why the turn stopped.
+	for _, k := range []string{"steps", "stale", "closed", "distinct_results", "conversation_bytes", "reason"} {
+		if _, ok := stalled[k]; !ok {
+			t.Fatalf("stall record missing %q: %v", k, stalled)
+		}
+	}
+	if stalled["task"] != task.ID || stalled["cat"] != "action" {
+		t.Fatalf("stall record is not part of the turn's chain: %v", stalled)
+	}
+}

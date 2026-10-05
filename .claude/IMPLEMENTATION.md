@@ -21,6 +21,8 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 | 2026-09-29 | (working tree) | A protected `.tobee/` area for the conversation record and lessons, with a boot migration, and recovered repeats no longer warning the user (D-055). Knowing what already exists made context: the pinned `<memory-files>` manifest, a `memory_write` guard against a second home for the same thing, outcomes carried whenever a turn acted, and a ping on fired reminders (D-054). Everything code writes to a person put in the first person and cut to activity: Reporter summaries, the failure block, the `[reminder due: …]` framing and a timer branch in the turn directive (D-053). Two-tier long-term memory replacing D-026: a capped, pinned `lessons.md` written by a reflection pass over closed sessions that failed, gated by `AGENT_REFLECT` (D-052). Failure reporting and the Reflexion record: `Turn.Problems`, the "⚠️ Didn't finish cleanly" block, repeated calls closing their tool, and `session.Outcome` carried into later turns and the transcript (D-051). One wall clock from `TZ`, stamped in `<context>` and used for every user-facing time (D-049). Discord addressing rewritten: DMs, role pings, and joined threads are addressed, each rule logged as `addressed_by`, and `DISCORD_CHANNEL_ID` no longer scopes out DMs or threads of that channel (D-050). |
 
+| 2026-10-05 | (working tree) | Reminders pinned as `<reminders>` and fired through the full loop so the turn retrieves its own context, plus a distinct log event per stall cause (D-059). Coarse-to-fine memory search with format-agnostic blocks and `#L..` range reads (D-056); `AGENT_MAX_STEPS` replaced by stall detection (D-057); `[TAG]` markers on every log line (D-058). |
+
 ## Major Refactors & Migrations
 
 - **How the agent loop's shape changed:**
@@ -87,6 +89,11 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 - **Reflection depends on a session closing.** Lessons are drawn at archive time, so a conversation that stays active never produces any, and a crash before the idle sweep loses them.
 - **Lessons don't transfer between people** (D-052), so a second user re-learns the same thing.
 - **Planning is optional.** The model decides whether to call `plan`; a small model may skip it on multi-step work.
+- **A turn can now use the whole 2m.** With no call cap (D-057), one slow or thorough turn blocks the queue for the full budget, where twelve calls used to end it sooner.
+- **A fired reminder still has to choose to look.** The turn is told to search memory for the note's background, but nothing makes it; a note that drifted at creation is only recoverable if it does (D-059).
+- **Pending reminders are keyed on the connector account**, not the person, so a reminder set on Discord does not appear in the `<reminders>` block on an email turn (D-059).
+- **A `#L..` span is only valid in the turn that found it.** Line numbers move when a file is rewritten; nothing detects a stale span, it just returns the wrong lines.
+- **Coarse search reads whole files** (skipping anything over 1 MiB), so a large memory tree costs more per search than the old streaming scan.
 - **Serial throughput.** One turn at a time, up to 2m each. A full queue (256) rejects new events with an ERROR log, and the sender is not notified.
 - **At-least-once tasks.** A crash mid-turn replays the task on boot, which can repeat a reply or a side effect. A task is dropped after 2 attempts.
 - **Session history is bounded.** 16 KiB of the newest exchanges; a 10-minute gap ends the conversation by design (D-046).
@@ -128,7 +135,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 ### Dead code
 
 - `StateData` is an empty struct: the one `turn` template takes no data, but the render path still threads it through.
-- Two stale comments: `agent.Config` says "step caps live on Executor" (there is no `Executor`; `maxSteps` is on `Loop`), and `scope.UserScope.Key` carries two doc comments, the first describing the pre-D-045 `<connector>/<user>` key.
+- `scope.UserScope.Key` carries two doc comments, the first describing the pre-D-045 `<connector>/<user>` key.
 
 ### Test coverage
 
@@ -149,11 +156,13 @@ Tests cover:
 - `internal/agent`: the timer branch of the turn directive, present for a fired reminder and absent for a plain message
 - `internal/abilities`: summary joins activity only and stays first-person; the report still lists every reporter
 - `internal/servers/memory`: the pinned manifest (names only, transcripts counted, empty without a user), the duplicate-write guard and its stem matching, the reserved area (writes, appends, deletes and traversals refused; reads and search still working), the boot migration and its idempotence, and state outside the memory root being unreachable
+- `internal/servers/schedule`: the pinned block appears on creation, is scoped to the user, is absent with no user, and disappears on cancellation without bookkeeping
+- `internal/agent`: a stall is logged with its counters under its own tag, and the repeat and tool-closed events alongside it
 - `internal/agent` and `internal/connectors/discord`: a timer reply pings the actor, a message reply doesn't, a connector without mentions is unchanged, and the ping uses the user snowflake
 
 No tests cover:
 
-- `sandboxfs` (the security boundary), directly
+- `sandboxfs` path escapes, coarse search blocks across formats, span merging, clamping and slicing
 - the workspace and schedule servers
 - `scheduler` (job replay, misfire)
 - the Discord split, mention rewriting, and the two lookups behind the role and thread rules (both need a live gateway)

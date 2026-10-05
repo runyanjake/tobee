@@ -15,8 +15,29 @@ import (
 	"github.com/runyanjake/tobee/internal/scope"
 )
 
+// The pinned block changes whenever a reminder is set or fires, so it sits
+// below the memory blocks and well below the static prompt (D-017).
+const (
+	pendingURI      = "schedule://pending"
+	pendingPriority = 0.4
+	pendingMax      = 10
+)
+
 func New(instructions string, m *scheduler.JobManager) *mcpserver.Server {
 	srv := mcpserver.New("schedule", instructions)
+
+	// What is outstanding is context, not something to spend a call
+	// discovering. Derived from the job store on every read, so there is no
+	// second copy to keep in step (D-059).
+	srv.AddResource(mcpserver.Resource{
+		URI:         pendingURI,
+		Name:        "pending",
+		Description: "The reminders and jobs this user has waiting.",
+		MIMEType:    "text/markdown",
+		Pinned:      true,
+		PinPriority: pendingPriority,
+		Read:        readPending(m),
+	})
 	srv.Add(mcpserver.Tool{
 		Name: "create",
 		Description: `Schedule a future prompt to yourself. Exactly one of "at" or "cron" must be set.
@@ -171,4 +192,46 @@ func parseAt(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("invalid time %q (expected RFC3339 or \"in <duration>\"): %w", s, err)
 	}
 	return t, nil
+}
+
+// readPending renders the user's outstanding reminders. Never an error: a turn
+// with no user, or a user with nothing scheduled, pins nothing.
+func readPending(m *scheduler.JobManager) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		s, ok := scope.From(ctx)
+		if !ok || !s.HasUser() {
+			return "", nil
+		}
+		jobs := m.ForUser(s.User)
+		if len(jobs) == 0 {
+			return "", nil
+		}
+		var b strings.Builder
+		b.WriteString("<reminders>\nWaiting to fire. When one does, it arrives as a message to you.\n")
+		for i, j := range jobs {
+			if i == pendingMax {
+				fmt.Fprintf(&b, "…and %d more\n", len(jobs)-pendingMax)
+				break
+			}
+			when := j.Cron
+			if when == "" {
+				when = scheduler.FormatWhen(j.At)
+			}
+			name := j.Name
+			if name == "" {
+				name = j.ID
+			}
+			fmt.Fprintf(&b, "- %s (%s): %s\n", name, when, oneLine(j.Prompt))
+		}
+		b.WriteString("</reminders>")
+		return b.String(), nil
+	}
+}
+
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
 }

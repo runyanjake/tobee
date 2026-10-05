@@ -102,14 +102,17 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Wrap errors at package boundaries: `fmt.Errorf("<context>: %w", err)`.
 - Log with `log/slog` using structured fields. Prefix messages with the subsystem: `"agent: …"`, `"discord: …"`, `"jobs: …"`.
 - Log prefixes for the new layers: `"ingest: …"`, `"taskqueue: …"`, `"mcphost: …"`, `"mcpserver: …"`, `"email: …"`.
+- Every line opens with a `[TAG]` the handler derives from the message, so write messages as `"<subsystem>: <short event>"` and the tag follows (D-058). Keep the event to three words or fewer, or the tag gets cut. Don't pass a tag.
+- A way for the loop to stall is a distinct log event with the counters behind it, not a field on a shared line: `turn stalled`, `turn too large`, `turn out of time`, `tool closed` (D-059).
 - Anything in the reasoning chain logs through `telemetry.Log(ctx, level, telemetry.<Category>, …)` with the turn's `ctx`, so it carries `cat`, `task`, `phase`, and `step`. Wrap message and tool text in `telemetry.Content` so it is capped. Plain `slog` calls are fine elsewhere; they are tagged `cat=system` automatically. Don't log the whole conversation per LLM call; `decide` logs only new messages (D-040).
 - Tools live on an MCP server and are exposed as `<server>_<tool>` (`memory_write`). Server names are lowercase `[a-z0-9_-]`. Never use dots: hosted APIs reject them (D-033).
 
 ### Filesystem & memory
 
+- Looking something up is two rungs, not one: `memory_search mode="files"` to find the documents, then `context=N` or a `#L..` range to read the part that matters. Spans are blank-line blocks, so nothing assumes a file format (D-056).
 - Every read or write under `data/memory/` or a workspace area goes through `sandboxfs.FS`. Never call `os.*` on those paths. `resolve()` is the security boundary (D-003, D-019).
 - tobee's own state is not the model's to edit. Anything code owns goes under `.tobee/` in a scope, or outside `data/memory/` entirely; tool handlers refuse writes and deletes there, and code writes it through the FS directly (D-055). Don't put code-owned state in user space and rely on the model leaving it alone.
-- Warn the user about a problem only when it cost them something: record everything on the turn, mark what the loop recovered from, and let running out of steps promote it (D-055).
+- Warn the user about a problem only when it cost them something: record everything on the turn, mark what the loop recovered from, and let a stalled or timed-out turn promote it (D-055, D-057).
 - Never commit `data/`, `.env`, or `.env.prod`.
 
 ### Agent loop
@@ -121,7 +124,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Text code puts in front of a person speaks as tobee, in the first person, about what it did — Reporter summaries, the failure block, action lines. Counts of connected things are operator detail and belong in `status_report`, not in a reply (D-053). Write the sentence where the fact is known, so `Problem.Detail` is already the finished line.
 - When the loop stops making progress, take the option away instead of asking it to stop: an identical repeat closes that tool for the turn by leaving it out of the schema (D-051).
 - New reasoning schemes implement `agent.Strategy` and are selected by `AGENT_STRATEGY` (D-037). The runtime owns scope, budget, delivery, and parking; a strategy only fills `Turn.Reply` or `Turn.Await`.
-- Keep the turn budget and `AGENT_MAX_STEPS`. Don't raise or remove them to make one case work.
+- Keep the turn budget. There is no cap on tool calls: a turn ends when it replies, when three calls in a row return nothing new, or when the clock runs down to the reply reserve (D-057). Bound the resource that actually breaks — time, context size, progress — never the call count.
 - Every model call goes through `llm.Model.Decide`: the model picks exactly one of the offered tools. The loop offers the MCP catalog plus its own `reply` and `plan`. Never call a provider directly, and keep request shape, output mode, and wire quirks inside `internal/llm/<provider>` (D-041).
 - Keep the turn a single loop (D-043). Don't reintroduce fixed phases (a planning call, per-step executors, a synthesis pass); structure the model needs is a tool it can choose, like `plan`.
 - Give every built-in tool honest annotations: `ReadOnly` for reads, `OpenWorld` for anything reaching people or outside systems, `Destructive` for anything that deletes or irreversibly overwrites. Categories are derived from them and only group the menu (D-044); `Destructive` makes the user approve each call (D-047).
@@ -131,10 +134,11 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Connectors, sources & tools
 
+- A deferred action — a fired reminder, a resource notification — runs the full agent loop and retrieves its own context. Don't assemble its message in code or push the payload through the record; give the turn what it needs to find the background (D-059).
 - Every input is an `ingest.Source` emitting `event.Event`s. Register it with the ingest engine in `main.go`; never write to the task queue directly. Give events a stable `ID`: it is the dedup key (D-034).
 - A new external system is a connector under `internal/connectors/<name>/`: a `Source`, a `delivery.Channel` (plus `Editor` / `Reactor` if supported), an MCP server, and a Reporter, all named with one `Name` constant (D-035).
 - The reply to the event's origin, and progress reactions, are delivered in code, not by tools. Tools are for actions the model chooses, including messages elsewhere and `user_ask` (D-035).
-- Readable content is an MCP resource or resource template with a URI that mirrors its folder path, read through `resources_read`. Don't add per-server read tools. Only trusted servers may pin a resource into the system prompt (D-042). From memory, only the capped `lessons.md` is pinned; facts, preferences and transcripts stay tool-read (D-052).
+- Readable content is an MCP resource or resource template with a URI that mirrors its folder path, read through `resources_read`. A `#L<from>-<to>` fragment is parsed in the host and never sent to a server, so range reads work for third-party servers too (D-056). Don't add per-server read tools. Only trusted servers may pin a resource into the system prompt (D-042). From memory, only the capped `lessons.md` is pinned; facts, preferences and transcripts stay tool-read (D-052).
 - Anything that turns a model-supplied path into a file path confines it to its scope root first. `sandboxfs` only confines to its own root.
 - New capabilities are MCP tools, never a side channel. A built-in server uses `internal/mcpserver`, gets a `prompts/servers/<name>.md` instructions file, and is connected with `host.ConnectInProcess`. Every tool needs a real JSON-Schema `InputSchema`; set `ReadOnly` when it doesn't write (D-033).
 - Third-party tools arrive through `MCP_SERVER_<NAME>_*`, not code. Don't relax trust: untrusted servers get no scope, no prompt instructions, no verbatim/await, and no subscriptions (D-038).
@@ -164,7 +168,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-056**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-060**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

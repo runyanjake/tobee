@@ -35,6 +35,19 @@ func (c *Conversation) AppendHarness(m llm.Message) {
 	c.Messages = append(c.Messages, m)
 }
 
+// Bytes is the rough size of the conversation, used as a backstop against a
+// turn growing past the model's context window (D-057).
+func (c *Conversation) Bytes() int {
+	n := 0
+	for _, m := range c.Messages {
+		n += len(m.Content)
+		for _, tc := range m.ToolCalls {
+			n += len(tc.Function.Arguments) + len(tc.Function.Name)
+		}
+	}
+	return n
+}
+
 // TurnMessages is this turn's user, model, and tool messages, without
 // harness directives: what gets saved to the session.
 func (c *Conversation) TurnMessages() []llm.Message {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -138,17 +139,92 @@ func (h *Host) Pinned(ctx context.Context) ([]Pinned, error) {
 }
 
 // ReadResource reads uri from the server that lists it or whose template
-// prefix matches it.
+// prefix matches it. A #L.. fragment selects line ranges and is handled here,
+// never sent on: MCP has no range parameter, so a server — ours or a third
+// party's — needs no knowledge of it (D-056).
 func (h *Host) ReadResource(ctx context.Context, uri string) (string, error) {
-	c := h.owner(uri)
-	if c == nil {
-		return "", fmt.Errorf("no server provides %q", uri)
-	}
-	text, err := h.read(ctx, c, uri)
+	base, ranges, err := cutRanges(uri)
 	if err != nil {
 		return "", err
 	}
+	c := h.owner(base)
+	if c == nil {
+		return "", fmt.Errorf("no server provides %q", base)
+	}
+	text, err := h.read(ctx, c, base)
+	if err != nil {
+		return "", err
+	}
+	if len(ranges) > 0 {
+		text = sliceRanges(base, text, ranges)
+	}
 	return truncate(text), nil
+}
+
+// cutRanges splits "uri#L10-20,L40" into the bare URI and its spans. A
+// fragment that isn't a line range is an error rather than a silent whole-file
+// read, which would quietly blow the result cap.
+func cutRanges(uri string) (string, []LineRange, error) {
+	base, frag, ok := strings.Cut(uri, "#")
+	if !ok || strings.TrimSpace(frag) == "" {
+		return uri, nil, nil
+	}
+	var out []LineRange
+	for _, part := range strings.Split(frag, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.HasPrefix(part, "L") && !strings.HasPrefix(part, "l") {
+			return "", nil, fmt.Errorf("unknown fragment %q: use #L<line> or #L<from>-<to>, comma-separated", frag)
+		}
+		nums := strings.SplitN(part[1:], "-", 2)
+		from, err := strconv.Atoi(strings.TrimSpace(nums[0]))
+		if err != nil || from < 1 {
+			return "", nil, fmt.Errorf("bad line number in %q", part)
+		}
+		to := from
+		if len(nums) == 2 {
+			if to, err = strconv.Atoi(strings.TrimSpace(nums[1])); err != nil || to < from {
+				return "", nil, fmt.Errorf("bad range in %q", part)
+			}
+		}
+		out = append(out, LineRange{From: from, To: to})
+	}
+	return base, out, nil
+}
+
+// LineRange is an inclusive 1-based span of lines.
+type LineRange struct {
+	From int
+	To   int
+}
+
+func (r LineRange) String() string {
+	if r.From == r.To {
+		return fmt.Sprintf("L%d", r.From)
+	}
+	return fmt.Sprintf("L%d-%d", r.From, r.To)
+}
+
+// sliceRanges returns only the requested spans, each under a header saying
+// where it came from so a follow-up range can be derived from it.
+func sliceRanges(base, text string, ranges []LineRange) string {
+	lines := strings.Split(text, "\n")
+	var b strings.Builder
+	for _, r := range ranges {
+		from, to := r.From, r.To
+		if to > len(lines) {
+			to = len(lines)
+		}
+		if from > len(lines) || to < from {
+			fmt.Fprintf(&b, "%s#%s  (file has %d lines)\n", base, r.String(), len(lines))
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "%s#%s\n%s\n", base, LineRange{From: from, To: to}.String(),
+			strings.Join(lines[from-1:to], "\n"))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (h *Host) owner(uri string) *conn {

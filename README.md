@@ -87,8 +87,7 @@ Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every v
 | `AI_TEMPERATURE` | no | `0.1` | Keep low; every call is a structured decision. |
 | `AI_MAX_TOKENS` / `AI_TIMEOUT` | no | `2048` / `10m` | Per-completion token cap and HTTP timeout. |
 | `AGENT_STRATEGY` | no | `react` | Reasoning strategy: the tool-calling agent loop. |
-| `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn. |
-| `AGENT_MAX_STEPS` | no | `12` | Model calls per turn; then one forced reply. |
+| `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn, and the only hard bound on one turn's work — tool calls are not counted. |
 | `TZ` | no | UTC | IANA zone the instance thinks in — reminders, `<context>`, status reports, logs. A container has no zone, so leaving this unset means UTC. |
 | `IDENTITY_<NAME>` | no | — | Links one person's accounts, e.g. `discord:2643…,email:me@example.com`, so sessions and memory follow them across connectors. |
 | `AGENT_REFLECT` | no | `true` | When a conversation with failures ends, draw up to 3 lessons from it into `memory://user/.tobee/lessons.md`, which is pinned into every prompt. One extra model call per such conversation. |

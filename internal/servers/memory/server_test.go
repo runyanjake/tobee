@@ -11,6 +11,7 @@ import (
 	"github.com/runyanjake/tobee/internal/mcphost"
 	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scope"
+	resourcesserver "github.com/runyanjake/tobee/internal/servers/resources"
 )
 
 func setup(t *testing.T) (*mcphost.Host, *sandboxfs.FS, context.Context) {
@@ -26,6 +27,10 @@ func setup(t *testing.T) (*mcphost.Host, *sandboxfs.FS, context.Context) {
 	h := mcphost.New()
 	t.Cleanup(h.Close)
 	if err := h.ConnectInProcess(context.Background(), New("", fs)); err != nil {
+		t.Fatal(err)
+	}
+	// resources_read is the single read path (D-042), so range reads go through it.
+	if err := h.ConnectInProcess(context.Background(), resourcesserver.New("", h)); err != nil {
 		t.Fatal(err)
 	}
 	ctx := scope.With(context.Background(), scope.UserScope{Connector: "discord", User: "me", Channel: "c"})
@@ -490,5 +495,104 @@ func TestStateOutsideMemoryIsUnreachable(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(dir + "/sessions/jake.json"); string(got) != `{"person":"jake"}` {
 		t.Fatalf("the session file changed: %s", got)
+	}
+}
+
+// The coarse pass says which files matter and which spans to read, so the fine
+// pass needs no guessing (D-056).
+func TestSearchCoarseThenRange(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/food.md",
+		"# Food\n\nI like pizza with basil\nand oregano\n\nUnrelated\n\npizza again\n")
+
+	coarse, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","mode":"files","scope":"user"}`))
+	if err != nil || coarse.IsError {
+		t.Fatalf("coarse = %+v, %v", coarse, err)
+	}
+	if !strings.Contains(coarse.Text, "memory://user/food.md  2 matches  #L3-4,L8") {
+		t.Fatalf("coarse row = %q", coarse.Text)
+	}
+	// No file contents in the coarse pass: it is a router, not an answer.
+	if strings.Contains(coarse.Text, "basil") {
+		t.Fatalf("coarse pass leaked contents: %q", coarse.Text)
+	}
+
+	// The span from the coarse row reads back directly.
+	fine, err := h.Call(ctx, "resources_read", json.RawMessage(`{"uri":"memory://user/food.md#L3-4"}`))
+	if err != nil || fine.IsError {
+		t.Fatalf("fine = %+v, %v", fine, err)
+	}
+	for _, want := range []string{"memory://user/food.md#L3-4", "I like pizza with basil", "and oregano"} {
+		if !strings.Contains(fine.Text, want) {
+			t.Fatalf("range read missing %q:\n%s", want, fine.Text)
+		}
+	}
+	if strings.Contains(fine.Text, "Unrelated") {
+		t.Fatalf("range read returned more than the span:\n%s", fine.Text)
+	}
+
+	// Several spans in one call, so a file costs one step however scattered.
+	multi, err := h.Call(ctx, "resources_read", json.RawMessage(`{"uri":"memory://user/food.md#L1,L8"}`))
+	if err != nil || multi.IsError {
+		t.Fatalf("multi = %+v, %v", multi, err)
+	}
+	if !strings.Contains(multi.Text, "# Food") || !strings.Contains(multi.Text, "pizza again") {
+		t.Fatalf("multi-range read = %q", multi.Text)
+	}
+}
+
+// context=N answers in place, which is the rung that saves a whole read.
+func TestSearchWithContextLines(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/food.md", "one\ntwo\npizza\nfour\nfive\n")
+
+	res, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","context":1,"scope":"user"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("res = %+v, %v", res, err)
+	}
+	for _, want := range []string{"memory://user/food.md#L2-4", "  2| two", "  3| pizza", "  4| four"} {
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("context output missing %q:\n%s", want, res.Text)
+		}
+	}
+}
+
+func TestSearchScopedToDir(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/recipes/pizza.md", "pizza here")
+	_ = fs.Write("users/discord/me/other/pizza.md", "pizza there")
+
+	res, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","dir":"recipes","scope":"user"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("res = %+v, %v", res, err)
+	}
+	if strings.Contains(res.Text, "other/") {
+		t.Fatalf("dir was not honoured:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "recipes/pizza.md") {
+		t.Fatalf("dir search found nothing:\n%s", res.Text)
+	}
+	// A dir cannot be used to leave the scope.
+	esc, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","dir":"../other","scope":"user"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !esc.IsError {
+		t.Fatalf("dir escaped the scope: %+v", esc)
+	}
+}
+
+// A fragment that isn't a line range is refused rather than silently returning
+// the whole file, which would blow the result cap.
+func TestBadFragmentIsRefused(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/food.md", "pizza")
+
+	res, err := h.Call(ctx, "resources_read", json.RawMessage(`{"uri":"memory://user/food.md#toppings"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Text, "#L") {
+		t.Fatalf("res = %+v, want a refusal naming the expected form", res)
 	}
 }

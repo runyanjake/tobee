@@ -10,7 +10,11 @@
 | **Area** | See *Workspace area*. |
 | **Artifact** | A `{lang, body}` item in `reply`: content handed over rather than said (code, drafts, snippets). Delivered as a fenced block. |
 | **Await** | `mcpserver.Await{Question, Keys}`, returned by a trusted tool in `_meta["tobee/await"]` to park the task. Set by `user_ask`. |
-| **Budget** | A hard cap on a turn: wall-clock (`AGENT_TURN_BUDGET`, 2m) and model calls (`AGENT_MAX_STEPS`, 12). |
+| **Budget** | The wall-clock cap on a turn (`AGENT_TURN_BUDGET`, 2m), and the only hard one. Tool calls are not counted (D-057). |
+| **Stall** | Three consecutive tool calls returning nothing the turn had not already seen. Ends the turn with one reply-only call (D-057). |
+| **Reply reserve** | Time held back from the turn budget for the closing reply: 15s, capped at a quarter of the budget. |
+| **Block / span** | A run of non-blank lines, the format-agnostic unit coarse search reports and a `#L..` fragment reads (D-056). |
+| **Log tag** | The `[LLM_CALL]`-style marker the telemetry handler derives from each message (D-058). |
 | **Built-in server** | An MCP server compiled into tobee (`memory`, `workspace`, `schedule`, `status`, `user`, `resources`, `system`, plus each connector's server). Connected in-process and always trusted. |
 | **Catalog** | The union of every connected server's tools, as the model sees them: `<server>_<tool>` names. Built by `mcphost.Host` from `tools/list`. |
 | **Channel** | (1) A `delivery.Channel`: a connector's `Send`, plus optional `Editor` and `Reactor`. (2) A connector-specific conversation ID in an `Address` (Discord channel ID, email address). |
@@ -49,7 +53,7 @@
 | **Model (`llm.Model`)** | The agent's only interface to an LLM: `Decide` returns exactly one call to one offered tool (D-041). Implemented by the OpenAI-compatible provider in `internal/llm/openai`. |
 | **Nudge** | The short "could not be read as a tool call" user message appended before the single retry of a phase. The unreadable output itself is dropped. |
 | **Parked task** | A task that asked the user a question and is waiting for the answer in `data/tasks/parked/`. Holds the request, question, and resume keys; expires after 24h (D-036). |
-| **Agent loop** | `agent.Loop`, the `react` strategy: one tool per model call until `reply`, a `user_ask`, or `AGENT_MAX_STEPS` (D-043). |
+| **Agent loop** | `agent.Loop`, the `react` strategy: one tool per model call until `reply`, a `user_ask`, a stall, or the clock (D-043, D-057). |
 | **Category** | A tool's group in the model's menu: `read`, `write`, `external`, or `finish`, derived from MCP annotations (D-044). |
 | **Phase directive / state template** | A user-role message rendered from `prompts/state/<phase>.md` and wrapped in `<phase name="…">`. Only `turn` exists since D-043. |
 | **Plan** | `agent.Plan`: a `Goal` and ordered `steps` of `{title, status}` (`pending` / `active` / `done` / `skipped`). Set by the `plan` tool, exists only for the turn, and only drives the progress message. |
@@ -69,7 +73,8 @@
 | **Resume keys** | Strings that match an answer to a parked task: `reply:<connector>:<channel>:<msgID>` (explicit reply) and `actor:<connector>:<channel>:<userID>` (fallback). |
 | **Runtime** | `agent.Runtime`, the serial worker: dequeue a task, run the strategy, deliver or park (D-005). |
 | **Sandbox** | `sandboxfs.FS`, a filesystem rooted at one directory that rejects absolute, volume-qualified, and `..` paths and enforces a size cap. |
-| **Scheduled fire** | The timer event a job emits when it fires. Content `[reminder due: <name>] <prompt>`, routed to the creating channel and user. A `timer` turn is told to say the reminder, not describe it (D-053). |
+| **`<reminders>`** | The pinned block of the user's waiting jobs, derived from the job store on every read and capped at 10 (D-059). |
+| **Scheduled fire** | The timer event a job emits when it fires. Content `[reminder due: <name>] <prompt>`, routed to the creating channel and user. It runs the full loop: the turn is told to do what the note asks, search memory for background the note left out, and say the reminder rather than describe it (D-053, D-059). |
 | **Scope (`UserScope`)** | The per-turn connector / user / person / user name / channel / thread, attached to `ctx` via `scope.With` and sent to trusted servers in `_meta`. `Dir()` is the person's memory tree. |
 | **Serial worker** | See *Runtime*. |
 | **Server (MCP server)** | A provider of tools (and optionally resources) speaking MCP. Built-in or external. |

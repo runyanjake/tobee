@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -175,6 +176,32 @@ func (m *JobManager) List() []Job {
 	for _, j := range m.jobs {
 		out = append(out, j)
 	}
+	return out
+}
+
+// ForUser is the pending jobs one account created, soonest first. The pinned
+// reminder block is built from this, so the agent always knows what is
+// outstanding without spending a call on it (D-059).
+func (m *JobManager) ForUser(user string) []Job {
+	if user == "" {
+		return nil
+	}
+	var out []Job
+	for _, j := range m.List() {
+		if j.User == user {
+			out = append(out, j)
+		}
+	}
+	sort.Slice(out, func(i, k int) bool {
+		a, b := m.nextFire(out[i]), m.nextFire(out[k])
+		if a.IsZero() != b.IsZero() {
+			return b.IsZero()
+		}
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return out[i].ID < out[k].ID
+	})
 	return out
 }
 

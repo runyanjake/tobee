@@ -258,7 +258,7 @@ func newModel(name string) llm.Model {
 func newStrategy(name string, model llm.Model, host *mcphost.Host, states *agent.StateTemplates, out *delivery.Router) agent.Strategy {
 	switch name {
 	case "react":
-		return agent.NewLoop(model, host, states, out, mustInt("AGENT_MAX_STEPS", 12))
+		return agent.NewLoop(model, host, states, out)
 	default:
 		fatal("AGENT_STRATEGY: unknown strategy", fmt.Errorf("%q (known: react)", name))
 		return nil

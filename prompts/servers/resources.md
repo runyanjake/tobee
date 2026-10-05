@@ -1,1 +1,3 @@
-Read any file or resource with resources_read and its URI: memory://user/<path>, memory://shared/<path>, or workspace://<area>/<path>. List and search tools return these URIs. resources_list shows what else servers offer.
+The one way to read anything: memory files, workspace files, anything a connected server exposes.
+
+Read part of a file rather than all of it when you know where to look — add #L34-55, or #L34-55,L80-100 for several spans at once. memory_search with mode="files" hands you those spans.

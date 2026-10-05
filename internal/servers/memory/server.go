@@ -132,14 +132,21 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 	})
 
 	srv.Add(mcpserver.Tool{
-		Name:        "search",
-		Description: `Case-insensitive substring search. Returns "<uri>:<line>  <snippet>" rows; read a hit with resources_read. Default scope is "both" (user + shared).`,
+		Name: "search",
+		Description: `Case-insensitive substring search, coarse or fine.
+
+mode="files" is the coarse pass: one row per matching file with its match count and the line ranges worth reading, e.g. "memory://user/pizza.md  3 matches  #L12-18,L40-52". Start here when you don't know where something is.
+mode="hits" (default) returns "<uri>:<line>  <snippet>" rows. Add context=N to get the surrounding lines, which often answers the question without a read.
+Narrow with dir once you know where to look. Read a range with resources_read and the #L.. fragment from a coarse row.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"query": {"type": "string", "description": "Search term"},
-				"limit": {"type": "integer", "description": "Max hits to return (default 20)"},
-				"scope": {"type": "string", "enum": ["user", "shared", "both"], "description": "Default \"both\"."}
+				"query":   {"type": "string", "description": "Search term"},
+				"mode":    {"type": "string", "enum": ["files", "hits"], "description": "\"files\" for the coarse pass, \"hits\" (default) for matching lines."},
+				"dir":     {"type": "string", "description": "Only search under this path within the scope."},
+				"context": {"type": "integer", "description": "Lines of context around each hit, 0-10. Only with mode=\"hits\"."},
+				"limit":   {"type": "integer", "description": "Max rows to return (default 20)"},
+				"scope":   {"type": "string", "enum": ["user", "shared", "both"], "description": "Default \"both\"."}
 			},
 			"required": ["query"]
 		}`),
@@ -306,12 +313,17 @@ func appendHandler(fs *sandboxfs.FS) mcpserver.Handler {
 	}
 }
 
+const maxSearchContext = 10
+
 func searchHandler(fs *sandboxfs.FS) mcpserver.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
-			Query string `json:"query"`
-			Limit int    `json:"limit"`
-			Scope string `json:"scope"`
+			Query   string `json:"query"`
+			Mode    string `json:"mode"`
+			Dir     string `json:"dir"`
+			Context int    `json:"context"`
+			Limit   int    `json:"limit"`
+			Scope   string `json:"scope"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return "", fmt.Errorf("invalid args: %w", err)
@@ -324,24 +336,27 @@ func searchHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		if limit <= 0 {
 			limit = 20
 		}
+		if in.Context > maxSearchContext {
+			in.Context = maxSearchContext
+		}
+
 		var sb strings.Builder
 		remaining := limit
 		for _, r := range roots {
 			if remaining <= 0 {
 				break
 			}
-			hits, err := fs.SearchUnder(in.Query, remaining, r.Dir)
-			if err != nil {
-				continue // missing dirs are fine; the FS swallows ENOENT
-			}
-			for _, h := range hits {
-				rel := strings.TrimPrefix(h.Path, r.Dir+"/")
-				fmt.Fprintf(&sb, "%s:%d  %s\n", uri(r.Label, rel), h.Line, h.Snippet)
-				remaining--
-				if remaining <= 0 {
-					break
+			dir := r.Dir
+			if p := strings.TrimSpace(in.Dir); p != "" {
+				if dir, err = joinScope(r, p); err != nil {
+					return "", err
 				}
 			}
+			n, err := searchRoot(fs, &sb, in.Query, in.Mode, r, dir, in.Context, remaining)
+			if err != nil {
+				return "", err
+			}
+			remaining -= n
 		}
 		out := strings.TrimRight(sb.String(), "\n")
 		if out == "" {
@@ -349,6 +364,56 @@ func searchHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		}
 		return out, nil
 	}
+}
+
+// searchRoot writes one scope's rows and returns how many it used.
+func searchRoot(fs *sandboxfs.FS, sb *strings.Builder, query, mode string, r scopedRoot, dir string, around, limit int) (int, error) {
+	rel := func(p string) string { return strings.TrimPrefix(strings.TrimPrefix(p, r.Dir), "/") }
+
+	if mode == "files" {
+		files, err := fs.SearchFiles(query, dir, limit)
+		if err != nil {
+			return 0, nil // a missing dir is not an error; there is simply nothing there
+		}
+		for _, f := range files {
+			spans := make([]string, 0, len(f.Blocks))
+			for _, b := range f.Blocks {
+				spans = append(spans, b.String())
+			}
+			fmt.Fprintf(sb, "%s  %d match%s  #%s\n",
+				uri(r.Label, rel(f.Path)), f.Count, matchPlural(f.Count), strings.Join(spans, ","))
+		}
+		return len(files), nil
+	}
+
+	hits, err := fs.SearchUnder(query, limit, dir)
+	if err != nil {
+		return 0, nil
+	}
+	for _, h := range hits {
+		u := uri(r.Label, rel(h.Path))
+		if around <= 0 {
+			fmt.Fprintf(sb, "%s:%d  %s\n", u, h.Line, h.Snippet)
+			continue
+		}
+		lines, span, err := fs.ContextAround(h.Path, h.Line, around)
+		if err != nil || len(lines) == 0 {
+			fmt.Fprintf(sb, "%s:%d  %s\n", u, h.Line, h.Snippet)
+			continue
+		}
+		fmt.Fprintf(sb, "%s#%s\n", u, span.String())
+		for i, l := range lines {
+			fmt.Fprintf(sb, "  %d| %s\n", span.From+i, l)
+		}
+	}
+	return len(hits), nil
+}
+
+func matchPlural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "es"
 }
 
 func listHandler(fs *sandboxfs.FS) mcpserver.Handler {
