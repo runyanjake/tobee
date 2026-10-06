@@ -27,14 +27,15 @@ const (
 const (
 	invalidNudge = "Your last response could not be read as a tool call. Call exactly one tool."
 	budgetNudge  = "You cannot make more tool calls on this turn. Reply now with what you have, and say what wasn't done."
-	verbatimNote = "\n\n(Shown to the user as-is with your reply. Don't repeat it.)"
+	verbatimNote = "That output is already shown to the user with your reply. Don't repeat it, " +
+		"and don't ask for it again — answer what was actually asked."
 	// A repeat is refused by argument set, never by tool: widening a search
 	// after it came back empty is the right next move, so the note asks for it.
-	repeatNote = "\n\n(Same arguments as earlier in this turn, so this was not run again. " +
+	repeatNote = "Same arguments as earlier in this turn, so that was not run again. " +
 		"If this answers the question, reply now. If you need different information, " +
-		"call it with different arguments or call another tool.)"
-	closedNote = "\n\n(Same arguments again. %s is closed for the rest of this turn: " +
-		"call a different tool or reply with what you have.)"
+		"call it with different arguments or call another tool."
+	closedNote = "Same arguments again. %s is closed for the rest of this turn: " +
+		"call a different tool or reply with what you have."
 )
 
 const (
@@ -337,7 +338,8 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 		// badly: a repeat the loop absorbed and then answered correctly is
 		// self-correction, not something to warn about (D-055).
 		t.AddRecovered("repeated", name, detail)
-		t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Name: name, Content: prev + note})
+		t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Name: name, Content: prev})
+		t.Conversation.AppendHarness(llm.Message{Role: llm.RoleUser, Content: note})
 		return
 	}
 
@@ -345,7 +347,8 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 		"tool", name, "call_id", call.ID, telemetry.Content("args", call.Function.Arguments))
 	start := time.Now()
 	res, err := l.tools.Call(ctx, name, json.RawMessage(call.Function.Arguments))
-	content := res.Text
+	content, note := res.Text, ""
+	var rendered []string // verbatim tools closed because the answer is now rendered
 	// sig is what the call actually told us, before any note code adds to it:
 	// two tools returning the same data must look the same, or a loop that
 	// alternates between them reads as progress (D-057).
@@ -368,13 +371,30 @@ func (l *Loop) use(ctx context.Context, t *Turn, call llm.ToolCall, seen map[str
 	case res.Verbatim:
 		t.AddVerbatim(name, res.Text)
 		status = "verbatim"
-		content += verbatimNote
+		note = verbatimNote
+		// The answer is rendered. Calling another verbatim tool only stacks a
+		// second report on top of it, which is how a shopping-list request came
+		// back as a status dump (D-060).
+		rendered = l.tools.VerbatimTools()
+		for _, v := range rendered {
+			st.closed[v] = true
+		}
 	}
 	fresh := st.sawResult(sig)
 	telemetry.Log(ctx, level, telemetry.Action, "agent: tool result",
 		"tool", name, "call_id", call.ID, "status", status, "fresh", fresh,
 		"duration_ms", time.Since(start).Milliseconds(), telemetry.Content("content", res.Text))
+	if len(rendered) > 0 {
+		telemetry.Log(ctx, slog.LevelInfo, telemetry.Action, "agent: tool closed",
+			"tool", name, "reason", "it rendered the answer", "tools", rendered)
+	}
+	// The result is what happened and is saved to the session; a note is harness
+	// text for this turn only, so it rides in its own message and never ends up
+	// in a transcript (D-029, D-060).
 	t.Conversation.Append(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Name: name, Content: content})
+	if note != "" {
+		t.Conversation.AppendHarness(llm.Message{Role: llm.RoleUser, Content: note})
+	}
 
 	cat := l.tools.Category(name)
 	if cat == llm.CategoryRead {

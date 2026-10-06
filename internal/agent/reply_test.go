@@ -144,8 +144,8 @@ func TestRenderReplyAppendsWhatWentWrong(t *testing.T) {
 // without this the user hears nothing about it.
 func TestRenderReplyReportsReadFailures(t *testing.T) {
 	got := renderReply(replyArgs{Spoken: "Here's what I have."}, nil, nil,
-		[]Problem{{Kind: "tool_error", Tool: "memory_search", Detail: `I tried memory_search and it failed: scope "user" needs a user`}})
-	if !strings.Contains(got, `• I tried memory_search and it failed: scope "user" needs a user`) {
+		[]Problem{{Kind: "tool_error", Tool: "memory_grep", Detail: `I tried memory_grep and it failed: scope "user" needs a user`}})
+	if !strings.Contains(got, `• I tried memory_grep and it failed: scope "user" needs a user`) {
 		t.Fatalf("renderReply() missing the read failure:\n%s", got)
 	}
 }

@@ -52,7 +52,7 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 		URITemplate: uriPrefix + "{scope}/{+path}",
 		Name:        "memory",
 		Description: `Memory files. scope is "user" (the current user's tree) or "shared". ` +
-			`memory_list and memory_search return these URIs.`,
+			`memory_list and memory_grep return these URIs.`,
 		MIMEType: "text/markdown",
 		Read:     readResource(fs),
 	})
@@ -132,35 +132,45 @@ func New(instructions string, fs *sandboxfs.FS) *mcpserver.Server {
 	})
 
 	srv.Add(mcpserver.Tool{
-		Name: "search",
-		Description: `Case-insensitive substring search, coarse or fine.
+		Name: "grep",
+		Description: `Search memory with grep. The pattern is literal text unless you set regexp.
 
-mode="files" is the coarse pass: one row per matching file with its match count and the line ranges worth reading, e.g. "memory://user/pizza.md  3 matches  #L12-18,L40-52". Start here when you don't know where something is.
-mode="hits" (default) returns "<uri>:<line>  <snippet>" rows. Add context=N to get the surrounding lines, which often answers the question without a read.
-Narrow with dir once you know where to look. Read a range with resources_read and the #L.. fragment from a coarse row.`,
+Files whose *name* matches are listed first, then matching lines as "<uri>:<line>  <text>".
+loose=true lets a phrase match any spelling of it: "shopping list" also finds shopping_list.
+count=true gives one row per file with its number of matches — use it to find where something lives.
+context=N shows the lines either side, which often answers the question without a read.
+dir narrows to a subtree. Saved conversations are left out unless history=true: they record what was said, not where facts live.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"query":   {"type": "string", "description": "Search term"},
-				"mode":    {"type": "string", "enum": ["files", "hits"], "description": "\"files\" for the coarse pass, \"hits\" (default) for matching lines."},
+				"pattern": {"type": "string", "description": "What to look for. Literal text unless regexp is true."},
+				"loose":   {"type": "boolean", "description": "Let spaces, hyphens and underscores stand for each other."},
+				"regexp":  {"type": "boolean", "description": "Treat the pattern as an extended regular expression."},
+				"word":    {"type": "boolean", "description": "Whole words only."},
+				"case":    {"type": "boolean", "description": "Case-sensitive. Insensitive by default."},
+				"count":   {"type": "boolean", "description": "One row per file with its match count, instead of lines."},
+				"context": {"type": "integer", "description": "Lines either side of each match, 0-10."},
 				"dir":     {"type": "string", "description": "Only search under this path within the scope."},
-				"context": {"type": "integer", "description": "Lines of context around each hit, 0-10. Only with mode=\"hits\"."},
-				"limit":   {"type": "integer", "description": "Max rows to return (default 20)"},
+				"history": {"type": "boolean", "description": "Also search saved conversations. Off by default."},
+				"limit":   {"type": "integer", "description": "Max rows (default 20)."},
 				"scope":   {"type": "string", "enum": ["user", "shared", "both"], "description": "Default \"both\"."}
 			},
-			"required": ["query"]
+			"required": ["pattern"]
 		}`),
 		ReadOnly: true,
-		Handler:  searchHandler(fs),
+		Handler:  grepHandler(fs),
 	})
 
 	srv.Add(mcpserver.Tool{
-		Name:        "list",
-		Description: `List memory files as memory:// URIs; read one with resources_read. Default scope is "both" (user + shared).`,
+		Name: "list",
+		Description: `List memory files as memory:// URIs; read one with resources_read. Default scope is "both" (user + shared).
+
+Pass name to list only files whose name matches, ignoring case, spaces, hyphens and underscores: name="Shopping List" finds shopping_list.md.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"dir":   {"type": "string", "description": "Optional subdirectory relative to the scope root"},
+				"name":  {"type": "string", "description": "Only files whose name matches this phrase. Case, spaces and separators are ignored."},
 				"scope": {"type": "string", "enum": ["user", "shared", "both"], "description": "Default \"both\"."}
 			}
 		}`),
@@ -313,15 +323,23 @@ func appendHandler(fs *sandboxfs.FS) mcpserver.Handler {
 	}
 }
 
-const maxSearchContext = 10
+const maxGrepContext = 10
 
-func searchHandler(fs *sandboxfs.FS) mcpserver.Handler {
+// grepHandler is a thin front for sandboxfs.Grep: it turns typed fields into
+// grep options, applies the one access rule grep doesn't know about (the
+// conversation archive is opt-in), and renders the rows (D-061).
+func grepHandler(fs *sandboxfs.FS) mcpserver.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
-			Query   string `json:"query"`
-			Mode    string `json:"mode"`
-			Dir     string `json:"dir"`
+			Pattern string `json:"pattern"`
+			Loose   bool   `json:"loose"`
+			Regexp  bool   `json:"regexp"`
+			Word    bool   `json:"word"`
+			Case    bool   `json:"case"`
+			Count   bool   `json:"count"`
 			Context int    `json:"context"`
+			Dir     string `json:"dir"`
+			History bool   `json:"history"`
 			Limit   int    `json:"limit"`
 			Scope   string `json:"scope"`
 		}
@@ -336,11 +354,11 @@ func searchHandler(fs *sandboxfs.FS) mcpserver.Handler {
 		if limit <= 0 {
 			limit = 20
 		}
-		if in.Context > maxSearchContext {
-			in.Context = maxSearchContext
+		if in.Context > maxGrepContext {
+			in.Context = maxGrepContext
 		}
 
-		var sb strings.Builder
+		var names, body strings.Builder
 		remaining := limit
 		for _, r := range roots {
 			if remaining <= 0 {
@@ -352,61 +370,91 @@ func searchHandler(fs *sandboxfs.FS) mcpserver.Handler {
 					return "", err
 				}
 			}
-			n, err := searchRoot(fs, &sb, in.Query, in.Mode, r, dir, in.Context, remaining)
+			// A file named after the thing asked for is usually the answer, and
+			// grep reads contents only (D-060).
+			matched, _ := fs.MatchNames(in.Pattern, dir, remaining)
+			for _, f := range matched {
+				rel := scopeRel(r, f)
+				if !in.History && reservedRel(rel) {
+					continue
+				}
+				fmt.Fprintf(&names, "%s\n", uri(r.Label, rel))
+				remaining--
+			}
+
+			hits, err := fs.Grep(ctx, sandboxfs.GrepOptions{
+				Pattern: in.Pattern, Dir: dir, Regexp: in.Regexp, Loose: in.Loose,
+				Word: in.Word, Case: in.Case, Context: in.Context, Count: in.Count,
+				Limit: remaining,
+			})
 			if err != nil {
 				return "", err
 			}
-			remaining -= n
+			remaining -= renderGrep(&body, r, hits, in.Context > 0, in.History, remaining)
 		}
-		out := strings.TrimRight(sb.String(), "\n")
-		if out == "" {
+
+		var out strings.Builder
+		if names.Len() > 0 {
+			out.WriteString("files whose name matches:\n")
+			out.WriteString(names.String())
+			if body.Len() > 0 {
+				out.WriteString("\n")
+			}
+		}
+		out.WriteString(body.String())
+		if out.Len() == 0 {
 			return "no matches", nil
 		}
-		return out, nil
+		return strings.TrimRight(out.String(), "\n"), nil
 	}
 }
 
-// searchRoot writes one scope's rows and returns how many it used.
-func searchRoot(fs *sandboxfs.FS, sb *strings.Builder, query, mode string, r scopedRoot, dir string, around, limit int) (int, error) {
-	rel := func(p string) string { return strings.TrimPrefix(strings.TrimPrefix(p, r.Dir), "/") }
-
-	if mode == "files" {
-		files, err := fs.SearchFiles(query, dir, limit)
-		if err != nil {
-			return 0, nil // a missing dir is not an error; there is simply nothing there
-		}
-		for _, f := range files {
-			spans := make([]string, 0, len(f.Blocks))
-			for _, b := range f.Blocks {
-				spans = append(spans, b.String())
-			}
-			fmt.Fprintf(sb, "%s  %d match%s  #%s\n",
-				uri(r.Label, rel(f.Path)), f.Count, matchPlural(f.Count), strings.Join(spans, ","))
-		}
-		return len(files), nil
-	}
-
-	hits, err := fs.SearchUnder(query, limit, dir)
-	if err != nil {
-		return 0, nil
-	}
+// renderGrep writes the rows and returns how many of the limit they used. The
+// archive goes last so it can never crowd out a real file (D-060).
+func renderGrep(sb *strings.Builder, r scopedRoot, hits []sandboxfs.GrepHit, grouped, history bool, limit int) int {
+	var own, archive []sandboxfs.GrepHit
 	for _, h := range hits {
-		u := uri(r.Label, rel(h.Path))
-		if around <= 0 {
-			fmt.Fprintf(sb, "%s:%d  %s\n", u, h.Line, h.Snippet)
+		if reservedRel(scopeRel(r, h.Path)) {
+			if history {
+				archive = append(archive, h)
+			}
 			continue
 		}
-		lines, span, err := fs.ContextAround(h.Path, h.Line, around)
-		if err != nil || len(lines) == 0 {
-			fmt.Fprintf(sb, "%s:%d  %s\n", u, h.Line, h.Snippet)
-			continue
+		own = append(own, h)
+	}
+
+	used, lastPath := 0, ""
+	for _, h := range append(own, archive...) {
+		if used >= limit {
+			break
 		}
-		fmt.Fprintf(sb, "%s#%s\n", u, span.String())
-		for i, l := range lines {
-			fmt.Fprintf(sb, "  %d| %s\n", span.From+i, l)
+		u := uri(r.Label, scopeRel(r, h.Path))
+		switch {
+		case h.Count > 0:
+			fmt.Fprintf(sb, "%s  %d match%s\n", u, h.Count, matchPlural(h.Count))
+		case grouped:
+			if u != lastPath {
+				fmt.Fprintf(sb, "%s\n", u)
+				lastPath = u
+			}
+			mark := ">"
+			if h.Context {
+				mark = " "
+			}
+			fmt.Fprintf(sb, "  %d%s %s\n", h.Line, mark, h.Text)
+		default:
+			fmt.Fprintf(sb, "%s:%d  %s\n", u, h.Line, strings.TrimSpace(h.Text))
+		}
+		if !h.Context {
+			used++ // context lines come free with the match they belong to
 		}
 	}
-	return len(hits), nil
+	return used
+}
+
+// scopeRel turns an FS-relative path into one relative to the scope root.
+func scopeRel(r scopedRoot, p string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(p, r.Dir), "/")
 }
 
 func matchPlural(n int) string {
@@ -420,6 +468,7 @@ func listHandler(fs *sandboxfs.FS) mcpserver.Handler {
 	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
 			Dir   string `json:"dir"`
+			Name  string `json:"name"`
 			Scope string `json:"scope"`
 		}
 		_ = json.Unmarshal(args, &in)
@@ -437,9 +486,15 @@ func listHandler(fs *sandboxfs.FS) mcpserver.Handler {
 			if err != nil {
 				continue
 			}
+			if phrase := strings.TrimSpace(in.Name); phrase != "" {
+				// Name matching ignores case, spaces and separators, so natural
+				// language finds the file: "Shopping List" → shopping_list.md (D-061).
+				if files, err = fs.MatchNames(phrase, start, 0); err != nil {
+					return "", err
+				}
+			}
 			for _, f := range files {
-				rel := strings.TrimPrefix(f, r.Dir+"/")
-				fmt.Fprintf(&sb, "%s\n", uri(r.Label, rel))
+				fmt.Fprintf(&sb, "%s\n", uri(r.Label, scopeRel(r, f)))
 			}
 		}
 		out := strings.TrimRight(sb.String(), "\n")
@@ -526,7 +581,7 @@ func LinkIdentities(fs *sandboxfs.FS, people map[string][]string) {
 }
 
 // ArchiveTranscript writes a closed session into the person's reserved area,
-// where memory_search and resources_read still reach it but no tool can change
+// where memory_grep and resources_read still reach it but no tool can change
 // it (D-055).
 func ArchiveTranscript(fs *sandboxfs.FS, person string, started time.Time, markdown string) error {
 	dir := scope.UserScope{Person: person, User: person}.Dir()

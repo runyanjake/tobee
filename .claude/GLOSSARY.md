@@ -73,6 +73,9 @@
 | **Resume keys** | Strings that match an answer to a parked task: `reply:<connector>:<channel>:<msgID>` (explicit reply) and `actor:<connector>:<channel>:<userID>` (fallback). |
 | **Runtime** | `agent.Runtime`, the serial worker: dequeue a task, run the strategy, deliver or park (D-005). |
 | **Sandbox** | `sandboxfs.FS`, a filesystem rooted at one directory that rejects absolute, volume-qualified, and `..` paths and enforces a size cap. |
+| **Sandboxed grep** | `sandboxfs.Grep`: the real `grep` binary run with `cmd.Dir` at the resolved scope root and `.` as its only path operand, from an argv built out of typed options. Backs `memory_grep` and `workspace_grep` (D-061). |
+| **Loose pattern** | A phrase where spaces, hyphens and underscores stand for each other, so `shopping list` matches `shopping_list`. `loose=true` on a grep tool. |
+| **Name match** | A file found by its filename rather than its contents, comparing with case, extension and separators ignored: `name="Shopping List"` finds `shopping_list.md` (`MatchNames`). |
 | **`<reminders>`** | The pinned block of the user's waiting jobs, derived from the job store on every read and capped at 10 (D-059). |
 | **Scheduled fire** | The timer event a job emits when it fires. Content `[reminder due: <name>] <prompt>`, routed to the creating channel and user. It runs the full loop: the turn is told to do what the note asks, search memory for background the note left out, and say the reminder rather than describe it (D-053, D-059). |
 | **Scope (`UserScope`)** | The per-turn connector / user / person / user name / channel / thread, attached to `ctx` via `scope.With` and sent to trusted servers in `_meta`. `Dir()` is the person's memory tree. |

@@ -31,7 +31,7 @@ func New(instructions string, host *mcphost.Host) *mcpserver.Server {
 		Name: "read",
 		Description: `Read a resource by URI, such as memory://user/INDEX.md or workspace://notes/todo.md.
 
-Add a #L.. fragment to read only part of it: "#L34-55" for one span, "#L34-55,L80-100" for several in one call. memory_search with mode="files" gives you these spans. Prefer a range over a whole file once you know where to look.`,
+Add a #L.. fragment to read only part of it: "#L34-55" for one span, "#L34-55,L80-100" for several in one call. memory_grep prints the line number of every match, which is where those spans come from. Prefer a range over a whole file once you know where to look.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {

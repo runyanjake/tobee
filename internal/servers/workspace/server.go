@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/runyanjake/tobee/internal/mcpserver"
+	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/workspace"
 )
 
@@ -20,7 +21,7 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 		Name: "areas",
 		Description: `List the workspace areas tobee has access to. Each entry has a name, ` +
 			`optional description, and a readonly flag. Use the name as the "area" argument to ` +
-			`workspace_list, workspace_write, and workspace_search.`,
+			`workspace_list, workspace_write, and workspace_grep.`,
 		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
 		ReadOnly:    true,
 		Handler:     areasHandler(areas),
@@ -44,7 +45,7 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 	srv.AddResourceTemplate(mcpserver.ResourceTemplate{
 		URITemplate: uriPrefix + "{area}/{+path}",
 		Name:        "workspace",
-		Description: "Files in a workspace area. workspace_list and workspace_search return these URIs.",
+		Description: "Files in a workspace area. workspace_list and workspace_grep return these URIs.",
 		Read:        readResource(areas),
 	})
 
@@ -64,20 +65,28 @@ func New(instructions string, areas *workspace.Areas) *mcpserver.Server {
 	})
 
 	srv.Add(mcpserver.Tool{
-		Name: "search",
-		Description: `Case-insensitive substring search across one or all workspace areas. ` +
-			`Returns "<uri>:<line>  <snippet>" rows; read a hit with resources_read. Default area is "all".`,
+		Name: "grep",
+		Description: `Search workspace files with grep. The pattern is literal text unless you set regexp.
+
+Returns "<uri>:<line>  <text>" rows; read one with resources_read, optionally with a #L.. range.
+loose=true lets a phrase match any spelling of it. count=true gives per-file match counts. context=N shows surrounding lines.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"query": {"type": "string", "description": "Search term."},
-				"area":  {"type": "string", "description": "Configured area name, or \"all\" (default) to walk every area."},
-				"limit": {"type": "integer", "description": "Max hits to return (default 20)."}
+				"pattern": {"type": "string", "description": "What to look for. Literal text unless regexp is true."},
+				"loose":   {"type": "boolean", "description": "Let spaces, hyphens and underscores stand for each other."},
+				"regexp":  {"type": "boolean", "description": "Treat the pattern as an extended regular expression."},
+				"word":    {"type": "boolean", "description": "Whole words only."},
+				"case":    {"type": "boolean", "description": "Case-sensitive. Insensitive by default."},
+				"count":   {"type": "boolean", "description": "One row per file with its match count, instead of lines."},
+				"context": {"type": "integer", "description": "Lines either side of each match, 0-10."},
+				"area":    {"type": "string", "description": "Configured area name, or \"all\" (default) to walk every area."},
+				"limit":   {"type": "integer", "description": "Max rows (default 20)."}
 			},
-			"required": ["query"]
+			"required": ["pattern"]
 		}`),
 		ReadOnly: true,
-		Handler:  searchHandler(areas),
+		Handler:  grepHandler(areas),
 	})
 	return srv
 }
@@ -182,18 +191,27 @@ func writeHandler(areas *workspace.Areas) mcpserver.Handler {
 	}
 }
 
-func searchHandler(areas *workspace.Areas) mcpserver.Handler {
-	return func(_ context.Context, args json.RawMessage) (string, error) {
+func grepHandler(areas *workspace.Areas) mcpserver.Handler {
+	return func(ctx context.Context, args json.RawMessage) (string, error) {
 		var in struct {
-			Query string `json:"query"`
-			Area  string `json:"area"`
-			Limit int    `json:"limit"`
+			Pattern string `json:"pattern"`
+			Loose   bool   `json:"loose"`
+			Regexp  bool   `json:"regexp"`
+			Word    bool   `json:"word"`
+			Case    bool   `json:"case"`
+			Count   bool   `json:"count"`
+			Context int    `json:"context"`
+			Area    string `json:"area"`
+			Limit   int    `json:"limit"`
 		}
 		if err := json.Unmarshal(args, &in); err != nil {
 			return "", fmt.Errorf("invalid args: %w", err)
 		}
-		if in.Query == "" {
-			return "", fmt.Errorf("query is required")
+		if in.Pattern == "" {
+			return "", fmt.Errorf("pattern is required")
+		}
+		if in.Context > 10 {
+			in.Context = 10
 		}
 		limit := in.Limit
 		if limit <= 0 {
@@ -221,12 +239,24 @@ func searchHandler(areas *workspace.Areas) mcpserver.Handler {
 			if remaining <= 0 {
 				break
 			}
-			hits, err := ar.FS.Search(in.Query, remaining)
+			hits, err := ar.FS.Grep(ctx, sandboxfs.GrepOptions{
+				Pattern: in.Pattern, Regexp: in.Regexp, Loose: in.Loose, Word: in.Word,
+				Case: in.Case, Context: in.Context, Count: in.Count, Limit: remaining,
+			})
 			if err != nil {
-				continue
+				return "", err
 			}
 			for _, h := range hits {
-				fmt.Fprintf(&sb, "%s%s/%s:%d  %s\n", uriPrefix, ar.Name, h.Path, h.Line, h.Snippet)
+				u := fmt.Sprintf("%s%s/%s", uriPrefix, ar.Name, h.Path)
+				switch {
+				case h.Count > 0:
+					fmt.Fprintf(&sb, "%s  %d matches\n", u, h.Count)
+				case h.Context:
+					fmt.Fprintf(&sb, "  %d  %s\n", h.Line, h.Text)
+					continue // a context line rides along with its match
+				default:
+					fmt.Fprintf(&sb, "%s:%d  %s\n", u, h.Line, strings.TrimSpace(h.Text))
+				}
 				remaining--
 				if remaining <= 0 {
 					break

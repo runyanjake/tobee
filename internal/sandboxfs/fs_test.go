@@ -1,7 +1,7 @@
 package sandboxfs
 
 import (
-	"strings"
+	"context"
 	"testing"
 )
 
@@ -37,104 +37,126 @@ func TestResolveRejectsEscapes(t *testing.T) {
 	}
 }
 
-// Blocks are runs of non-blank lines, so coarse search works on any format,
-// not just markdown (D-056).
-func TestSearchFilesReturnsBlocksForAnyFormat(t *testing.T) {
+// Searching is grep's job; this package only confines it (D-061).
+func TestGrepModes(t *testing.T) {
+	if err := CheckGrep(); err != nil {
+		t.Skipf("no grep: %v", err)
+	}
 	fs := testFS(t, map[string]string{
-		"notes.md":  "# Food\n\nI like pizza a lot\nwith basil\n\nUnrelated paragraph\n\npizza again here\n",
-		"conf.ini":  "[a]\nkey=1\n\n[pizza]\ntoppings=basil\n",
-		"other.txt": "nothing to see",
+		"shopping_list.md":          "- Bread\n- Milk\n- Lettuce\n",
+		".tobee/conversations/t.md": "called memory_list shopping_list\nresult shopping_list\n",
+		"notes/pizza.txt":           "a\nb\nI like pizza\nc\nd\n",
+	})
+	ctx := context.Background()
+
+	hits, err := fs.Grep(ctx, GrepOptions{Pattern: "pizza"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Path != "notes/pizza.txt" || hits[0].Line != 3 {
+		t.Fatalf("line mode = %+v", hits)
+	}
+
+	hits, err = fs.Grep(ctx, GrepOptions{Pattern: "pizza", Context: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 3 || !hits[0].Context || hits[1].Context || !hits[2].Context {
+		t.Fatalf("context mode = %+v, want one match between two context lines", hits)
+	}
+
+	// Counting mode must not report the files that matched nothing: grep -rc
+	// prints a zero for every file it looked at.
+	hits, err = fs.Grep(ctx, GrepOptions{Pattern: "shopping", Count: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range hits {
+		if h.Count == 0 {
+			t.Fatalf("counting mode kept a zero: %+v", hits)
+		}
+	}
+
+	// No matches is an answer, not an error (grep exits 1).
+	hits, err = fs.Grep(ctx, GrepOptions{Pattern: "nothing like this"})
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("empty result = %+v, %v", hits, err)
+	}
+}
+
+// "shopping list" has to find shopping_list, in contents and in names (D-061).
+func TestGrepLooseAndNames(t *testing.T) {
+	if err := CheckGrep(); err != nil {
+		t.Skipf("no grep: %v", err)
+	}
+	fs := testFS(t, map[string]string{
+		"shopping_list.md":   "- Bread\n",
+		"notes/mentions.md":  "see the shopping-list for details\n",
+		"notes/unrelated.md": "nothing\n",
 	})
 
-	got, err := fs.SearchFiles("pizza", "", 10)
+	hits, err := fs.Grep(context.Background(), GrepOptions{Pattern: "shopping list", Loose: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("SearchFiles() = %+v, want 2 files", got)
+	if len(hits) != 1 || hits[0].Path != "notes/mentions.md" {
+		t.Fatalf("loose grep = %+v, want the hyphenated mention", hits)
 	}
-	// Most matches first.
-	if got[0].Path != "notes.md" || got[0].Count != 2 {
-		t.Fatalf("first file = %+v, want notes.md with 2 matches", got[0])
+
+	names, err := fs.MatchNames("Shopping List", "", 10)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The two hits are in separate paragraphs, so two ranges, not one span.
-	if len(got[0].Blocks) != 2 {
-		t.Fatalf("blocks = %v, want one per paragraph", got[0].Blocks)
+	if len(names) != 1 || names[0] != "shopping_list.md" {
+		t.Fatalf("MatchNames = %v, want shopping_list.md", names)
 	}
-	if got[0].Blocks[0].String() != "L3-4" {
-		t.Fatalf("first block = %s, want the paragraph L3-4", got[0].Blocks[0])
-	}
-	// A non-markdown file gets the same treatment.
-	if got[1].Path != "conf.ini" || got[1].Blocks[0].String() != "L4-5" {
-		t.Fatalf("conf.ini = %+v, want the [pizza] stanza", got[1])
+	if got, _ := fs.MatchNames("unrelated things", "", 10); len(got) != 0 {
+		t.Fatalf("MatchNames matched too much: %v", got)
 	}
 }
 
-// Adjacent hits collapse into one span rather than many overlapping ones.
-func TestSearchFilesMergesAdjacentBlocks(t *testing.T) {
-	fs := testFS(t, map[string]string{"list.txt": "pizza one\npizza two\npizza three\n"})
-	got, err := fs.SearchFiles("pizza", "", 10)
+// The model supplies typed options, never arguments: a pattern that looks like
+// a flag or a path is still only a pattern (D-061).
+func TestGrepCannotSmuggleFlagsOrEscape(t *testing.T) {
+	if err := CheckGrep(); err != nil {
+		t.Skipf("no grep: %v", err)
+	}
+	fs := testFS(t, map[string]string{"in.md": "inside the sandbox\n"})
+	ctx := context.Background()
+
+	// A flag-shaped pattern is matched literally, not interpreted.
+	if hits, err := fs.Grep(ctx, GrepOptions{Pattern: "-r /etc/passwd"}); err != nil || len(hits) != 0 {
+		t.Fatalf("flag-shaped pattern = %+v, %v", hits, err)
+	}
+	// Dir goes through resolve, so it cannot leave the root.
+	for _, dir := range []string{"..", "../..", "/etc", "a/../../.."} {
+		if _, err := fs.Grep(ctx, GrepOptions{Pattern: "root", Dir: dir}); err == nil {
+			t.Fatalf("Grep escaped the sandbox with dir=%q", dir)
+		}
+	}
+	// The argv is ours: only the pattern and "." reach grep as operands.
+	args, err := grepArgs(GrepOptions{Pattern: "x", Context: 99}, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || len(got[0].Blocks) != 1 || got[0].Blocks[0].String() != "L1-3" {
-		t.Fatalf("blocks = %+v, want a single merged L1-3", got)
+	if args[len(args)-1] != "." || args[len(args)-2] != "x" || args[len(args)-3] != "--" {
+		t.Fatalf("argv tail = %v, want -- pattern .", args)
 	}
-	if got[0].Count != 3 {
-		t.Fatalf("count = %d, want 3", got[0].Count)
+	for i, a := range args {
+		if a == "-C" && args[i+1] != "10" {
+			t.Fatalf("context was not clamped: %v", args)
+		}
 	}
 }
 
-// One enormous run must not drag in the whole file.
-func TestBlockAroundIsClamped(t *testing.T) {
-	lines := make([]string, 500)
-	for i := range lines {
-		lines[i] = "filler"
-	}
-	lines[250] = "the pizza line"
-	got := blockAround(lines, 251)
-	if got.To-got.From+1 > maxBlockLines {
-		t.Fatalf("block = %s, longer than the %d-line cap", got, maxBlockLines)
-	}
-	if got.From > 251 || got.To < 251 {
-		t.Fatalf("block = %s, does not contain the hit", got)
-	}
-}
-
-func TestSearchFilesScopedToDir(t *testing.T) {
-	fs := testFS(t, map[string]string{
-		"a/one.md": "pizza",
-		"b/two.md": "pizza",
-	})
-	got, err := fs.SearchFiles("pizza", "a", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Path != "a/one.md" {
-		t.Fatalf("SearchFiles(dir=a) = %+v, want only a/one.md", got)
-	}
-}
-
-func TestSliceAndContext(t *testing.T) {
-	fs := testFS(t, map[string]string{"doc.txt": "one\ntwo\nthree\nfour\nfive\n"})
-
-	parts, got, err := fs.Slice("doc.txt", []LineRange{{From: 2, To: 3}, {From: 5, To: 99}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(parts) != 2 || parts[0] != "two\nthree" {
-		t.Fatalf("Slice() = %q", parts)
-	}
-	// An over-long range is clamped to the file rather than refused.
-	if got[1].To > 6 {
-		t.Fatalf("second range = %s, want it clamped to the file", got[1])
-	}
-
-	lines, span, err := fs.ContextAround("doc.txt", 3, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(lines, "|") != "two|three|four" || span.String() != "L2-4" {
-		t.Fatalf("ContextAround() = %q at %s", lines, span)
+func TestLoosePattern(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"shopping list", `shopping[-_[:space:]]*list`},
+		{"shopping_list", `shopping[-_[:space:]]*list`},
+		{"a.b", `a\.b`}, // regex metacharacters in the words stay literal
+	} {
+		if got := loosePattern(tc.in); got != tc.want {
+			t.Errorf("loosePattern(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

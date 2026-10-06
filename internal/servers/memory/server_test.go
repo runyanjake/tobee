@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -90,9 +91,9 @@ func TestListAndSearchReturnURIs(t *testing.T) {
 	if strings.Contains(res.Text, "secret") {
 		t.Fatalf("list leaked another user's file: %q", res.Text)
 	}
-	res, _ = h.Call(ctx, "memory_search", json.RawMessage(`{"query":"wifi"}`))
+	res, _ = h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"wifi"}`))
 	if !strings.HasPrefix(res.Text, "memory://shared/house.md:1") {
-		t.Fatalf("search = %q", res.Text)
+		t.Fatalf("grep = %q", res.Text)
 	}
 }
 
@@ -408,9 +409,15 @@ func TestReservedAreaIsReadOnlyToTools(t *testing.T) {
 	if got, err := h.ReadResource(ctx, "memory://user/.tobee/conversations/2026/09/29-0214.md"); err != nil || got != "what we said" {
 		t.Fatalf("ReadResource = %q, %v; the record must stay readable", got, err)
 	}
-	res, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"what we said"}`))
+	// Searchable, but only when asked for: the archive is a record of what was
+	// said, not where facts live (D-060).
+	res, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"what we said"}`))
+	if err != nil || res.Text != "no matches" {
+		t.Fatalf("memory_grep = %+v, %v; the archive must be out of the default search", res, err)
+	}
+	res, err = h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"what we said","history":true}`))
 	if err != nil || res.IsError || !strings.Contains(res.Text, ".tobee/conversations") {
-		t.Fatalf("memory_search = %+v, %v; the record must stay searchable", res, err)
+		t.Fatalf("memory_grep history=true = %+v, %v; the record must stay searchable", res, err)
 	}
 
 	// User space is unaffected.
@@ -505,19 +512,23 @@ func TestSearchCoarseThenRange(t *testing.T) {
 	_ = fs.Write("users/discord/me/food.md",
 		"# Food\n\nI like pizza with basil\nand oregano\n\nUnrelated\n\npizza again\n")
 
-	coarse, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","mode":"files","scope":"user"}`))
+	coarse, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"pizza","count":true,"scope":"user"}`))
 	if err != nil || coarse.IsError {
 		t.Fatalf("coarse = %+v, %v", coarse, err)
 	}
-	if !strings.Contains(coarse.Text, "memory://user/food.md  2 matches  #L3-4,L8") {
+	if !strings.Contains(coarse.Text, "memory://user/food.md  2 matches") {
 		t.Fatalf("coarse row = %q", coarse.Text)
 	}
-	// No file contents in the coarse pass: it is a router, not an answer.
+	// No file contents in counting mode: it says where to look, not what is there.
 	if strings.Contains(coarse.Text, "basil") {
-		t.Fatalf("coarse pass leaked contents: %q", coarse.Text)
+		t.Fatalf("counting mode leaked contents: %q", coarse.Text)
 	}
 
-	// The span from the coarse row reads back directly.
+	// Line numbers come from a normal grep, and read back as a range.
+	lines, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"pizza","dir":"","scope":"user"}`))
+	if err != nil || !strings.Contains(lines.Text, "memory://user/food.md:3") {
+		t.Fatalf("line mode = %+v, %v", lines, err)
+	}
 	fine, err := h.Call(ctx, "resources_read", json.RawMessage(`{"uri":"memory://user/food.md#L3-4"}`))
 	if err != nil || fine.IsError {
 		t.Fatalf("fine = %+v, %v", fine, err)
@@ -546,11 +557,11 @@ func TestSearchWithContextLines(t *testing.T) {
 	h, fs, ctx := setup(t)
 	_ = fs.Write("users/discord/me/food.md", "one\ntwo\npizza\nfour\nfive\n")
 
-	res, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","context":1,"scope":"user"}`))
+	res, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"pizza","context":1,"scope":"user"}`))
 	if err != nil || res.IsError {
 		t.Fatalf("res = %+v, %v", res, err)
 	}
-	for _, want := range []string{"memory://user/food.md#L2-4", "  2| two", "  3| pizza", "  4| four"} {
+	for _, want := range []string{"memory://user/food.md", "  2  two", "  3> pizza", "  4  four"} {
 		if !strings.Contains(res.Text, want) {
 			t.Fatalf("context output missing %q:\n%s", want, res.Text)
 		}
@@ -562,7 +573,7 @@ func TestSearchScopedToDir(t *testing.T) {
 	_ = fs.Write("users/discord/me/recipes/pizza.md", "pizza here")
 	_ = fs.Write("users/discord/me/other/pizza.md", "pizza there")
 
-	res, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","dir":"recipes","scope":"user"}`))
+	res, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"pizza","dir":"recipes","scope":"user"}`))
 	if err != nil || res.IsError {
 		t.Fatalf("res = %+v, %v", res, err)
 	}
@@ -573,7 +584,7 @@ func TestSearchScopedToDir(t *testing.T) {
 		t.Fatalf("dir search found nothing:\n%s", res.Text)
 	}
 	// A dir cannot be used to leave the scope.
-	esc, err := h.Call(ctx, "memory_search", json.RawMessage(`{"query":"pizza","dir":"../other","scope":"user"}`))
+	esc, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"pizza","dir":"../other","scope":"user"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,5 +605,41 @@ func TestBadFragmentIsRefused(t *testing.T) {
 	}
 	if !res.IsError || !strings.Contains(res.Text, "#L") {
 		t.Fatalf("res = %+v, want a refusal naming the expected form", res)
+	}
+}
+
+// The reported failure: "shopping_list" matched twenty lines of saved
+// transcripts — all of them about past tool calls — and the file that actually
+// held the list never appeared, so the turn wandered off into status (D-060).
+func TestSearchPrefersRealFilesOverTheArchive(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/shopping_list.md", "- Bread\n- Milk\n- Lettuce\n")
+	// A transcript that mentions the phrase far more often than the real file.
+	var transcript strings.Builder
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&transcript, "> called `memory_list` {} for shopping_list\n> result: shopping_list.md\n\n")
+	}
+	_ = fs.Write("users/discord/me/.tobee/conversations/2026/09/29-1739.md", transcript.String())
+
+	res, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"shopping_list","scope":"user"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("res = %+v, %v", res, err)
+	}
+	if !strings.Contains(res.Text, "memory://user/shopping_list.md") {
+		t.Fatalf("the real file was crowded out:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, "conversations") {
+		t.Fatalf("the archive reached a default search:\n%s", res.Text)
+	}
+
+	// With history on, the archive comes after user space, so the real file
+	// still leads and keeps its share of the limit.
+	res, err = h.Call(ctx, "memory_grep", json.RawMessage(
+		`{"pattern":"shopping_list","scope":"user","history":true,"limit":5}`))
+	if err != nil || res.IsError {
+		t.Fatalf("res = %+v, %v", res, err)
+	}
+	if !strings.Contains(strings.SplitN(res.Text, "\n", 3)[1], "memory://user/shopping_list.md") {
+		t.Fatalf("archive outranked the real file:\n%s", res.Text)
 	}
 }

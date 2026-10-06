@@ -21,6 +21,7 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 
 | 2026-09-29 | (working tree) | A protected `.tobee/` area for the conversation record and lessons, with a boot migration, and recovered repeats no longer warning the user (D-055). Knowing what already exists made context: the pinned `<memory-files>` manifest, a `memory_write` guard against a second home for the same thing, outcomes carried whenever a turn acted, and a ping on fired reminders (D-054). Everything code writes to a person put in the first person and cut to activity: Reporter summaries, the failure block, the `[reminder due: …]` framing and a timer branch in the turn directive (D-053). Two-tier long-term memory replacing D-026: a capped, pinned `lessons.md` written by a reflection pass over closed sessions that failed, gated by `AGENT_REFLECT` (D-052). Failure reporting and the Reflexion record: `Turn.Problems`, the "⚠️ Didn't finish cleanly" block, repeated calls closing their tool, and `session.Outcome` carried into later turns and the transcript (D-051). One wall clock from `TZ`, stamped in `<context>` and used for every user-facing time (D-049). Discord addressing rewritten: DMs, role pings, and joined threads are addressed, each rule logged as `addressed_by`, and `DISCORD_CHANNEL_ID` no longer scopes out DMs or threads of that channel (D-050). |
 
+| 2026-10-06 | (working tree) | Search became real `grep`, executed inside the sandbox behind a thin typed handler, replacing the hand-rolled scanner: `sandboxfs.Grep`, `memory_grep` / `workspace_grep`, `memory_list name=` and loose patterns for natural-language filenames, `GREP_BIN` and a boot check, GNU grep in the runtime image, and roughly 200 lines deleted from `sandboxfs` (D-061). Earlier the same day: a lookup finds files, not the record of discussing them — name matching in memory search, the conversation archive out of the default search, harness notes kept out of the session, and verbatim tools closing once one has rendered (D-060). |
 | 2026-10-05 | (working tree) | Reminders pinned as `<reminders>` and fired through the full loop so the turn retrieves its own context, plus a distinct log event per stall cause (D-059). Coarse-to-fine memory search with format-agnostic blocks and `#L..` range reads (D-056); `AGENT_MAX_STEPS` replaced by stall detection (D-057); `[TAG]` markers on every log line (D-058). |
 
 ## Major Refactors & Migrations
@@ -91,8 +92,13 @@ Built from `git log` (2026-03-05 → 2026-09-28) and the former `.claude/DECISIO
 - **Planning is optional.** The model decides whether to call `plan`; a small model may skip it on multi-step work.
 - **A turn can now use the whole 2m.** With no call cap (D-057), one slow or thorough turn blocks the queue for the full budget, where twelve calls used to end it sooner.
 - **A fired reminder still has to choose to look.** The turn is told to search memory for the note's background, but nothing makes it; a note that drifted at creation is only recoverable if it does (D-059).
+- **Search behaviour depends on the installed grep**, which is deployment config, not code. Prod is GNU grep inside the Alpine image (`apk add grep`, pinned as `ENV GREP_BIN=/usr/bin/grep` so PATH order against BusyBox's `/bin/grep` can't decide it); the Ubuntu host's own grep never runs. `CheckGrep` performs a real search at boot and refuses to start if the rows are wrong, so a variant missing `-I` fails there rather than mid-turn. Verified 2026-10-06 against BSD grep 2.6.0-FreeBSD on macOS; GNU grep is covered by the `test` build target (`docker build --target test .`), which CI runs and which asserts the `grep` package really is GNU. `TOBEE_GREP_BINS` points `TestGrepConformance` at specific binaries, and a binary named there must pass rather than skip.
+- **A symlinked area root is still followed.** `-r` refuses symlinks found while walking, which covers anything inside a scope, but an operator who points `WORKSPACE_AREA_*` at a path that *is* a symlink searches wherever it leads (D-061).
+- **Grep patterns are grep's dialect.** `regexp=true` is POSIX extended (`-E`), not Go's `regexp`, so a pattern that works in code may not work here, and `loose` only covers separators (D-061).
 - **Pending reminders are keyed on the connector account**, not the person, so a reminder set on Discord does not appear in the `<reminders>` block on an email turn (D-059).
 - **A `#L..` span is only valid in the turn that found it.** Line numbers move when a file is rewritten; nothing detects a stale span, it just returns the wrong lines.
+- **Transcripts written before D-060 still contain harness notes** — "(Same arguments as earlier…)" and `> outcome:` lines are in the archive on disk; nothing rewrites them, so a `history=true` search can still turn them up.
+- **Recalling what was said is now explicit.** `history=true` is the only way into the conversation archive, and a fired reminder looking for its background has to pass it.
 - **Coarse search reads whole files** (skipping anything over 1 MiB), so a large memory tree costs more per search than the old streaming scan.
 - **Serial throughput.** One turn at a time, up to 2m each. A full queue (256) rejects new events with an ERROR log, and the sender is not notified.
 - **At-least-once tasks.** A crash mid-turn replays the task on boot, which can repeat a reply or a side effect. A task is dropped after 2 attempts.
@@ -163,6 +169,8 @@ Tests cover:
 No tests cover:
 
 - `sandboxfs` path escapes, coarse search blocks across formats, span merging, clamping and slicing
+- `internal/servers/memory`: a real file outranking the archive, the archive excluded by default and searched last with `history=true`
+- `internal/agent`: harness notes in their own messages and absent from the session, and verbatim tools closing after one renders
 - the workspace and schedule servers
 - `scheduler` (job replay, misfire)
 - the Discord split, mention rewriting, and the two lookups behind the role and thread rules (both need a live gateway)

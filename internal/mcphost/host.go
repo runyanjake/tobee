@@ -296,6 +296,22 @@ func (h *Host) NeedsApproval(name string) bool {
 	return a == nil || a.DestructiveHint == nil || *a.DestructiveHint
 }
 
+// VerbatimTools are the tools whose output code shows the user as-is. Once one
+// has rendered an answer, the loop closes them all: a second rendering is
+// noise, not a second answer (D-060).
+func (h *Host) VerbatimTools() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var out []string
+	for name, ref := range h.tools {
+		if ref.verbatim {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Category returns a catalog tool's category, or "" if unknown.
 func (h *Host) Category(name string) llm.Category {
 	h.mu.RLock()

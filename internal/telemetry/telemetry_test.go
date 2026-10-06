@@ -130,9 +130,9 @@ func TestHandlerKeepsTheMessageText(t *testing.T) {
 func TestHandlerTagsReasoningRecords(t *testing.T) {
 	var buf bytes.Buffer
 	slog.SetDefault(slog.New(NewHandler(slog.NewTextHandler(&buf, nil))))
-	Log(context.Background(), slog.LevelInfo, Action, "agent: tool call", "tool", "memory_search")
+	Log(context.Background(), slog.LevelInfo, Action, "agent: tool call", "tool", "memory_grep")
 	line := buf.String()
-	for _, want := range []string{"[TOOL_CALL]", "agent: tool call", "tool=memory_search", "cat=action"} {
+	for _, want := range []string{"[TOOL_CALL]", "agent: tool call", "tool=memory_grep", "cat=action"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("log line missing %q: %s", want, line)
 		}

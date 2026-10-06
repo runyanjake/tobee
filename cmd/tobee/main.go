@@ -59,6 +59,13 @@ func main() {
 	if err != nil {
 		fatal("memory: init failed", err)
 	}
+	// Search is real grep, run inside the sandbox (D-061). It has to exist at
+	// boot: a missing binary would otherwise surface as a failed tool call
+	// mid-turn, and BusyBox grep is close enough to fool a version check only.
+	sandboxfs.GrepBin = envOr("GREP_BIN", "grep")
+	if err := sandboxfs.CheckGrep(); err != nil {
+		fatal("memory: grep unavailable", err)
+	}
 	areas, err := workspace.LoadAreas(os.Environ(), int64(mustInt("WORKSPACE_MAX_FILE_SIZE", 262144)))
 	if err != nil {
 		// Orphan _DESC/_READONLY entries are non-fatal; the registry is still usable.

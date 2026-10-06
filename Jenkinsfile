@@ -53,6 +53,15 @@ pipeline {
       }
     }
 
+    stage('Test') {
+      steps {
+        // Runs go test against the GNU grep the runtime image installs, so a
+        // grep variant that behaves differently fails here and not in a turn
+        // (D-061). Same build-context reasoning as Lint.
+        sh 'docker build --target test -t tobee-test .'
+      }
+    }
+
     stage('Configure') {
       steps {
         // Render the runtime env file the prod compose reads via env_file.

@@ -109,7 +109,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Filesystem & memory
 
-- Looking something up is two rungs, not one: `memory_search mode="files"` to find the documents, then `context=N` or a `#L..` range to read the part that matters. Spans are blank-line blocks, so nothing assumes a file format (D-056).
+- Search is real `grep`, run inside the sandbox through `sandboxfs.Grep` (D-061). Add a capability by adding a typed field that maps to a flag; never parse grep's output into a richer model, and never rebuild in Go what a flag already does. The argv is the security boundary: options are typed, the pattern and `.` go after `--`, `cmd.Dir` is the resolved scope root, and `-r` stays `-r`.
+- Looking something up is two rungs, not one: `memory_grep count=true` (or `memory_list name=`) to find the documents, then `context=N` or a `#L..` range to read the part that matters. Spans are blank-line blocks, so nothing assumes a file format (D-056). Search matches names as well as contents, and the conversation archive is out of it unless `history=true` (D-060).
 - Every read or write under `data/memory/` or a workspace area goes through `sandboxfs.FS`. Never call `os.*` on those paths. `resolve()` is the security boundary (D-003, D-019).
 - tobee's own state is not the model's to edit. Anything code owns goes under `.tobee/` in a scope, or outside `data/memory/` entirely; tool handlers refuse writes and deletes there, and code writes it through the FS directly (D-055). Don't put code-owned state in user space and rely on the model leaving it alone.
 - Warn the user about a problem only when it cost them something: record everything on the turn, mark what the loop recovered from, and let a stalled or timed-out turn promote it (D-055, D-057).
@@ -129,7 +130,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Keep the turn a single loop (D-043). Don't reintroduce fixed phases (a planning call, per-step executors, a synthesis pass); structure the model needs is a tool it can choose, like `plan`.
 - Give every built-in tool honest annotations: `ReadOnly` for reads, `OpenWorld` for anything reaching people or outside systems, `Destructive` for anything that deletes or irreversibly overwrites. Categories are derived from them and only group the menu (D-044); `Destructive` makes the user approve each call (D-047).
 - Output that isn't a valid choice is never appended to the conversation; the phase appends its nudge and retries once.
-- Anything that must be shown to the user word for word is enforced in code (`mcpserver.Tool.Verbatim` → `tobee/verbatim`), never by prompt instruction (D-030).
+- Anything that must be shown to the user word for word is enforced in code (`mcpserver.Tool.Verbatim` → `tobee/verbatim`), never by prompt instruction (D-030). A verbatim tool renders the finished answer, so the first one to run closes them all for that turn (D-060).
+- A note the loop writes to the model is harness text: append it with `AppendHarness` in its own message, never onto a tool result. Anything on a tool result is saved to the session and ends up in a transcript, where a later search will find it (D-060).
 - Never merge the user's text into a phase template. Directives go in `<phase>` tags (D-029).
 
 ### Connectors, sources & tools
@@ -168,7 +170,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-060**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-062**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

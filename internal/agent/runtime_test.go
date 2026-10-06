@@ -223,10 +223,42 @@ func TestVerbatimToolOutputIsDelivered(t *testing.T) {
 	if got := h.chat.sent; len(got) != 1 || got[0] != "Here you go.\n\nEverything quiet." {
 		t.Fatalf("sent = %q", got)
 	}
-	// The model is told the output is already shown, so it doesn't restate it.
-	result := h.llm.requests[1][len(h.llm.requests[1])-1]
-	if result.Role != llm.RoleTool || !strings.Contains(result.Content, "Don't repeat it") {
-		t.Fatalf("verbatim result = %+v", result)
+	// The tool result is what happened, and it is saved to the session; the
+	// "already shown" note is harness text in its own message, so it never
+	// reaches a transcript (D-060).
+	msgs := h.llm.requests[1]
+	result, note := msgs[len(msgs)-2], msgs[len(msgs)-1]
+	if result.Role != llm.RoleTool || result.Content != "Everything quiet." {
+		t.Fatalf("verbatim result = %+v, want the clean tool output", result)
+	}
+	if note.Role != llm.RoleUser || !strings.Contains(note.Content, "Don't repeat it") {
+		t.Fatalf("note = %+v, want a separate harness message", note)
+	}
+	for _, m := range h.sessions.History("jake", time.Now()) {
+		if strings.Contains(m.Content, "Don't repeat it") {
+			t.Fatalf("a harness note was saved to the session: %q", m.Content)
+		}
+	}
+}
+
+// A verbatim tool renders the finished answer, so once one has run they all
+// close: stacking a second report on the first is how a shopping-list request
+// came back as a status dump (D-060).
+func TestVerbatimToolClosesAfterRendering(t *testing.T) {
+	h := newHarness(t, statusServer())
+	h.llm.script(
+		call{name: "status_summary", args: `{}`},
+		call{name: "status_quiet", args: `{}`},
+		call{name: "reply", args: `{"spoken":"Here you go."}`},
+	)
+	h.runNext(t, chatEvent("e1", "how are things?", ""))
+
+	for i, offered := range h.llm.offered[1:] {
+		for _, name := range offered {
+			if name == "status_summary" {
+				t.Fatalf("status_summary still offered on call %d: %v", i+2, offered)
+			}
+		}
 	}
 }
 
@@ -258,10 +290,10 @@ func TestStallForcesReply(t *testing.T) {
 	// Four different calls, each returning the same thing: not repeats, but no
 	// progress either, which is what a call cap could never tell apart.
 	h.llm.script(
-		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{"window":"2h"}`},
-		call{name: "status_summary", args: `{"window":"3h"}`},
-		call{name: "status_summary", args: `{"window":"4h"}`},
+		call{name: "status_quiet", args: `{}`},
+		call{name: "status_quiet", args: `{"window":"2h"}`},
+		call{name: "status_quiet", args: `{"window":"3h"}`},
+		call{name: "status_quiet", args: `{"window":"4h"}`},
 		call{name: "reply", args: `{"spoken":"Partly done."}`},
 	)
 	h.runNext(t, chatEvent("e1", "loop forever", ""))
@@ -341,6 +373,8 @@ func TestTurnLogsTheReasoningChain(t *testing.T) {
 		"thinking [PLAN] agent: plan",
 		"action [TOOL_CALL] agent: tool call",
 		"action [TOOL_RESULT] agent: tool result",
+		// A verbatim tool rendered the answer, so the verbatim tools close (D-060).
+		"action [TOOL_CLOSED] agent: tool closed",
 		"output [OUTPUT] agent: output",
 	}
 	if strings.Join(chain, "\n") != strings.Join(want, "\n") {
@@ -353,11 +387,13 @@ func statusServer() *mcpserver.Server {
 	s.Add(mcpserver.Tool{Name: "summary", Verbatim: true, ReadOnly: true, Handler: func(context.Context, json.RawMessage) (string, error) {
 		return "Everything quiet.", nil
 	}})
-	// A second way to ask the same thing, for testing a loop that varies the
-	// tool rather than the arguments.
-	s.Add(mcpserver.Tool{Name: "quiet", ReadOnly: true, Handler: func(context.Context, json.RawMessage) (string, error) {
-		return "Everything quiet.", nil
-	}})
+	// Two more ways to ask the same thing, neither verbatim, for testing a loop
+	// that varies the tool rather than the arguments.
+	for _, name := range []string{"quiet", "hush"} {
+		s.Add(mcpserver.Tool{Name: name, ReadOnly: true, Handler: func(context.Context, json.RawMessage) (string, error) {
+			return "Everything quiet.", nil
+		}})
+	}
 	return s
 }
 
@@ -492,13 +528,20 @@ func TestRepeatedReadIsNotRerun(t *testing.T) {
 	)
 	h.runNext(t, chatEvent("e1", "list", ""))
 
-	last := h.llm.requests[2][len(h.llm.requests[2])-1]
-	if last.Role != llm.RoleTool || !strings.Contains(last.Content, "Same arguments as earlier") {
-		t.Fatalf("repeat not caught: %+v", last)
+	msgs := h.llm.requests[2]
+	result, note := msgs[len(msgs)-2], msgs[len(msgs)-1]
+	// The cached result is replayed as the tool result; the refusal is harness
+	// text in its own message, so neither a transcript nor a later search sees
+	// it (D-060).
+	if result.Role != llm.RoleTool || strings.Contains(result.Content, "Same arguments") {
+		t.Fatalf("cached result = %+v, want the clean earlier output", result)
+	}
+	if note.Role != llm.RoleUser || !strings.Contains(note.Content, "Same arguments as earlier") {
+		t.Fatalf("repeat not caught: %+v", note)
 	}
 	// The refusal invites a different argument set rather than ending the tool.
-	if !strings.Contains(last.Content, "different arguments") {
-		t.Fatalf("refusal did not offer varying the arguments: %s", last.Content)
+	if !strings.Contains(note.Content, "different arguments") {
+		t.Fatalf("refusal did not offer varying the arguments: %s", note.Content)
 	}
 }
 
@@ -541,9 +584,9 @@ func TestQuestionAnsweredFromAnotherConnector(t *testing.T) {
 func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 	h := newHarness(t, statusServer())
 	h.llm.script(
-		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{}`}, // refused: use the result or vary the arguments
-		call{name: "status_summary", args: `{}`}, // still stuck: the tool is closed
+		call{name: "status_quiet", args: `{}`},
+		call{name: "status_quiet", args: `{}`}, // refused: use the result or vary the arguments
+		call{name: "status_quiet", args: `{}`}, // still stuck: the tool is closed
 		call{name: "reply", args: `{"spoken":"I couldn't find anything to clear."}`},
 	)
 	h.runNext(t, chatEvent("e1", "clear my reminders for today", ""))
@@ -551,8 +594,8 @@ func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 	// After the repeat the tool is gone from the schema, so it cannot be called again.
 	last := h.llm.offered[len(h.llm.offered)-1]
 	for _, name := range last {
-		if name == "status_summary" {
-			t.Fatalf("status_summary still offered after a repeat: %v", last)
+		if name == "status_quiet" {
+			t.Fatalf("status_quiet still offered after a repeat: %v", last)
 		}
 	}
 	if len(last) == 0 {
@@ -573,7 +616,7 @@ func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 			outcome = m.Content
 		}
 	}
-	if !strings.Contains(outcome, "I kept calling status_summary the same way (3 times)") {
+	if !strings.Contains(outcome, "I kept calling status_quiet the same way (3 times)") {
 		t.Fatalf("the repeat was not recorded in the session:\n%s", outcome)
 	}
 }
@@ -583,10 +626,10 @@ func TestRepeatedReadClosesTheToolAndReportsIt(t *testing.T) {
 func TestStallPromotesTheRepeatsThatCausedIt(t *testing.T) {
 	h := newHarness(t, statusServer())
 	h.llm.script(
-		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{}`}, // an exact repeat, refused
-		call{name: "status_summary", args: `{"window":"2h"}`},
-		call{name: "status_summary", args: `{"window":"3h"}`},
+		call{name: "status_quiet", args: `{}`},
+		call{name: "status_quiet", args: `{}`}, // an exact repeat, refused
+		call{name: "status_quiet", args: `{"window":"2h"}`},
+		call{name: "status_quiet", args: `{"window":"3h"}`},
 		call{name: "reply", args: `{"spoken":"Partly done."}`},
 	)
 	h.runNext(t, chatEvent("e1", "loop forever", ""))
@@ -594,7 +637,7 @@ func TestStallPromotesTheRepeatsThatCausedIt(t *testing.T) {
 	sent := h.chat.sent[len(h.chat.sent)-1]
 	for _, want := range []string{
 		"⚠️ I didn't finish this cleanly:",
-		"I called status_summary twice the same way",
+		"I called status_quiet twice the same way",
 		"told me nothing new, so I stopped digging",
 	} {
 		if !strings.Contains(sent, want) {
@@ -613,8 +656,8 @@ func TestManyProductiveCallsAreNotStopped(t *testing.T) {
 	h := newHarness(t, mem)
 	var script []call
 	for i := 0; i < 20; i++ {
-		script = append(script, call{name: "memory_search",
-			args: fmt.Sprintf(`{"query":"unique body %d","scope":"user"}`, i)})
+		script = append(script, call{name: "memory_grep",
+			args: fmt.Sprintf(`{"pattern":"unique body %d","scope":"user"}`, i)})
 	}
 	script = append(script, call{name: "reply", args: `{"spoken":"Read all twenty."}`})
 	h.llm.script(script...)
@@ -688,8 +731,8 @@ func searchServer() *mcpserver.Server {
 func TestSessionCarriesWhatFailed(t *testing.T) {
 	h := newHarness(t, statusServer())
 	h.llm.script(
-		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{}`},
+		call{name: "status_quiet", args: `{}`},
+		call{name: "status_quiet", args: `{}`},
 		call{name: "reply", args: `{"spoken":"Nothing to clear."}`},
 	)
 	h.runNext(t, chatEvent("e1", "clear my reminders", ""))
@@ -706,7 +749,7 @@ func TestSessionCarriesWhatFailed(t *testing.T) {
 	if outcome == "" {
 		t.Fatalf("the next turn carried no outcome:\n%+v", h.llm.requests[len(h.llm.requests)-1])
 	}
-	for _, want := range []string{`status="replied"`, "steps=", "failed: I called status_summary twice the same way"} {
+	for _, want := range []string{`status="replied"`, "steps=", "failed: I called status_quiet twice the same way"} {
 		if !strings.Contains(outcome, want) {
 			t.Fatalf("outcome missing %q:\n%s", want, outcome)
 		}
@@ -833,10 +876,10 @@ func TestStallIsLogged(t *testing.T) {
 
 	h := newHarness(t, statusServer())
 	h.llm.script(
-		call{name: "status_summary", args: `{}`},
-		call{name: "status_summary", args: `{}`}, // refused
-		call{name: "status_summary", args: `{}`}, // refused again: the tool closes
-		call{name: "status_quiet", args: `{}`},   // a different call, the same answer
+		call{name: "status_quiet", args: `{}`},
+		call{name: "status_quiet", args: `{}`}, // refused
+		call{name: "status_quiet", args: `{}`}, // refused again: the tool closes
+		call{name: "status_hush", args: `{}`},  // a different tool, the same answer
 		call{name: "reply", args: `{"spoken":"Partly done."}`},
 	)
 	task := h.runNext(t, chatEvent("e1", "loop forever", ""))
@@ -867,7 +910,7 @@ func TestStallIsLogged(t *testing.T) {
 		t.Fatalf("missing loop records: repeated=%v closed=%v stalled=%v\nsaw:\n%s",
 			repeated != nil, closed != nil, stalled != nil, strings.Join(tags, "\n"))
 	}
-	if repeated["tool"] != "status_summary" || repeated["cat"] != "action" {
+	if repeated["tool"] != "status_quiet" || repeated["cat"] != "action" {
 		t.Fatalf("repeat record = %v", repeated)
 	}
 	// The stall line carries the counters that explain why the turn stopped.
