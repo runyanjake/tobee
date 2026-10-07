@@ -643,3 +643,71 @@ func TestSearchPrefersRealFilesOverTheArchive(t *testing.T) {
 		t.Fatalf("archive outranked the real file:\n%s", res.Text)
 	}
 }
+
+// "What is in my shopping list?" matched shopping_list.md by name — the phrase
+// appears nowhere in its contents, which are "- Milk", "- Bread" — and the old
+// result was the bare URI. With nothing to act on, the model called memory_grep
+// four more ways, each returning the same line, until the stall guard stopped
+// the turn; the list in its answer came from conversation history, not a tool.
+// A name match now brings the file's opening lines with it (D-064).
+func TestNameMatchBringsTheContentsWithIt(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/shopping_list.md", "- Milk\n- Bread\n- Eggs\n- Apples\n")
+
+	res, err := h.Call(ctx, "memory_grep", json.RawMessage(
+		`{"pattern":"shopping list","loose":true,"scope":"user"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("grep = %+v, %v", res, err)
+	}
+	if !strings.Contains(res.Text, "memory://user/shopping_list.md") {
+		t.Fatalf("the name match is gone:\n%s", res.Text)
+	}
+	// The answer is in the result, with line numbers a #L.. read can use.
+	for _, want := range []string{"1  - Milk", "2  - Bread", "3  - Eggs", "4  - Apples"} {
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("preview missing %q:\n%s", want, res.Text)
+		}
+	}
+}
+
+func TestNameMatchPreviewIsCappedAndSaysSo(t *testing.T) {
+	h, fs, ctx := setup(t)
+	var body strings.Builder
+	for i := 1; i <= namePreviewLines+8; i++ {
+		fmt.Fprintf(&body, "item %d\n", i)
+	}
+	_ = fs.Write("users/discord/me/packing_list.md", body.String())
+
+	res, err := h.Call(ctx, "memory_grep", json.RawMessage(
+		`{"pattern":"packing list","loose":true,"scope":"user"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("grep = %+v, %v", res, err)
+	}
+	if !strings.Contains(res.Text, fmt.Sprintf("item %d", namePreviewLines)) {
+		t.Fatalf("preview stopped short:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, fmt.Sprintf("item %d", namePreviewLines+1)) {
+		t.Fatalf("preview ran past the cap:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "8 more lines") {
+		t.Fatalf("truncation not reported:\n%s", res.Text)
+	}
+}
+
+// A content hit still reports lines the way it did; the preview is only for a
+// match that has no line of its own.
+func TestContentHitsAreUnchangedByThePreview(t *testing.T) {
+	h, fs, ctx := setup(t)
+	_ = fs.Write("users/discord/me/notes.md", "nothing\nI like pizza\nnothing\n")
+
+	res, err := h.Call(ctx, "memory_grep", json.RawMessage(`{"pattern":"pizza","scope":"user"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("grep = %+v, %v", res, err)
+	}
+	if !strings.Contains(res.Text, "memory://user/notes.md:2") {
+		t.Fatalf("content hit lost its line:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, "files whose name matches") {
+		t.Fatalf("a content hit was reported as a name match:\n%s", res.Text)
+	}
+}

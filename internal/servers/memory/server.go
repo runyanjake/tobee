@@ -379,6 +379,13 @@ func grepHandler(fs *sandboxfs.FS) mcpserver.Handler {
 					continue
 				}
 				fmt.Fprintf(&names, "%s\n", uri(r.Label, rel))
+				// A name match has no matching line, so without a preview the
+				// row is a dead end: "what is in my shopping list?" matched
+				// shopping_list.md by name, returned the URI alone, and the
+				// model called grep four more ways instead of reading it. The
+				// result has to carry enough to answer or to aim the next
+				// read (D-064).
+				writeNamePreview(&names, fs, f)
 				remaining--
 			}
 
@@ -450,6 +457,40 @@ func renderGrep(sb *strings.Builder, r scopedRoot, hits []sandboxfs.GrepHit, gro
 		}
 	}
 	return used
+}
+
+// namePreviewLines is how much of a name-matched file comes back with it.
+// Enough to answer a short list outright, little enough that several matches
+// don't bury the rows grep found in the contents.
+const namePreviewLines = 12
+
+// writeNamePreview renders the opening lines of a file matched by its name,
+// gutter-numbered like context lines so a line number can become a #L.. read.
+// A file that can't be read (too large, unreadable) leaves just its URI, which
+// is still the old behaviour rather than an error.
+func writeNamePreview(sb *strings.Builder, fs *sandboxfs.FS, path string) {
+	body, err := fs.Read(path)
+	if err != nil {
+		return
+	}
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
+		sb.WriteString("  (empty file)\n")
+		return
+	}
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if i >= namePreviewLines {
+			more := len(lines) - namePreviewLines
+			noun := "lines"
+			if more == 1 {
+				noun = "line"
+			}
+			fmt.Fprintf(sb, "  … %d more %s — read the file for the rest\n", more, noun)
+			break
+		}
+		fmt.Fprintf(sb, "  %d  %s\n", i+1, line)
+	}
 }
 
 // scopeRel turns an FS-relative path into one relative to the scope root.

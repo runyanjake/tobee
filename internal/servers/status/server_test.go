@@ -1,9 +1,13 @@
 package status
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/runyanjake/tobee/internal/abilities"
+	"github.com/runyanjake/tobee/internal/mcphost"
 )
 
 func TestParseWindow(t *testing.T) {
@@ -76,5 +80,28 @@ func TestParseSince(t *testing.T) {
 
 	if _, err := parseSince(json.RawMessage(`{"window":"nonsense"}`)); err == nil {
 		t.Fatal("parseSince with a bad window: want error")
+	}
+}
+
+// A verbatim result is appended to the reply whether or not the reply is about
+// it, so a stray status_summary call put "I've handled 3 messages on Discord"
+// at the end of answers about shopping lists. The summary now informs the model
+// instead of rendering itself; the report, which a person asks for explicitly
+// and which must stay exact, is still verbatim (D-030, D-064).
+func TestOnlyTheReportRendersItself(t *testing.T) {
+	h := mcphost.New()
+	t.Cleanup(h.Close)
+	if err := h.ConnectInProcess(context.Background(), New("", abilities.NewRegistry())); err != nil {
+		t.Fatal(err)
+	}
+	verbatim := map[string]bool{}
+	for _, name := range h.VerbatimTools() {
+		verbatim[name] = true
+	}
+	if verbatim["status_summary"] {
+		t.Error("status_summary is verbatim: a stray call appends plumbing to an unrelated reply")
+	}
+	if !verbatim["status_report"] {
+		t.Errorf("status_report must stay verbatim so its numbers can't be reworded; verbatim = %v", verbatim)
 	}
 }

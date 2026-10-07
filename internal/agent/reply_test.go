@@ -235,3 +235,48 @@ func TestSubsumedByVerbatimStaysNarrow(t *testing.T) {
 		t.Fatal("spoken was dropped with no verbatim block present")
 	}
 }
+
+// "What is in my shopping list?" came back with the list in spoken and the same
+// list again as an artifact, so the user read it twice. One schema holds the
+// same content in two fields and rendering both renders the duplicate (D-064).
+func TestRenderReplyDropsAnArtifactAlreadySpoken(t *testing.T) {
+	const list = "- Milk\n- Bread\n- Eggs\n- Apples"
+	got := renderReply(
+		replyArgs{
+			Spoken:    "Your shopping list includes:\n" + list,
+			Artifacts: []replyArtifact{{Body: list}},
+		}, nil, nil, nil)
+
+	if want := "Your shopping list includes:\n" + list; got != want {
+		t.Fatalf("renderReply() = %q, want %q", got, want)
+	}
+	if strings.Count(got, "- Milk") != 1 {
+		t.Fatalf("the list is still rendered twice:\n%s", got)
+	}
+}
+
+func TestRenderReplyKeepsArtifactsThatAddSomething(t *testing.T) {
+	const code = "func main() {\n\tprintln(\"hi\")\n}"
+	got := renderReply(
+		replyArgs{
+			Spoken:    "Here's the program you asked for.",
+			Artifacts: []replyArtifact{{Lang: "go", Body: code}},
+		}, nil, nil, nil)
+
+	if !strings.Contains(got, "```go\n"+code+"\n```") {
+		t.Fatalf("a genuine artifact was dropped:\n%s", got)
+	}
+}
+
+// An artifact that restates verbatim tool output goes too: the tool's own text
+// is already appended by code.
+func TestRenderReplyDropsAnArtifactAlreadyInVerbatim(t *testing.T) {
+	const body = "j-512112f8  Sat 10 Oct 3:30pm  -  Text Darren"
+	got := renderReply(
+		replyArgs{Spoken: "Here's what's set.", Artifacts: []replyArtifact{{Body: body}}},
+		[]VerbatimBlock{{Tool: "schedule_list", Body: body}}, nil, nil)
+
+	if strings.Count(got, "j-512112f8") != 1 {
+		t.Fatalf("the schedule is rendered twice:\n%s", got)
+	}
+}

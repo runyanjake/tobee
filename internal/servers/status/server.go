@@ -1,5 +1,8 @@
-// Package status is the built-in "status" MCP server; its summary and report
-// tools are Verbatim (D-030), rendered by each abilities.Reporter.
+// Package status is the built-in "status" MCP server, rendered by each
+// abilities.Reporter. Only the report is Verbatim (D-030): a verbatim result is
+// appended to the reply whether or not the reply is about it, so a stray
+// summary call put "I've handled 3 messages on Discord" at the end of answers
+// about shopping lists (D-064).
 package status
 
 import (
@@ -34,10 +37,10 @@ func New(instructions string, reps *abilities.Registry) *mcpserver.Server {
 		Description: "How you yourself have been doing: messages handled, tool calls, failures, what you are waiting on. " +
 			"Use for 'how are things?' / 'what are you up to?'. " +
 			"Not for the user's own things — their reminders are schedule_list and their notes are in memory. " +
-			"Renders the finished answer itself — calling this tool answers the question. " +
+			"Returns the sentence to say; pass it on as written rather than recounting it. " +
+			"Say it only if that is what was asked — it is about you, not about anything the user keeps. " +
 			"Optional window=duration (\"1h\", \"24h\", \"7d\"; default 1h).",
 		InputSchema: windowSchema,
-		Verbatim:    true,
 		ReadOnly:    true,
 		Handler:     summaryHandler(reps),
 	})

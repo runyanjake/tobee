@@ -136,7 +136,9 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Keep the turn a single loop (D-043). Don't reintroduce fixed phases (a planning call, per-step executors, a synthesis pass); structure the model needs is a tool it can choose, like `plan`.
 - Give every built-in tool honest annotations: `ReadOnly` for reads, `OpenWorld` for anything reaching people or outside systems, `Destructive` for anything that deletes or irreversibly overwrites. Categories are derived from them and only group the menu (D-044); `Destructive` makes the user approve each call (D-047).
 - Output that isn't a valid choice is never appended to the conversation; the phase appends its nudge and retries once.
-- A reply says each thing once. Verbatim output is appended by code, so a spoken line the verbatim block already contains is dropped before rendering (D-062). Don't ask the model not to repeat itself and call that a guard.
+- A reply says each thing once. Verbatim output is appended by code, so a spoken line the verbatim block already contains is dropped, and so is an artifact already in `spoken` or in a verbatim block (D-062, D-064). Two fields that can hold the same content will hold it twice; dedupe where the reply is assembled, not by asking the model.
+- A tool result has to leave the turn able to take the next step. A row naming a file with nothing in it is a dead end: the model re-ran `memory_grep` four ways rather than reading the file, so a name match now carries the file's opening lines (D-064). When a result can only be acted on by calling something else, say enough that the next call is obvious — or just answer.
+- `Verbatim` means the result *is* the reply, appended whether or not the reply is about it. Use it only where a stray call would still be worth showing: `status_report` yes, `status_summary` no (D-030, D-064).
 - A Reporter's summary is what happened; a count of what is merely waiting is inventory and belongs in `status_report`, whose rows must name the thing, not just its id (D-053, D-062). A summary sentence that reads like another tool's answer will be chosen instead of that tool.
 - Changing something that already exists gets its own tool, and the create tool refuses the duplicate and names the id (D-063). With no update tool the model re-creates, and both copies stay live.
 - Anything that must be shown to the user word for word is enforced in code (`mcpserver.Tool.Verbatim` → `tobee/verbatim`), never by prompt instruction (D-030). A verbatim tool renders the finished answer, so the first one to run closes them all for that turn (D-060).
@@ -180,7 +182,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-064**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-065**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

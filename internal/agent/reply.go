@@ -42,12 +42,15 @@ type replyArgs struct {
 // reads about the world matches what happened.
 func renderReply(args replyArgs, verbatim []VerbatimBlock, actions []Action, problems []Problem) string {
 	var sb strings.Builder
-	if spoken := strings.TrimSpace(args.Spoken); spoken != "" && !subsumedByVerbatim(spoken, verbatim) {
+	spoken := strings.TrimSpace(args.Spoken)
+	if spoken != "" && !subsumedByVerbatim(spoken, verbatim) {
 		sb.WriteString(spoken)
+	} else {
+		spoken = "" // dropped, so there is nothing for a block to duplicate
 	}
 	for _, a := range args.Artifacts {
 		body := strings.TrimRight(a.Body, "\n")
-		if body == "" {
+		if body == "" || alreadyShown(body, spoken, verbatim) {
 			continue
 		}
 		if sb.Len() > 0 {
@@ -93,6 +96,22 @@ func renderReply(args replyArgs, verbatim []VerbatimBlock, actions []Action, pro
 		sb.WriteString(block)
 	}
 	return sb.String()
+}
+
+// alreadyShown reports whether a block repeats something the reply already
+// carries. "What is in my shopping list?" was answered with the list in
+// `spoken` and the same list again in `artifacts`, so the user read it twice:
+// two fields of one schema can hold the same content, and rendering both
+// faithfully renders the duplicate (D-064).
+func alreadyShown(body, spoken string, verbatim []VerbatimBlock) bool {
+	want := normalizeSpoken(body)
+	if want == "" {
+		return false
+	}
+	if spoken != "" && strings.Contains(normalizeSpoken(spoken), want) {
+		return true
+	}
+	return subsumedByVerbatim(body, verbatim)
 }
 
 // subsumedByVerbatim reports whether the spoken line says nothing the verbatim
