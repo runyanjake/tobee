@@ -28,8 +28,8 @@ import (
 	"github.com/runyanjake/tobee/internal/sandboxfs"
 	"github.com/runyanjake/tobee/internal/scheduler"
 	memoryserver "github.com/runyanjake/tobee/internal/servers/memory"
+	remindersserver "github.com/runyanjake/tobee/internal/servers/reminders"
 	resourcesserver "github.com/runyanjake/tobee/internal/servers/resources"
-	scheduleserver "github.com/runyanjake/tobee/internal/servers/schedule"
 	statusserver "github.com/runyanjake/tobee/internal/servers/status"
 	systemserver "github.com/runyanjake/tobee/internal/servers/system"
 	userserver "github.com/runyanjake/tobee/internal/servers/user"
@@ -150,7 +150,7 @@ func main() {
 	// --- Built-in MCP servers ---------------------------------------------
 	connect(memoryserver.New(instructions("memory"), memFS))
 	connect(statusserver.New(instructions("status"), abilityReg))
-	connect(scheduleserver.New(instructions("schedule"), jobs))
+	connect(remindersserver.New(instructions("reminders"), jobs))
 	connect(userserver.New(instructions("user"), out))
 	connect(resourcesserver.New(instructions("resources"), host))
 	if sys, err := systemserver.New(promptsDir + "/system"); err != nil {

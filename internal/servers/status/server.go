@@ -36,7 +36,7 @@ func New(instructions string, reps *abilities.Registry) *mcpserver.Server {
 		Name: "summary",
 		Description: "How you yourself have been doing: messages handled, tool calls, failures, what you are waiting on. " +
 			"Use for 'how are things?' / 'what are you up to?'. " +
-			"Not for the user's own things — their reminders are schedule_list and their notes are in memory. " +
+			"Not for the user's own things — their reminders are reminders_list and their notes are in memory. " +
 			"Returns the sentence to say; pass it on as written rather than recounting it. " +
 			"Say it only if that is what was asked — it is about you, not about anything the user keeps. " +
 			"Optional window=duration (\"1h\", \"24h\", \"7d\"; default 1h).",

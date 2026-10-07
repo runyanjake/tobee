@@ -711,3 +711,53 @@ func TestContentHitsAreUnchangedByThePreview(t *testing.T) {
 		t.Fatalf("a content hit was reported as a name match:\n%s", res.Text)
 	}
 }
+
+// The same failure recurs, so reflection draws the same lesson again. Each
+// duplicate used to push a distinct lesson out under the byte cap: one real
+// lessons.md carried "list the schedule for the id, then cancel it" seven times
+// out of sixteen lines (D-065).
+func TestAppendLessonsDropsOnesAlreadyLearned(t *testing.T) {
+	_, fs, _ := setup(t)
+	const person = "jake"
+	day := time.Date(2026, 10, 1, 9, 0, 0, 0, time.Local)
+
+	for i := 0; i < 5; i++ {
+		if err := AppendLessons(fs, person, []string{"list the schedule for the id, then cancel it"},
+			day.AddDate(0, 0, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Same advice, different date, different punctuation and case.
+	if err := AppendLessons(fs, person, []string{"List the schedule for the id, then cancel it."},
+		day.AddDate(0, 0, 9)); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := fs.Read("users/jake/" + lessonsPath)
+	if got := strings.Count(strings.ToLower(body), "then cancel it"); got != 1 {
+		t.Fatalf("lesson stored %d times, want 1:\n%s", got, body)
+	}
+	if !strings.Contains(body, "2026-10-01") {
+		t.Fatalf("the first date should be kept, not re-stamped:\n%s", body)
+	}
+
+	// A genuinely different lesson still lands.
+	if err := AppendLessons(fs, person, []string{"check memory before saying you don't know"},
+		day.AddDate(0, 0, 10)); err != nil {
+		t.Fatal(err)
+	}
+	body, _ = fs.Read("users/jake/" + lessonsPath)
+	if !strings.Contains(body, "check memory before") {
+		t.Fatalf("a new lesson was dropped:\n%s", body)
+	}
+}
+
+func TestLessonKeyIgnoresDateBulletAndCase(t *testing.T) {
+	a := lessonKey("- 2026-10-06 list the schedule for the id, then cancel it")
+	b := lessonKey("-  2026-10-07  List the schedule for the id, then cancel it.")
+	if a != b {
+		t.Fatalf("keys differ:\n%q\n%q", a, b)
+	}
+	if lessonKey("- 2026-10-06 something else") == a {
+		t.Fatal("different lessons collided")
+	}
+}

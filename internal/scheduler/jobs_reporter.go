@@ -81,7 +81,7 @@ func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string
 	// report's "Waiting" section above, not in a summary a person reads as an
 	// answer. Saying "I'm holding 2 reminders for you" here also made
 	// status_summary read like the reminder-listing tool, and the model
-	// started choosing it over schedule_list (D-053, D-062).
+	// started choosing it over reminders_list (D-053, D-062).
 	summary := ""
 	if len(done) > 0 {
 		summary = fmt.Sprintf("%d reminder%s of yours went off", len(done), schedPlural(len(done)))

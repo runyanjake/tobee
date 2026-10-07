@@ -1,6 +1,6 @@
-// Package schedule is the built-in "schedule" MCP server for model-created timers and
+// Package reminders is the built-in "reminders" MCP server for model-created timers and
 // recurring jobs; a fired job replies to the channel and user that created it.
-package schedule
+package reminders
 
 import (
 	"context"
@@ -25,7 +25,7 @@ const (
 )
 
 func New(instructions string, m *scheduler.JobManager) *mcpserver.Server {
-	srv := mcpserver.New("schedule", instructions)
+	srv := mcpserver.New("reminders", instructions)
 
 	// What is outstanding is context, not something to spend a call
 	// discovering. Derived from the job store on every read, so there is no
@@ -50,7 +50,7 @@ func New(instructions string, m *scheduler.JobManager) *mcpserver.Server {
 
 When the time arrives the "prompt" text comes back to you as a new message on the same channel, prefixed with "[reminder due: <name>]" — at that point you say it to the user, you don't describe the schedule. Use this for reminders, follow-ups, and periodic checks. Returns the job id — keep it if you may want to change or cancel it.
 
-Only for something new. To move, reword or reschedule a reminder that already exists, call schedule_update with its id: a second create leaves both to fire.`,
+Only for something new. To move, reword or reschedule a reminder that already exists, call reminders_update with its id: a second create leaves both to fire.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -66,13 +66,13 @@ Only for something new. To move, reword or reschedule a reminder that already ex
 
 	srv.Add(mcpserver.Tool{
 		Name: "update",
-		Description: `Change a reminder that already exists, keeping its id. This is what to call when the user moves, rewords or reschedules something they already asked for — not schedule_create, which would leave the original to fire as well.
+		Description: `Change a reminder that already exists, keeping its id. This is what to call when the user moves, rewords or reschedules something they already asked for — not reminders_create, which would leave the original to fire as well.
 
 Only the fields you pass change; the rest stay as they are. "at" and "cron" replace one another, so setting one clears the other.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"id":     {"type": "string", "description": "Job id, from schedule_create or schedule_list"},
+				"id":     {"type": "string", "description": "Job id, from reminders_create or reminders_list"},
 				"at":     {"type": "string", "description": "New fire time: RFC3339 absolute time or \"in <duration>\". Clears cron."},
 				"cron":   {"type": "string", "description": "New cron expression. Clears at."},
 				"prompt": {"type": "string", "description": "New note to come back to you when it fires. Rewrite this when the old text no longer says what the user needs to hear."},
@@ -89,7 +89,7 @@ Only the fields you pass change; the rest stay as they are. "at" and "cron" repl
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"id": {"type": "string", "description": "Job id returned by schedule_create"}
+				"id": {"type": "string", "description": "Job id returned by reminders_create"}
 			},
 			"required": ["id"]
 		}`),
@@ -123,7 +123,7 @@ func createHandler(m *scheduler.JobManager) mcpserver.Handler {
 		}
 		s, ok := scope.From(ctx)
 		if !ok || s.Connector == "" || s.Channel == "" {
-			return "", fmt.Errorf(`schedule_create unavailable: no originating channel attached to this turn`)
+			return "", fmt.Errorf(`reminders_create unavailable: no originating channel attached to this turn`)
 		}
 
 		j := scheduler.Job{
@@ -154,7 +154,7 @@ func createHandler(m *scheduler.JobManager) mcpserver.Handler {
 				if when == "" {
 					when = scheduler.FormatWhen(clash.At)
 				}
-				return "", fmt.Errorf("%s already covers that (%s, %q). Change that one with schedule_update, or cancel it first — a second reminder would fire as well",
+				return "", fmt.Errorf("%s already covers that (%s, %q). Change that one with reminders_update, or cancel it first — a second reminder would fire as well",
 					clash.ID, when, clash.Prompt)
 			}
 		}
@@ -189,7 +189,7 @@ func updateHandler(m *scheduler.JobManager) mcpserver.Handler {
 		}
 		id := strings.TrimSpace(in.ID)
 		if id == "" {
-			return "", fmt.Errorf("id is required (schedule_list gives the ids)")
+			return "", fmt.Errorf("id is required (reminders_list gives the ids)")
 		}
 		hasAt := in.At != nil && strings.TrimSpace(*in.At) != ""
 		hasCron := in.Cron != nil && strings.TrimSpace(*in.Cron) != ""

@@ -663,8 +663,16 @@ func AppendLessons(fs *sandboxfs.FS, person string, lessons []string, now time.T
 
 	stamp := now.Format("2006-01-02")
 	lines := splitLines(body)
-	for i, l := range lessons {
-		if i >= lessonsMaxPerRun {
+	// The same failure recurs, so the same lesson gets drawn again. Under the
+	// byte cap each duplicate evicts an older, different lesson: one file held
+	// "list the schedule for the id, then cancel it" seven times (D-065).
+	seen := map[string]bool{}
+	for _, l := range lines {
+		seen[lessonKey(l)] = true
+	}
+	kept := 0
+	for _, l := range lessons {
+		if kept >= lessonsMaxPerRun {
 			break
 		}
 		if l = strings.TrimSpace(strings.ReplaceAll(l, "\n", " ")); l == "" {
@@ -673,9 +681,25 @@ func AppendLessons(fs *sandboxfs.FS, person string, lessons []string, now time.T
 		if len(l) > lessonLineMax {
 			l = l[:lessonLineMax] + "…"
 		}
+		key := lessonKey("- " + stamp + " " + l)
+		if key == "" || seen[key] {
+			continue // already learned; re-dating it would only cost a line
+		}
+		seen[key] = true
 		lines = append(lines, "- "+stamp+" "+l)
+		kept++
 	}
 	return fs.Write(file, trimToBytes(lines, lessonsMaxBytes))
+}
+
+// lessonKey is a lesson's text without its bullet or date, folded for
+// comparison, so the same advice learned on two days counts once.
+func lessonKey(line string) string {
+	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "-"))
+	if len(s) > 10 && s[4] == '-' && s[7] == '-' {
+		s = strings.TrimSpace(s[10:]) // strip a leading YYYY-MM-DD
+	}
+	return strings.ToLower(strings.Join(strings.Fields(strings.Trim(s, ".")), " "))
 }
 
 func splitLines(body string) []string {

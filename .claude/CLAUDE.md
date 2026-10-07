@@ -31,7 +31,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
 | `internal/agent/` | `Runtime`, `Strategy`, `Loop` (the ReAct agent loop with `reply` and `plan` tools), context builder, state templates. |
 | `internal/mcphost/` | MCP host: sessions, catalog, trust, `MCP_SERVER_*` config, resource-subscription source. |
 | `internal/mcpserver/` | Builder for built-in MCP servers (scope from `_meta`, error results, tobee metadata). |
-| `internal/servers/` | Built-in MCP servers: `memory/`, `workspace/`, `schedule/`, `status/`, `user/`, `resources/` (the read path), `system/` (pinned prompts). |
+| `internal/servers/` | Built-in MCP servers: `memory/`, `workspace/`, `reminders/`, `status/`, `user/`, `resources/` (the read path), `system/` (pinned prompts). |
 | `internal/connectors/` | `discord/` and `email/`: each is a source, a delivery channel, and an MCP server. |
 | `internal/delivery/` | `Router` from connector name to `Channel` / `Editor` / `Reactor`. |
 | `internal/llm/` | `Model` interface (`Decide`: choose one tool), message types. `openai/`: the OpenAI-compatible provider (structured output, schema sanitizer, tool menu). |
@@ -112,6 +112,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - A way for the loop to stall is a distinct log event with the counters behind it, not a field on a shared line: `turn stalled`, `turn too large`, `turn out of time`, `tool closed` (D-059).
 - Anything in the reasoning chain logs through `telemetry.Log(ctx, level, telemetry.<Category>, …)` with the turn's `ctx`, so it carries `cat`, `task`, `phase`, and `step`. Wrap message and tool text in `telemetry.Content` so it is capped. Plain `slog` calls are fine elsewhere; they are tagged `cat=system` automatically. Don't log the whole conversation per LLM call; `decide` logs only new messages (D-040).
 - Tools live on an MCP server and are exposed as `<server>_<tool>` (`memory_write`). Server names are lowercase `[a-z0-9_-]`. Never use dots: hosted APIs reject them (D-033).
+- Name a server and its tools what the user calls the thing. "Can you list all my reminders" went to `status_summary` because nothing in the catalog said *reminder* — the tools said *schedule* (D-065). An internal package can keep its own name; what the model reads must match the request.
+- A prompt that explains why a tool is unnecessary will stop it being called when it is necessary. `prompts/servers/reminders.md` said the pinned block meant "you don't need to list them", and a request to list went elsewhere (D-065).
 
 ### Filesystem & memory
 
@@ -160,6 +162,8 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Prompts & config
 
+- A prompt never shows a specimen of what the model is asked to produce. The reflect prompt's example lesson came back as the literal lesson seven times, and the turn directive's example reminder came back as the reminder (D-066). Describe the shape; don't write one out.
+- A lesson is never about call mechanics. Code refuses a repeated call and ends a circling turn (D-051, D-057); a lesson saying "use it once" or "vary the tool" fights that guard, and the guard wins while the turn burns steps (D-066). Lessons carry which tool answers what, what to read before acting, an order that worked.
 - Prompts carry no call syntax and no worked argument values: the model copies `tool({args})` as text, and copies a literal example value as a literal value (D-062). Describe what an argument does in words. `TestPromptsCarryNoCallSyntaxOrWorkedArguments` fails on `name(` + `{`/`"` and on any `word=`.
 - Prompt text lives in `prompts/`, not in Go string literals. Existing exceptions:
   - protocol nudges and the `reply` / `plan` / `lessons` schemas in `loop.go`, `reply.go`, `plan.go`, `reflect.go`
@@ -182,7 +186,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-065**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-067**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

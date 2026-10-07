@@ -10,7 +10,7 @@ import (
 // The summary is activity, not inventory. Saying "I'm holding 2 reminders for
 // you" here put a count of what was merely waiting into a sentence people read
 // as an answer, against D-053 — and it made status_summary read like the
-// reminder-listing tool, so the model began choosing it over schedule_list and
+// reminder-listing tool, so the model began choosing it over reminders_list and
 // answered "List all reminders" with a status line (D-062). What is waiting
 // belongs in the report, which already lists every job.
 func TestSummaryIsSilentAboutPendingReminders(t *testing.T) {

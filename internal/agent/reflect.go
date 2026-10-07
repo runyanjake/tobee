@@ -65,8 +65,9 @@ func (r *Reflector) Reflect(ctx context.Context, sess *session.Session) {
 	}}
 	d, err := decide(ctx, r.model, conv, []llm.ToolSpec{{
 		Name: lessonsTool,
-		Description: "Record what to do differently next time. Each lesson must be about tobee's own tools " +
-			"or how it worked, never about the person or anything they said.",
+		Description: "Record what to do differently next time: which tool answers a kind of question, " +
+			"what to read before acting, an order of steps that worked. Never about the person or " +
+			"anything they said, and never about repeating or varying calls — the harness handles that.",
 		InputSchema: lessonsSchema,
 		Category:    llm.CategoryFinish,
 	}})

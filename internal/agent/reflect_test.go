@@ -36,7 +36,7 @@ func failedSession() *session.Session {
 			Outcome: &session.Outcome{
 				Status:   "replied",
 				Steps:    4,
-				Problems: []string{"schedule_list: called with the same arguments 3 times; closed for the turn"},
+				Problems: []string{"reminders_list: called with the same arguments 3 times; closed for the turn"},
 			},
 		}},
 	}
@@ -47,16 +47,16 @@ func failedSession() *session.Session {
 func TestReflectSavesLessonsFromFailures(t *testing.T) {
 	r, fake, saved := reflector(t, call{
 		name: lessonsTool,
-		args: `{"lessons":["to clear a reminder, call schedule_list for the id then schedule_cancel"]}`,
+		args: `{"lessons":["to clear a reminder, call reminders_list for the id then reminders_cancel"]}`,
 	})
 	r.Reflect(context.Background(), failedSession())
 
-	if len(*saved) != 1 || !strings.Contains((*saved)[0], "schedule_cancel") {
+	if len(*saved) != 1 || !strings.Contains((*saved)[0], "reminders_cancel") {
 		t.Fatalf("saved = %q", *saved)
 	}
 	// The model is given the recorded facts and nothing else.
 	facts := fake.requests[0][0].Content
-	for _, want := range []string{"<failures>", "clear my reminders for today", "schedule_list: called with the same arguments"} {
+	for _, want := range []string{"<failures>", "clear my reminders for today", "reminders_list: called with the same arguments"} {
 		if !strings.Contains(facts, want) {
 			t.Fatalf("facts missing %q:\n%s", want, facts)
 		}

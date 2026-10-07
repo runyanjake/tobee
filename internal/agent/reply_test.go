@@ -123,7 +123,7 @@ func TestRenderReplyAppendsWhatWentWrong(t *testing.T) {
 		replyArgs{Spoken: "I couldn't find any reminders for you to clear today."},
 		nil, nil,
 		[]Problem{
-			{Kind: "repeated", Tool: "schedule_list", Detail: "I kept calling schedule_list the same way (3 times), so I stopped using it"},
+			{Kind: "repeated", Tool: "reminders_list", Detail: "I kept calling reminders_list the same way (3 times), so I stopped using it"},
 			{Kind: "budget", Detail: "I ran out of steps after 12 tries, so this may be unfinished"},
 		},
 	)
@@ -131,7 +131,7 @@ func TestRenderReplyAppendsWhatWentWrong(t *testing.T) {
 	for _, want := range []string{
 		"I couldn't find any reminders",
 		"⚠️ I didn't finish this cleanly:",
-		"• I kept calling schedule_list the same way (3 times), so I stopped using it",
+		"• I kept calling reminders_list the same way (3 times), so I stopped using it",
 		"• I ran out of steps after 12 tries, so this may be unfinished",
 	} {
 		if !strings.Contains(got, want) {
@@ -274,7 +274,7 @@ func TestRenderReplyDropsAnArtifactAlreadyInVerbatim(t *testing.T) {
 	const body = "j-512112f8  Sat 10 Oct 3:30pm  -  Text Darren"
 	got := renderReply(
 		replyArgs{Spoken: "Here's what's set.", Artifacts: []replyArtifact{{Body: body}}},
-		[]VerbatimBlock{{Tool: "schedule_list", Body: body}}, nil, nil)
+		[]VerbatimBlock{{Tool: "reminders_list", Body: body}}, nil, nil)
 
 	if strings.Count(got, "j-512112f8") != 1 {
 		t.Fatalf("the schedule is rendered twice:\n%s", got)
