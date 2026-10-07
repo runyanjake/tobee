@@ -182,3 +182,56 @@ func TestRecoveredProblemsAreNotShown(t *testing.T) {
 		t.Fatalf("renderProblems() = %q, want the promoted problem shown", got)
 	}
 }
+
+// Asked for its status, the model answered by quoting a sentence out of the
+// status_summary result it had just read — and code appends that result to the
+// reply anyway, so the user got the same line twice, the second time inside a
+// longer block. The harness note telling it not to repeat the output was in
+// context and ignored (D-062).
+func TestRenderReplyDropsSpokenAlreadyInVerbatim(t *testing.T) {
+	const body = "I've handled 7 messages on Discord. I've made 9 tool calls since starting up. I'm holding 2 reminders for you."
+
+	cases := []struct {
+		name   string
+		spoken string
+		want   string
+	}{
+		{"quoted one sentence out of it", "I'm holding 2 reminders for you.", body},
+		{"quoted the whole thing", body, body},
+		{"requoted with different case and spacing", "i'm  holding 2 REMINDERS for you.", body},
+		{"said something of its own", "Here's where things stand.", "Here's where things stand.\n\n" + body},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := renderReply(replyArgs{Spoken: c.spoken},
+				[]VerbatimBlock{{Tool: "status_summary", Body: body}}, nil, nil)
+			if got != c.want {
+				t.Fatalf("renderReply() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// Dropping a line the user needed is worse than repeating one, so the test is
+// containment after normalising case and spacing — nothing fuzzier.
+func TestSubsumedByVerbatimStaysNarrow(t *testing.T) {
+	const body = "Discord is connected and saw 1 inbound message in the window."
+	verbatim := []VerbatimBlock{{Tool: "status_summary", Body: body}}
+
+	for _, spoken := range []string{
+		"Discord checked and found 1 inbound message in the last hour.", // reworded, not quoted
+		"Discord is connected, and there's one more thing worth saying.",
+		"",
+	} {
+		if subsumedByVerbatim(spoken, verbatim) {
+			t.Fatalf("%q was treated as a duplicate", spoken)
+		}
+	}
+	if !subsumedByVerbatim("Discord is connected", verbatim) {
+		t.Fatal("a quoted fragment was not recognised")
+	}
+	// Nothing to be subsumed by.
+	if subsumedByVerbatim("Anything at all", nil) {
+		t.Fatal("spoken was dropped with no verbatim block present")
+	}
+}

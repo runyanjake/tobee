@@ -136,6 +136,9 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 - Keep the turn a single loop (D-043). Don't reintroduce fixed phases (a planning call, per-step executors, a synthesis pass); structure the model needs is a tool it can choose, like `plan`.
 - Give every built-in tool honest annotations: `ReadOnly` for reads, `OpenWorld` for anything reaching people or outside systems, `Destructive` for anything that deletes or irreversibly overwrites. Categories are derived from them and only group the menu (D-044); `Destructive` makes the user approve each call (D-047).
 - Output that isn't a valid choice is never appended to the conversation; the phase appends its nudge and retries once.
+- A reply says each thing once. Verbatim output is appended by code, so a spoken line the verbatim block already contains is dropped before rendering (D-062). Don't ask the model not to repeat itself and call that a guard.
+- A Reporter's summary is what happened; a count of what is merely waiting is inventory and belongs in `status_report`, whose rows must name the thing, not just its id (D-053, D-062). A summary sentence that reads like another tool's answer will be chosen instead of that tool.
+- Changing something that already exists gets its own tool, and the create tool refuses the duplicate and names the id (D-063). With no update tool the model re-creates, and both copies stay live.
 - Anything that must be shown to the user word for word is enforced in code (`mcpserver.Tool.Verbatim` → `tobee/verbatim`), never by prompt instruction (D-030). A verbatim tool renders the finished answer, so the first one to run closes them all for that turn (D-060).
 - A note the loop writes to the model is harness text: append it with `AppendHarness` in its own message, never onto a tool result. Anything on a tool result is saved to the session and ends up in a transcript, where a later search will find it (D-060).
 - Never merge the user's text into a phase template. Directives go in `<phase>` tags (D-029).
@@ -155,6 +158,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Prompts & config
 
+- Prompts carry no call syntax and no worked argument values: the model copies `tool({args})` as text, and copies a literal example value as a literal value (D-062). Describe what an argument does in words. `TestPromptsCarryNoCallSyntaxOrWorkedArguments` fails on `name(` + `{`/`"` and on any `word=`.
 - Prompt text lives in `prompts/`, not in Go string literals. Existing exceptions:
   - protocol nudges and the `reply` / `plan` / `lessons` schemas in `loop.go`, `reply.go`, `plan.go`, `reflect.go`
   - the `<lessons>` framing in the memory server
@@ -176,7 +180,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Documentation
 
-- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-062**.
+- A design decision change adds a new `D-0xx` row in [DESIGN.md](DESIGN.md#key-decisions). Mark the old row superseded and log the change in [IMPLEMENTATION.md](IMPLEMENTATION.md). Never reuse an ID: code comments cite them. The next free ID is **D-064**.
 - Routine code changes don't need doc edits. Update docs when shape, contracts, or config change.
 
 ### Working with the user

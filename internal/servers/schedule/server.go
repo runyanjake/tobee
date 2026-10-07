@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/runyanjake/tobee/internal/mcpserver"
 	"github.com/runyanjake/tobee/internal/scheduler"
@@ -47,7 +48,9 @@ func New(instructions string, m *scheduler.JobManager) *mcpserver.Server {
         and prefer an absolute timestamp with that offset over a duration you worked out in your head.
 - cron: standard 5-field cron expression ("0 9 * * MON-FRI") OR robfig descriptor ("@every 30m", "@hourly", "@daily").
 
-When the time arrives the "prompt" text comes back to you as a new message on the same channel, prefixed with "[reminder due: <name>]" — at that point you say it to the user, you don't describe the schedule. Use this for reminders, follow-ups, and periodic checks. Returns the job id — keep it if you may want to cancel.`,
+When the time arrives the "prompt" text comes back to you as a new message on the same channel, prefixed with "[reminder due: <name>]" — at that point you say it to the user, you don't describe the schedule. Use this for reminders, follow-ups, and periodic checks. Returns the job id — keep it if you may want to change or cancel it.
+
+Only for something new. To move, reword or reschedule a reminder that already exists, call schedule_update with its id: a second create leaves both to fire.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -59,6 +62,25 @@ When the time arrives the "prompt" text comes back to you as a new message on th
 			"required": ["prompt"]
 		}`),
 		Handler: createHandler(m),
+	})
+
+	srv.Add(mcpserver.Tool{
+		Name: "update",
+		Description: `Change a reminder that already exists, keeping its id. This is what to call when the user moves, rewords or reschedules something they already asked for — not schedule_create, which would leave the original to fire as well.
+
+Only the fields you pass change; the rest stay as they are. "at" and "cron" replace one another, so setting one clears the other.`,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"id":     {"type": "string", "description": "Job id, from schedule_create or schedule_list"},
+				"at":     {"type": "string", "description": "New fire time: RFC3339 absolute time or \"in <duration>\". Clears cron."},
+				"cron":   {"type": "string", "description": "New cron expression. Clears at."},
+				"prompt": {"type": "string", "description": "New note to come back to you when it fires. Rewrite this when the old text no longer says what the user needs to hear."},
+				"name":   {"type": "string", "description": "New short label."}
+			},
+			"required": ["id"]
+		}`),
+		Handler: updateHandler(m),
 	})
 
 	srv.Add(mcpserver.Tool{
@@ -122,6 +144,21 @@ func createHandler(m *scheduler.JobManager) mcpserver.Handler {
 			j.At = t
 		}
 
+		// A second reminder for something already scheduled is nearly always an
+		// edit the model expressed as a create, which leaves both to fire.
+		// Refuse it here and name the id, the way a duplicate memory write is
+		// refused (D-054, D-063).
+		if s.User != "" {
+			if clash, ok := duplicatePending(m.ForUser(s.User), j.Prompt); ok {
+				when := clash.Cron
+				if when == "" {
+					when = scheduler.FormatWhen(clash.At)
+				}
+				return "", fmt.Errorf("%s already covers that (%s, %q). Change that one with schedule_update, or cancel it first — a second reminder would fire as well",
+					clash.ID, when, clash.Prompt)
+			}
+		}
+
 		created, err := m.Create(j)
 		if err != nil {
 			return "", err
@@ -134,6 +171,108 @@ func createHandler(m *scheduler.JobManager) mcpserver.Handler {
 		return fmt.Sprintf("scheduled %s (fires %s, %s)", created.ID,
 			scheduler.FormatWhen(created.At), created.At.Format(time.RFC3339)), nil
 	}
+}
+
+func updateHandler(m *scheduler.JobManager) mcpserver.Handler {
+	return func(_ context.Context, args json.RawMessage) (string, error) {
+		// Pointers, so "not passed" is distinguishable from "set to empty":
+		// moving a time must not blank the prompt.
+		var in struct {
+			ID     string  `json:"id"`
+			At     *string `json:"at"`
+			Cron   *string `json:"cron"`
+			Prompt *string `json:"prompt"`
+			Name   *string `json:"name"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil {
+			return "", fmt.Errorf("invalid args: %w", err)
+		}
+		id := strings.TrimSpace(in.ID)
+		if id == "" {
+			return "", fmt.Errorf("id is required (schedule_list gives the ids)")
+		}
+		hasAt := in.At != nil && strings.TrimSpace(*in.At) != ""
+		hasCron := in.Cron != nil && strings.TrimSpace(*in.Cron) != ""
+		if hasAt && hasCron {
+			return "", fmt.Errorf(`pass "at" or "cron", not both: a reminder is either one-shot or recurring`)
+		}
+
+		var p scheduler.JobPatch
+		if hasAt {
+			t, err := parseAt(*in.At)
+			if err != nil {
+				return "", err
+			}
+			p.At = &t
+		}
+		if hasCron {
+			p.Cron = in.Cron
+		}
+		if in.Prompt != nil {
+			p.Prompt = in.Prompt
+		}
+		if in.Name != nil {
+			p.Name = in.Name
+		}
+		if p.At == nil && p.Cron == nil && p.Prompt == nil && p.Name == nil {
+			return "", fmt.Errorf("nothing to change: pass at, cron, prompt or name")
+		}
+
+		updated, err := m.Update(id, p)
+		if err != nil {
+			return "", err
+		}
+		if updated.IsRecurring() {
+			return fmt.Sprintf("updated %s (cron %s)", updated.ID, updated.Cron), nil
+		}
+		return fmt.Sprintf("updated %s (now fires %s, %s)", updated.ID,
+			scheduler.FormatWhen(updated.At), updated.At.Format(time.RFC3339)), nil
+	}
+}
+
+// minDuplicatePrompt keeps the containment test off very short prompts, where
+// one reminder's words sit inside an unrelated one by coincidence.
+const minDuplicatePrompt = 10
+
+// duplicatePending finds a pending job that is plainly the same reminder. The
+// test is deliberately narrow — equal once case, punctuation and spacing are
+// ignored, or one wholly contained in the other — because refusing a genuinely
+// new reminder costs more than letting a near-duplicate through. A refusal is
+// per argument set, so a reworded prompt still goes through (D-063).
+func duplicatePending(pending []scheduler.Job, prompt string) (scheduler.Job, bool) {
+	want := normalizePrompt(prompt)
+	if len(want) < minDuplicatePrompt {
+		return scheduler.Job{}, false
+	}
+	for _, j := range pending {
+		got := normalizePrompt(j.Prompt)
+		if len(got) < minDuplicatePrompt {
+			continue
+		}
+		if got == want || strings.Contains(got, want) || strings.Contains(want, got) {
+			return j, true
+		}
+	}
+	return scheduler.Job{}, false
+}
+
+// normalizePrompt reduces a reminder to its words: lowercase, letters and
+// digits only, single-spaced.
+func normalizePrompt(s string) string {
+	var b strings.Builder
+	gap := false
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if gap && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			gap = false
+			b.WriteRune(r)
+			continue
+		}
+		gap = true
+	}
+	return b.String()
 }
 
 func cancelHandler(m *scheduler.JobManager) mcpserver.Handler {

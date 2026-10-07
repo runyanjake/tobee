@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,6 +149,57 @@ func (m *JobManager) Create(j Job) (Job, error) {
 	slog.Info("jobs: created", "id", j.ID, "name", j.Name,
 		"cron", j.Cron, "at", j.At, "connector", j.Connector, "channel", j.Channel)
 	return j, nil
+}
+
+// JobPatch is the set of fields an update may change. A nil field is left
+// alone, so moving a reminder's time doesn't require restating its text.
+type JobPatch struct {
+	At     *time.Time
+	Cron   *string
+	Prompt *string
+	Name   *string
+}
+
+// Update edits a pending job in place, keeping its id so the reminder the user
+// already knows about stays the same reminder. Without this the model answers
+// "change it to 1pm" with a second Create, leaving both to fire (D-063).
+func (m *JobManager) Update(id string, p JobPatch) (Job, error) {
+	m.mu.Lock()
+	j, ok := m.jobs[id]
+	m.mu.Unlock()
+	if !ok {
+		return Job{}, fmt.Errorf("jobs: no reminder with id %q", id)
+	}
+
+	// Patch a copy and validate it before the live timer is touched: a bad
+	// change must leave the existing reminder running rather than drop it.
+	next := j
+	if p.Prompt != nil {
+		next.Prompt = strings.TrimSpace(*p.Prompt)
+	}
+	if p.Name != nil {
+		next.Name = strings.TrimSpace(*p.Name)
+	}
+	// "at" and "cron" are mutually exclusive, so setting one clears the other.
+	if p.At != nil {
+		next.At, next.Cron = *p.At, ""
+	}
+	if p.Cron != nil {
+		next.Cron, next.At = strings.TrimSpace(*p.Cron), time.Time{}
+	}
+	if err := validate(&next); err != nil {
+		return Job{}, err
+	}
+	if err := m.store.Save(next); err != nil {
+		return Job{}, err
+	}
+	// schedule replaces the existing entry and rewrites m.jobs under the lock.
+	if err := m.schedule(next); err != nil {
+		return Job{}, err
+	}
+	slog.Info("jobs: updated", "id", next.ID, "name", next.Name,
+		"cron", next.Cron, "at", next.At)
+	return next, nil
 }
 
 // Cancel of an unknown id is not an error: it may have raced a one-shot's self-cleanup.

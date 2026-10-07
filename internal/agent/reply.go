@@ -42,7 +42,7 @@ type replyArgs struct {
 // reads about the world matches what happened.
 func renderReply(args replyArgs, verbatim []VerbatimBlock, actions []Action, problems []Problem) string {
 	var sb strings.Builder
-	if spoken := strings.TrimSpace(args.Spoken); spoken != "" {
+	if spoken := strings.TrimSpace(args.Spoken); spoken != "" && !subsumedByVerbatim(spoken, verbatim) {
 		sb.WriteString(spoken)
 	}
 	for _, a := range args.Artifacts {
@@ -93,6 +93,32 @@ func renderReply(args replyArgs, verbatim []VerbatimBlock, actions []Action, pro
 		sb.WriteString(block)
 	}
 	return sb.String()
+}
+
+// subsumedByVerbatim reports whether the spoken line says nothing the verbatim
+// block is about to say anyway. Verbatim output is appended to the reply by
+// code (D-030), and the model — having just read that output as a tool result
+// — answers by quoting a line out of it, so the user reads the same sentence
+// twice. The harness already asks it not to and it does anyway; a prompt
+// instruction is not a guard (D-051), so drop the duplicate here (D-062).
+func subsumedByVerbatim(spoken string, verbatim []VerbatimBlock) bool {
+	want := normalizeSpoken(spoken)
+	if want == "" {
+		return false
+	}
+	for _, v := range verbatim {
+		if strings.Contains(normalizeSpoken(v.Body), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeSpoken lowercases and collapses whitespace, so wording that differs
+// only in spacing or case still counts as the same sentence. Deliberately not
+// fuzzier than that: dropping a line the user needed is worse than repeating one.
+func normalizeSpoken(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
 }
 
 // renderProblems is the code-written account of a turn that didn't work: the

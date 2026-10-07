@@ -53,15 +53,23 @@ func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string
 	} else {
 		full.WriteString("Waiting:\n")
 		for _, j := range jobs {
-			name := j.Name
-			if name == "" {
-				name = j.ID
+			// The report is the only place pending reminders are listed, so a
+			// row has to say what the reminder is for. Falling back to the id
+			// left "j-3ba7ff26 — once at 4:39pm" as the whole description
+			// whenever the model skipped the optional name, which is most of
+			// the time (D-062).
+			label := j.Name
+			if label == "" {
+				label = jobSummaryLabel(j.Prompt)
+			}
+			if label == "" {
+				label = j.ID
 			}
 			schedule := j.Cron
 			if schedule == "" && !j.At.IsZero() {
 				schedule = fmt.Sprintf("once at %s", FormatWhen(j.At))
 			}
-			line := fmt.Sprintf("  - %s — %s", name, schedule)
+			line := fmt.Sprintf("  - %s (%s) — %s", label, j.ID, schedule)
 			if next := r.m.nextFire(j); !next.IsZero() {
 				line += fmt.Sprintf(", next %s", FormatWhen(next))
 			}
@@ -69,19 +77,28 @@ func (r jobsReporter) Render(_ context.Context, since time.Time) (string, string
 		}
 	}
 
-	var summary string
-	switch {
-	case len(jobs) == 0 && len(done) == 0:
-		summary = ""
-	case len(jobs) == 0:
+	// Activity only. What is merely waiting is inventory: it belongs in the
+	// report's "Waiting" section above, not in a summary a person reads as an
+	// answer. Saying "I'm holding 2 reminders for you" here also made
+	// status_summary read like the reminder-listing tool, and the model
+	// started choosing it over schedule_list (D-053, D-062).
+	summary := ""
+	if len(done) > 0 {
 		summary = fmt.Sprintf("%d reminder%s of yours went off", len(done), schedPlural(len(done)))
-	case len(done) == 0:
-		summary = fmt.Sprintf("I'm holding %d reminder%s for you", len(jobs), schedPlural(len(jobs)))
-	default:
-		summary = fmt.Sprintf("%d reminder%s of yours went off and I'm still holding %d",
-			len(done), schedPlural(len(done)), len(jobs))
 	}
 	return full.String(), summary
+}
+
+// maxJobLabel keeps one reminder's text from dominating the report.
+const maxJobLabel = 72
+
+// jobSummaryLabel reduces a reminder's prompt to one readable line.
+func jobSummaryLabel(prompt string) string {
+	s := strings.Join(strings.Fields(prompt), " ")
+	if len(s) <= maxJobLabel {
+		return s
+	}
+	return strings.TrimSpace(s[:maxJobLabel]) + "…"
 }
 
 func schedPlural(n int) string {
