@@ -77,6 +77,5 @@ From the open questions in the former decision log and the latest commits (2026-
 1. **Confirm structured output in prod** (D-041). The cause of the text-written tool calls was found on 2026-09-28: Ollama's OpenAI endpoint ignores `tool_choice`. Every call now uses a JSON-schema `response_format`, which Ollama enforces by grammar. Verify on the prod Ollama and `qwen2.5:7b` that `agent: PROTOCOL VIOLATION` no longer appears and that tool choice is sensible.
 2. **Watch the agent loop on the prod model** (D-043): does `qwen2.5:7b` reply directly to chit-chat, look things up before answering, and call `plan` only for real multi-step work?
 3. **Validate the MCP platform in prod** (2026-09-28). Confirm `qwen2.5:7b` handles the renamed tools and `user_ask`. Test the email connector against a real mailbox. Watch tool-choice accuracy as external servers are added.
-4. **Run the suite against GNU grep** (D-061, 2026-10-06). `docker build --target test .` executes `go test ./...` against the image's grep; it has not been run yet because the Docker daemon was down. Until it has, GNU grep is the one variant search has never been exercised on — BSD grep passes on macOS, and the boot check would catch a broken binary at startup rather than silently.
 
 TODO: Confirm these priorities and add any roadmap items not recorded in the repo.

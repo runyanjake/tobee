@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/runyanjake/tobee/internal/mcphost"
 	"github.com/runyanjake/tobee/internal/scheduler"
@@ -106,27 +107,53 @@ func TestCreateConfirmationNamesTheFireTime(t *testing.T) {
 	}
 }
 
+// when renders a fire time the way the tools render it, so an assertion never
+// depends on the machine's zone. CI runs in a container with no TZ, where
+// time.Local is UTC and a hardcoded "1:00pm PDT" is "8:00pm UTC" (D-049).
+func when(t *testing.T, ts time.Time) string {
+	t.Helper()
+	return scheduler.FormatWhen(ts)
+}
+
+// soon is a fire time a couple of days out, computed rather than written down:
+// a literal date in the near future turns the test into a time bomb that fails
+// once that date passes, because a one-shot in the past is refused.
+func soon(offset time.Duration) time.Time {
+	return time.Now().Add(48*time.Hour + offset).Round(time.Minute)
+}
+
+// createdID pulls the job id out of "scheduled j-xxxx (fires ...)".
+func createdID(t *testing.T, text string) string {
+	t.Helper()
+	fields := strings.Fields(strings.TrimPrefix(text, "scheduled "))
+	if len(fields) == 0 {
+		t.Fatalf("no id in create result %q", text)
+	}
+	return fields[0]
+}
+
 // Asked to move a reminder, the model answered with a second schedule_create
 // and left both to fire — and the new one's prompt was the user's instruction
 // ("Change the reminder to 1pm instead of 3:30pm"), so the task text was lost
 // (D-063).
 func TestUpdateMovesAReminderInPlace(t *testing.T) {
 	h, _, ctx := setup(t)
+	first, moved := soon(0), soon(-150*time.Minute)
 
 	res, err := h.Call(ctx, "schedule_create", json.RawMessage(
-		`{"prompt":"Text Darren about if he can meet for basketball","at":"2026-10-10T15:30:00-07:00"}`))
+		`{"prompt":"Text Darren about if he can meet for basketball","at":"`+first.Format(time.RFC3339)+`"}`))
 	if err != nil || res.IsError {
 		t.Fatalf("create = %+v, %v", res, err)
 	}
-	id := strings.Fields(strings.TrimPrefix(res.Text, "scheduled "))[0]
+	id := createdID(t, res.Text)
 
 	res, err = h.Call(ctx, "schedule_update", json.RawMessage(
-		`{"id":"`+id+`","at":"2026-10-10T13:00:00-07:00"}`))
+		`{"id":"`+id+`","at":"`+moved.Format(time.RFC3339)+`"}`))
 	if err != nil || res.IsError {
 		t.Fatalf("update = %+v, %v", res, err)
 	}
-	if !strings.Contains(res.Text, id) || !strings.Contains(res.Text, "1:00pm") {
-		t.Fatalf("update result = %q", res.Text)
+	if !strings.Contains(res.Text, id) || !strings.Contains(res.Text, when(t, moved)) {
+		t.Fatalf("update result = %q, want it to name %s firing %s", res.Text, id, when(t, moved))
 	}
 
 	// One reminder, same id, new time, and the task text survived the move.
@@ -138,21 +165,22 @@ func TestUpdateMovesAReminderInPlace(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("got %d reminders, want 1:\n%s", len(rows), list.Text)
 	}
-	for _, want := range []string{id, "1:00pm", "Text Darren"} {
+	for _, want := range []string{id, when(t, moved), "Text Darren"} {
 		if !strings.Contains(list.Text, want) {
 			t.Fatalf("list missing %q:\n%s", want, list.Text)
 		}
 	}
-	if strings.Contains(list.Text, "3:30pm") {
+	if strings.Contains(list.Text, when(t, first)) {
 		t.Fatalf("the old fire time is still scheduled:\n%s", list.Text)
 	}
 }
 
 func TestUpdateKeepsFieldsItWasNotGiven(t *testing.T) {
 	h, _, ctx := setup(t)
+	at := soon(0)
 	res, _ := h.Call(ctx, "schedule_create", json.RawMessage(
-		`{"prompt":"Water the plants","at":"2026-10-10T15:30:00-07:00","name":"plants"}`))
-	id := strings.Fields(strings.TrimPrefix(res.Text, "scheduled "))[0]
+		`{"prompt":"Water the plants","at":"`+at.Format(time.RFC3339)+`","name":"plants"}`))
+	id := createdID(t, res.Text)
 
 	// Reword only: the fire time must survive.
 	if res, err := h.Call(ctx, "schedule_update", json.RawMessage(
@@ -160,7 +188,7 @@ func TestUpdateKeepsFieldsItWasNotGiven(t *testing.T) {
 		t.Fatalf("update = %+v, %v", res, err)
 	}
 	list, _ := h.Call(ctx, "schedule_list", json.RawMessage(`{}`))
-	for _, want := range []string{"feed the cat", "3:30pm", "plants"} {
+	for _, want := range []string{"feed the cat", when(t, at), "plants"} {
 		if !strings.Contains(list.Text, want) {
 			t.Fatalf("list missing %q:\n%s", want, list.Text)
 		}
@@ -169,14 +197,15 @@ func TestUpdateKeepsFieldsItWasNotGiven(t *testing.T) {
 
 func TestUpdateRejectsBadInput(t *testing.T) {
 	h, _, ctx := setup(t)
+	at, other := soon(0), soon(-150*time.Minute)
 	res, _ := h.Call(ctx, "schedule_create", json.RawMessage(
-		`{"prompt":"Water the plants","at":"2026-10-10T15:30:00-07:00"}`))
-	id := strings.Fields(strings.TrimPrefix(res.Text, "scheduled "))[0]
+		`{"prompt":"Water the plants","at":"`+at.Format(time.RFC3339)+`"}`))
+	id := createdID(t, res.Text)
 
 	for name, args := range map[string]string{
-		"unknown id":     `{"id":"j-nope","at":"2026-10-10T13:00:00-07:00"}`,
+		"unknown id":     `{"id":"j-nope","at":"` + other.Format(time.RFC3339) + `"}`,
 		"nothing to do":  `{"id":"` + id + `"}`,
-		"at and cron":    `{"id":"` + id + `","at":"2026-10-10T13:00:00-07:00","cron":"0 9 * * *"}`,
+		"at and cron":    `{"id":"` + id + `","at":"` + other.Format(time.RFC3339) + `","cron":"0 9 * * *"}`,
 		"unparseable at": `{"id":"` + id + `","at":"next tuesdayish"}`,
 	} {
 		res, err := h.Call(ctx, "schedule_update", json.RawMessage(args))
@@ -186,7 +215,7 @@ func TestUpdateRejectsBadInput(t *testing.T) {
 	}
 	// The original is untouched by every one of those refusals.
 	list, _ := h.Call(ctx, "schedule_list", json.RawMessage(`{}`))
-	if !strings.Contains(list.Text, "3:30pm") || !strings.Contains(list.Text, "Water the plants") {
+	if !strings.Contains(list.Text, when(t, at)) || !strings.Contains(list.Text, "Water the plants") {
 		t.Fatalf("a refused update disturbed the reminder:\n%s", list.Text)
 	}
 }
@@ -195,13 +224,14 @@ func TestUpdateRejectsBadInput(t *testing.T) {
 // edit expressed as a create can't silently fork (D-054, D-063).
 func TestCreateRefusesADuplicateOfAPendingReminder(t *testing.T) {
 	h, _, ctx := setup(t)
+	first, second := soon(0), soon(-150*time.Minute)
 	res, _ := h.Call(ctx, "schedule_create", json.RawMessage(
-		`{"prompt":"Text Darren about if he can meet for basketball","at":"2026-10-10T15:30:00-07:00"}`))
-	id := strings.Fields(strings.TrimPrefix(res.Text, "scheduled "))[0]
+		`{"prompt":"Text Darren about if he can meet for basketball","at":"`+first.Format(time.RFC3339)+`"}`))
+	id := createdID(t, res.Text)
 
 	// Same words, different punctuation and case, different time.
 	dup, err := h.Call(ctx, "schedule_create", json.RawMessage(
-		`{"prompt":"text darren about if he can meet for basketball!","at":"2026-10-10T13:00:00-07:00"}`))
+		`{"prompt":"text darren about if he can meet for basketball!","at":"`+second.Format(time.RFC3339)+`"}`))
 	if err == nil && !dup.IsError {
 		t.Fatalf("the duplicate was accepted: %q", dup.Text)
 	}
@@ -218,7 +248,7 @@ func TestCreateRefusesADuplicateOfAPendingReminder(t *testing.T) {
 	// A genuinely different reminder still goes through: the refusal is per
 	// argument set, not a block on the tool.
 	if res, err := h.Call(ctx, "schedule_create", json.RawMessage(
-		`{"prompt":"Book the badminton court for Thursday","at":"2026-10-10T13:00:00-07:00"}`)); err != nil || res.IsError {
+		`{"prompt":"Book the badminton court for Thursday","at":"`+second.Format(time.RFC3339)+`"}`)); err != nil || res.IsError {
 		t.Fatalf("an unrelated reminder was refused: %+v, %v", res, err)
 	}
 }
