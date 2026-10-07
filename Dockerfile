@@ -18,21 +18,31 @@ RUN go vet ./...
 # run against the grep the runtime image ships, not the BusyBox one this base
 # comes with. Invoke explicitly: docker build --target test . ---
 FROM builder AS test
-RUN apk add --no-cache grep
-RUN /usr/bin/grep --version | head -1 \
-  && /usr/bin/grep --version | head -1 | grep -q GNU \
-  || { echo "the grep package did not provide GNU grep" >&2; exit 1; }
-RUN TOBEE_GREP_BINS=/usr/bin/grep go test ./...
+# The path is discovered, never assumed: Alpine's grep package does not land in
+# /usr/bin, and hardcoding a path failed this build once. What matters is that
+# the grep PATH resolves to is GNU, so assert exactly that and print enough on
+# failure to see what is actually installed.
+RUN apk add --no-cache grep \
+ && gnu="$(command -v grep)" \
+ && echo "grep on PATH: $gnu" \
+ && "$gnu" --version | head -1 \
+ && "$gnu" --version | head -1 | grep -qF "GNU grep" \
+ || { echo "grep on PATH is not GNU grep:" >&2; command -v grep >&2; apk info -L grep >&2; exit 1; }
+RUN TOBEE_GREP_BINS="$(command -v grep)" go test ./...
 
 # --- runtime image ---
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata grep
-
-# Search runs this binary (D-061). Named explicitly because BusyBox also
-# provides /bin/grep, which has no -I; depending on PATH order between the two
-# is a silent way to ship the wrong one. GREP_BIN in .env.prod overrides it.
-ENV GREP_BIN=/usr/bin/grep
+# Search shells out to grep (D-061). BusyBox provides a grep too and it has no
+# -I, so the package alone is not enough: assert at build time that the grep
+# PATH resolves to really is GNU. The image is immutable, so an assertion here
+# fixes what the process will resolve at runtime without naming a path that
+# differs between distributions. GREP_BIN overrides it; boot re-checks either way.
+RUN apk add --no-cache ca-certificates tzdata grep \
+ && echo "grep on PATH: $(command -v grep)" \
+ && grep --version | head -1 \
+ && grep --version | head -1 | grep -qF "GNU grep" \
+ || { echo "the grep package did not put GNU grep on PATH:" >&2; command -v grep >&2; apk info -L grep >&2; exit 1; }
 
 WORKDIR /app
 

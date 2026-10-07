@@ -18,7 +18,7 @@ tobee is a self-hosted personal AI assistant, written in Go as one long-running 
   - Dev: LM Studio on the host (`docker-compose.yml`, `host.docker.internal:1234`).
   - Prod: Ollama container with an Nvidia GPU (`docker-compose.prod.yml`). The Jenkinsfile deploys `qwen2.5:7b`.
 - **Container images:** build on `golang:1.25-alpine`, run on `alpine:3.20`.
-- **CI/CD:** Jenkins (`Jenkinsfile`). Stages: lint, preflight GPU check, `compose up`, health check, boot-log smoke test (`tobee is running` and `discord: connected`), and a Discord webhook notification.
+- **CI/CD:** Jenkins (`Jenkinsfile`). Stages: lint, test, preflight GPU check, `compose up`, health check, boot-log smoke test (`tobee is running` and `discord: connected`), and a Discord webhook notification. Lint and test are Dockerfile targets, so they run against the image rather than the agent's Go toolchain.
 
 ## Directory Structure
 
@@ -71,11 +71,17 @@ go build ./cmd/tobee
 # Test
 go test ./...
 
-# Format / lint (same checks CI runs)
+# Search runs a real grep (D-061), so its behaviour depends on which grep is
+# installed. Replay the battery against a specific binary — this is how to
+# check a deployment target, and a binary named here must pass, not skip:
+TOBEE_GREP_BINS=/usr/bin/grep go test ./internal/sandboxfs/ -run Conformance -v
+
+# Format / lint / test (same checks CI runs)
 gofmt -w .                      # format
 gofmt -l .                      # must print nothing
 go vet ./...
 docker build --target lint .    # CI lint stage
+docker build --target test .    # CI test stage: go test ./... against the image's GNU grep
 
 # Prod (Linux + Nvidia GPU)
 cp .env.prod.example .env.prod
@@ -97,7 +103,7 @@ docker compose -f docker-compose.prod.yml logs -f tobee
 
 ### Go style
 
-- Idiomatic Go, formatted with `gofmt`. CI fails on `gofmt -l` output or `go vet` errors.
+- Idiomatic Go, formatted with `gofmt`. CI fails on `gofmt -l` output, `go vet` errors, or a failing test.
 - Comments explain *why*. Keep them short. Doc-comment exported symbols whose names aren't self-explanatory.
 - Wrap errors at package boundaries: `fmt.Errorf("<context>: %w", err)`.
 - Log with `log/slog` using structured fields. Prefix messages with the subsystem: `"agent: …"`, `"discord: …"`, `"jobs: …"`.

@@ -88,7 +88,7 @@ Read from `.env` (dev) or `.env.prod` (prod compose). `.env.example` has every v
 | `AI_MAX_TOKENS` / `AI_TIMEOUT` | no | `2048` / `10m` | Per-completion token cap and HTTP timeout. |
 | `AGENT_STRATEGY` | no | `react` | Reasoning strategy: the tool-calling agent loop. |
 | `AGENT_TURN_BUDGET` | no | `2m` | Wall-clock cap per turn, and the only hard bound on one turn's work — tool calls are not counted. |
-| `GREP_BIN` | no | `grep` (`/usr/bin/grep` in the image) | Binary behind `memory_grep` / `workspace_grep`, run inside the sandbox. Boot runs a real search with it and refuses to start if the results are wrong, so a variant that lacks `-I` (BusyBox) fails immediately instead of mid-turn. |
+| `GREP_BIN` | no | `grep` | Binary behind `memory_grep` / `workspace_grep`, run inside the sandbox; resolved on `PATH` unless given a path. Boot runs a real search with it and refuses to start if the results are wrong, so a variant that lacks `-I` (BusyBox) fails immediately instead of mid-turn. The image additionally asserts at build time that its `grep` is GNU. |
 | `TZ` | no | UTC | IANA zone the instance thinks in — reminders, `<context>`, status reports, logs. A container has no zone, so leaving this unset means UTC. |
 | `IDENTITY_<NAME>` | no | — | Links one person's accounts, e.g. `discord:2643…,email:me@example.com`, so sessions and memory follow them across connectors. |
 | `AGENT_REFLECT` | no | `true` | When a conversation with failures ends, draw up to 3 lessons from it into `memory://user/.tobee/lessons.md`, which is pinned into every prompt. One extra model call per such conversation. |

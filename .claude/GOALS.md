@@ -36,14 +36,16 @@
 
 ## Operational Environment
 
-- **Prod:** one Linux host with an Nvidia GPU, deployed by Jenkins via `docker-compose.prod.yml`:
+- **Prod:** one Ubuntu host with an Nvidia GPU, deployed by Jenkins via `docker-compose.prod.yml`:
   - containers: `ollama`, a one-shot `ollama-pull`, and `tobee`
+  - tobee runs inside its own Alpine image (`build: .`), so the host's userland is not what the process sees — the grep that backs search is the image's, not Ubuntu's (D-061)
   - memory and jobs persist at the host path `/pwspool/software/tobee` (mounted at `/app/data`)
   - models persist in the `ollama-models` volume
 - **Dev:** Docker Compose (`docker-compose.yml`) or `go run ./cmd/tobee`, pointed at LM Studio on the developer's machine.
 - **External dependencies:**
   - Discord gateway and REST API (the bot needs the privileged Message Content intent)
   - an OpenAI-compatible LLM that supports structured output (local Ollama in prod today)
+  - GNU `grep` in the runtime image, which backs every search (D-061). The only binary tobee shells out to; boot runs a real search and refuses to start if it misbehaves
   - optional: an IMAP/SMTP mailbox; external MCP servers
 - **No inbound ports.** tobee exposes no HTTP server or healthcheck. CI checks health by container status and the `tobee is running` log line.
 
@@ -51,7 +53,7 @@
 
 Deferred until there is a concrete need (D-004 and later entries):
 
-- Vector or semantic search over memory. Substring search plus `INDEX.md` is the recall model.
+- Vector or semantic search over memory. `grep` over the files plus `INDEX.md` is the recall model (D-061); patterns are literal by default, with opt-in regex and loose matching.
 - Memory-consolidation passes over the fact tiers. Reflection is now in scope, but only over a closed session's recorded failures, into the capped `lessons.md` (D-052).
 - Exposing tobee itself as an MCP server. tobee is an MCP host only.
 - Streaming or progressive replies. Progress is shown through plan-message edits and reactions.
@@ -70,10 +72,11 @@ Explicitly rejected:
 
 ## Current Operational Priorities
 
-From the open questions in the former decision log and the latest commits (2026-09-29):
+From the open questions in the former decision log and the latest commits (2026-10-06):
 
 1. **Confirm structured output in prod** (D-041). The cause of the text-written tool calls was found on 2026-09-28: Ollama's OpenAI endpoint ignores `tool_choice`. Every call now uses a JSON-schema `response_format`, which Ollama enforces by grammar. Verify on the prod Ollama and `qwen2.5:7b` that `agent: PROTOCOL VIOLATION` no longer appears and that tool choice is sensible.
 2. **Watch the agent loop on the prod model** (D-043): does `qwen2.5:7b` reply directly to chit-chat, look things up before answering, and call `plan` only for real multi-step work?
 3. **Validate the MCP platform in prod** (2026-09-28). Confirm `qwen2.5:7b` handles the renamed tools and `user_ask`. Test the email connector against a real mailbox. Watch tool-choice accuracy as external servers are added.
+4. **Run the suite against GNU grep** (D-061, 2026-10-06). `docker build --target test .` executes `go test ./...` against the image's grep; it has not been run yet because the Docker daemon was down. Until it has, GNU grep is the one variant search has never been exercised on — BSD grep passes on macOS, and the boot check would catch a broken binary at startup rather than silently.
 
 TODO: Confirm these priorities and add any roadmap items not recorded in the repo.
